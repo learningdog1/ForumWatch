@@ -108,3 +108,22 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 - **D8 已落地**：三 tab（监控台/今日回顾/设置）、设置八卡片（关键词/Telegram/AI 模型/监控模式/每日总结/轮询/网络/行为）、命中列表来源徽标 + 字面/语义命中方式徽标 + 语义理由、AI 状态块看 effectiveMode 与 degraded 三态。
 - **坑清单 ①–⑧ 全部兑现**：含 ⑤ headless.ts 同款接线 AI 能力（aiClient/evaluator/hitsStore/DailyReportService）。
 - **审查后细化（第二轮代码审查）**：日报开关 `ai.dailyReport.enabled` 定为**功能总开关**——关闭时定时 tick 到点不生成（不调 LLM、不写文件、不消耗 attempts；「今日回顾 → 立即生成」的手动 generate 不受影响）。verdict 内存 Map 已按坑⑥补实现（语义命中×推送失败 → 缓存 reason，下轮绕过 AI 批直接按已判 hit 重试，成功/静音清除；轮末对滚出首页的键统一清理，与 pendingNotifyErrors 两套机制不串）。迁移拷贝顺序定为 **seen → state → config**（config.json 存在即「已迁移」标记，标记最后落位，防 kill 窗口内 seen/state 永久不补拷）。空 interests 时引擎侧直接跳过 AI 批（不计数）；手动 resume（IPC/托盘）desired 翻转后补跑一次日报 tick。
+
+---
+
+# 第三轮决策（2026-09-19，旧帖过滤 + AI 锐评，ultrabrain 裁定）
+
+**D9 旧帖过滤 = id 阈值窗口（否决 sort 参数）**：问题——NodeSeek 首页按**最后回复时间**排序，旧帖被回复顶回首页后对 seen 集是"新帖"，会被评估/推送（同一公告反复打扰）。首选方案 `?sort=createTime` 实测**被服务端忽略**：带与不带参数背靠背抓取对比，返回 id 序列逐位一致（同为回复序）——排序参数是摆设，此路不通。改为 engine 侧阈值窗口：
+
+- **能力声明 `SourceAdapter.creationOrderedIds?: true`**：adapter 声明"本来源帖子 id 随创建单调递增"（NodeSeek 满足）；未声明/非 true 的来源整段过滤零行为变化（未来非数字 id 来源自然旁路——非数字 id 既不进阈值计算也不被过滤）。
+- **per-source 阈值 `maxSeenTopicId`** 存 `state.json` 的 sources 条目里；**schemaVersion 不变（仍 2）**——字段宽容收编：旧 v2 文件缺该字段读作 null（合法），单条目值非法只把该条目该字段归 null，不判整文件损坏（阈值丢了可重建，不值得核弹 state）。
+- **过滤语义**：unseen 且数值 id ≤ 阈值的帖子视为"被回复顶起的旧帖"，入 seen 不推送不评估（先于置顶/排除词分支）；轮末阈值推进 `max(旧阈值, pageMax)`，**只升不降**（pageMax 低于旧阈值 = 高 id 帖滚出首页，正常现象不回撤；下降时另发 warn 日志作单调性异常观测）。
+- **ultrabrain 修正（豁免集 `prevUnseenKeys`）**：上一轮就在 unseen 处理流里的帖子（推送失败重试中 / 语义未决重评中——它们不入 seen）必须豁免过滤——轮末阈值会追上它们的 id，不豁免会被阈值永久吞掉重试机会。实现：轮末把"本轮 unseen 键集"整集替换为下一轮的豁免集（生命周期对齐 pruneRetryMaps，滚出首页自然消失）。
+- **存量升级静默初始化轮**：baselineDone=true 但阈值缺失（旧版升级用户首跑），本轮整页 unseen 全部入 seen、写阈值、不推送不评估、正常收尾（不算失败）；否则升级后第一轮会把满页旧帖当新帖推送——正是本特性要修的 bug 的存量版。pageMax 为 null（整页无合法数值 id，对 NodeSeek 属异常形态）时不初始化，落回正常管线（阈值仍 null = 不过滤）。
+- **首启基线同轮初始化阈值**：基线轮末把整页 max id 与 baselineDone 同 patch 原子写入；seen 损坏补基线（rebuiltFromCorrupt）时**阈值不重置**——阈值独立于 seen 存储，历史高点保留（取 max(旧阈值, pageMax)，防当前页拉低）。
+- **已知接受**：id 乱序（同轮内低 id 新帖出现在高 id 之后）会被误当旧帖吞掉——偶发漏报换误报归零，接受；换来的是"回复顶起旧帖重复推送"的确定性 bug 被消灭。
+- **连带修复**：headless `--once` 模式的 adapter 包装层漏传 `creationOrderedIds` 能力标志——engine 看不到声明，`--once` 下旧帖过滤整段失效；包装层已补透传。
+
+**D10 AI 锐评**：命中帖推送前让 LLM 对帖子标题写一句中文锐评（≤60 字，犀利机智不辱骂），附在 TG 消息里。**五道闸**全过才真调 LLM，否则 commentary=null 且零成本：① 装配方注入了 commentaryGenerator（旧装配/测试不注入 = 行为与升级前完全一致）；② `cfg.ai.commentary.enabled === true`（配置恒存在恒布尔，**默认开**——sanitize 侧唯一默认开的布尔）；③ provider 三项齐备；④ 总配额 callsToday < 300（与语义评估共用桶）；⑤ 子限额 commentaryToday < 100（超出**静默降级**为无锐评推送、不 log、无 degraded 态——100 子限额保证语义评估在总桶至少剩 200，无需调序）。**计数语义（如实写进文档）**：真调用即双计数（callsToday++ 且 commentaryToday++），**成败皆计数**；CommentGenerator 成败皆缓存（成功缓存文本、失败缓存 null 负缓存）+ 在途 Promise 去重——推送失败重试轮 generate 被再次调用并**再次计数**，但内部缓存保证不再打 LLM（重试不重打 LLM 但重复计数，这是接受的口径）。prune 与 engine 的 pruneRetryMaps 同点轮末清理（只保留本轮仍在页面上的键）。**HitRecord.commentary 三态契约**：`undefined`（旧 hits/*.jsonl 行，消费方必须容忍，等价无锐评）/ `null`（新记录：未启用/未配置/超限/生成失败）/ `string`（成功）。**呈现**：TG 消息「🎯 命中」行之后插 `💬 锐评: {text}`（转义，空/null 整行省略）；日报把命中携带的 commentary 用一句话引用进要点；监控台 AI 状态块并列展示 `锐评 N/100`。装配：runtime.ts 与 headless.ts 均以同一 AiProvider 实例构造 CommentGenerator 注入 engine（与 evaluator 同款注入风格）；生成器**绝不抛**（一切异常内部消化为 null——锐评绝不拖垮推送主链路），user 只送标题/分类/作者三字段 JSON，8s 超时、max_tokens 120、纯文本回复不用 jsonMode。
+
+**D11 evaluator 解析兼容（verdicts → results → 兜底扫描）**：线上实测有模型无视提示词用 `{"results":[...]}` 回包，旧代码只认 `verdicts` 键 → bad-json → 整批未决每轮重评（烧配额 + 刷错误日志）。修复：裁决数组按兼容顺序定位——显式键 `verdicts` → 显式键 `results` → **兜底扫描**（顶层所有数组值里第一个含合法 `{key, hit}` 元素的数组）；任何候选必须至少含 1 个合法元素才算命中（防"解析成功但零裁决"的静默未决）。都定位不到才抛 bad-json，**错误消息带实际顶层键名**（便于排查模型又换了什么键名）。prompt 侧同步收紧：给出精确输出示例并**钉死键名 `verdicts`**（示例是对换键名行为最直接的免疫）。

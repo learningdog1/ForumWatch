@@ -475,11 +475,15 @@ textarea,
   color: var(--text-3);
 }
 
-/* AI 块：生效模式徽标 · 今日调用 · 降级提示 · 最近错误 */
+/* AI 块：生效模式徽标 · 今日调用 · 锐评子限额 · 降级提示 · 最近错误 */
 .ai-row {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+/* 两行计数（今日调用 / 锐评）堆叠时的行距 */
+.ai-row + .ai-row {
+  margin-top: var(--space-1);
 }
 .ai-mode {
   flex: none;

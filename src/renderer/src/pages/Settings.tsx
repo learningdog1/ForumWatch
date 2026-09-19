@@ -36,6 +36,7 @@ interface Draft {
   interests: string[]
   dailyEnabled: boolean
   dailyTime: string
+  commentaryEnabled: boolean
 }
 
 type Msg = { kind: 'ok' | 'err' | 'warn' | 'pending' | 'muted'; text: string }
@@ -74,7 +75,8 @@ function toDraft(c: AppConfig): Draft {
     matchMode: c.ai.matchMode,
     interests: [...c.ai.interests],
     dailyEnabled: c.ai.dailyReport.enabled,
-    dailyTime: c.ai.dailyReport.timeHHMM
+    dailyTime: c.ai.dailyReport.timeHHMM,
+    commentaryEnabled: c.ai.commentary.enabled
   }
 }
 
@@ -165,8 +167,8 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
           matchMode: draft.matchMode,
           interests: draft.interests,
           dailyReport: { enabled: draft.dailyEnabled, timeHHMM: draft.dailyTime },
-          // 锐评开关本页暂无控件（UI 留给后续轮次）：透传已保存值，防止保存时被重置
-          commentary: { enabled: saved.ai.commentary.enabled }
+          // 锐评开关（本页「AI 模型」卡的「推送锐评」控件）
+          commentary: { enabled: draft.commentaryEnabled }
         }
       }
       const r = await window.api.saveConfig(cfg)
@@ -401,6 +403,22 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
             {aiTestMsg != null && (
               <span className={`feedback ${aiTestMsg.kind}`}>{aiTestMsg.text}</span>
             )}
+          </div>
+        </Field>
+        <Field
+          label="推送锐评"
+          hint="命中推送时让 AI 写一句锐评附在消息里。每次命中额外调用一次 LLM（每日上限 100 次，与语义评估共享每日 300 次总额度）；关闭后推送恢复纯净格式。"
+        >
+          <div className="switch-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={draft.commentaryEnabled}
+              className="switch"
+              aria-label="推送锐评"
+              onClick={() => patch({ commentaryEnabled: !draft.commentaryEnabled })}
+            />
+            <span className="feedback muted">{draft.commentaryEnabled ? '开启' : '关闭'}</span>
           </div>
         </Field>
       </section>

@@ -1,7 +1,7 @@
 /**
  * 状态卡：大号状态徽标（与 deriveTrayLabel 同优先级派生）+ 四格指标
  * + 来源状态（per-source：健康点 / 最近成功 / 退避倒计时）
- * + AI 状态（生效模式徽标 / 降级提示 / 今日调用 / 最近错误）
+ * + AI 状态（生效模式徽标 / 降级提示 / 今日调用 + 锐评子限额 / 最近错误）
  * + 操作条（子卡底部右对齐：暂停 danger / 测试灰描边 / 立即轮询主按钮）。
  * 下次轮询在已暂停时按契约忽略 nextPollAt（pause 后它保留旧值），显示 "—"。
  *
@@ -60,7 +60,7 @@ function SourceRow(props: { s: SourceStatus; now: number }) {
   )
 }
 
-/** AI 运行态块：生效模式 + 今日调用 + 降级提示 + 最近错误 */
+/** AI 运行态块：生效模式 + 今日调用（含锐评）+ 锐评子限额 + 降级提示 + 最近错误 */
 function AiBlock(props: { ai: AiRuntimeStatus }) {
   const { ai } = props
   const semanticActive = ai.effectiveMode !== 'literal'
@@ -74,8 +74,16 @@ function AiBlock(props: { ai: AiRuntimeStatus }) {
         <span className={`ai-mode${semanticActive ? ' ai' : ''}`}>
           {matchModeLabel(ai.effectiveMode)}
         </span>
-        <span className="ai-calls num" title="今日语义评估调用 / 每日上限">
-          今日 {ai.callsToday}/{ai.dailyLimit}
+        <span className="ai-calls num" title="今日 AI 调用（语义评估 + 锐评，锐评一次计入两者）/ 每日总额度">
+          今日调用 {ai.callsToday}/{ai.dailyLimit}
+        </span>
+      </div>
+      <div className="ai-row">
+        <span
+          className="ai-calls num"
+          title="今日锐评调用 / 每日子上限（超出当日静默降级为无锐评推送，不算降级态）"
+        >
+          锐评 {ai.commentaryToday ?? 0}/100
         </span>
       </div>
       {ai.degraded === 'unconfigured' && (

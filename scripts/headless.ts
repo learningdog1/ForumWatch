@@ -13,11 +13,13 @@
  * telegram。环境变量 `NSM_BOT_TOKEN` / `NSM_CHAT_ID` 可快速注入 telegram 凭据
  * （只进内存不落盘）。
  *
- * AI 能力（D4/D5，与桌面装配方同款接线）：第三 aiClient（defaultTimeoutMs 30s，
- * proxyScope='all' 时走代理）→ AiProvider / SemanticEvaluator / HitsStore /
- * DailyReportService（reportsDir=<dir>/reports）；engine deps 注入 evaluator +
- * hitsStore。常驻模式起日报自循环定时器（sleep ∈ [60s, 30min]，复用 nextCheckAt）；
- * `--once` 模式跳过日报（单轮冒烟不产文件、不推送）。
+ * AI 能力（D4/D5 + 第三轮锐评，与桌面装配方同款接线）：第三 aiClient
+ * （defaultTimeoutMs 30s，proxyScope='all' 时走代理）→ AiProvider /
+ * SemanticEvaluator / CommentGenerator / HitsStore / DailyReportService
+ * （reportsDir=<dir>/reports）；engine deps 注入 evaluator +
+ * commentaryGenerator + hitsStore。常驻模式起日报自循环定时器（sleep ∈
+ * [60s, 30min]，复用 nextCheckAt）；`--once` 模式跳过日报（单轮冒烟不产文件、
+ * 不推送）。
  *
  * 限制（有意为之）：配置为启动时快照，headless 不做热更新（桌面装配方经 IPC 负责）；
  * 改配置请重启进程。
@@ -28,6 +30,7 @@ import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
 import { HttpClient, redactProxyUrl } from '../src/main/net/http'
 import { AiProvider } from '../src/main/ai/provider'
 import { SemanticEvaluator } from '../src/main/ai/evaluator'
+import { CommentGenerator } from '../src/main/ai/commentary'
 import { DailyReportService } from '../src/main/ai/daily-report'
 import { FileSeenStore } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
@@ -164,12 +167,15 @@ async function main(): Promise<number | null> {
     getConfig: () => effective.telegram
   })
 
-  // ---- AI 装配（D4/D5）：provider / evaluator / hits / 日报服务 ----------------
+  // ---- AI 装配（D4/D5 + 第三轮锐评）：provider / evaluator / 锐评 / hits / 日报 -
   const aiProvider = new AiProvider({
     post: (url, init) => aiClient.post(url, init),
     getConfig: () => effective.ai.provider
   })
   const evaluator = new SemanticEvaluator({ provider: aiProvider })
+  // 锐评生成器与 evaluator 共用同一 provider 实例；provider 未配置时由
+  // engine 的闸拦下（装配层无需判断，与 evaluator 同款无条件注入风格）
+  const commentaryGenerator = new CommentGenerator({ provider: aiProvider })
   const hitsStore = new HitsStore(join(dir, HITS_DIR_NAME))
   const reportService = new DailyReportService({
     provider: aiProvider,
@@ -247,6 +253,7 @@ async function main(): Promise<number | null> {
     scheduler,
     logger,
     semanticEvaluator: evaluator,
+    commentaryGenerator,
     hitsStore,
     onStatus: printStatus,
     ...(args.once ? { onHit: (h: HitRecord) => onceHits.push(h) } : {})

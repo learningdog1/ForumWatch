@@ -5,10 +5,11 @@
  *   logger（userData/logs）→ ConfigStore → 三 HttpClient（按 proxyScope 路由：
  *   'telegram-only' → site/ai 恒直连、tg 走代理；'all' → 都带；aiClient 默认
  *   超时 30s，D6）→ HtmlSourceAdapter / TelegramNotifier → AiProvider /
- *   SemanticEvaluator / DailyReportService（reportsDir=<userData>/reports）→
- *   FileSeenStore / FileEngineState / HitsStore（<userData>/hits）→
- *   PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑 engine.noteScheduled，
- *   不绑则 nextPollAt 恒 null）→ MonitorEngine（deps 注入 evaluator + hitsStore）。
+ *   SemanticEvaluator / CommentGenerator / DailyReportService（reportsDir=
+ *   <userData>/reports）→ FileSeenStore / FileEngineState / HitsStore（<userData>/
+ *   hits）→ PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑
+ *   engine.noteScheduled，不绑则 nextPollAt 恒 null）→ MonitorEngine（deps 注入
+ *   evaluator + commentaryGenerator + hitsStore）。
  *
  * 配置热更新：engine 每轮 pollOnce 调 getConfig()（→ store.get()），IPC saveConfig
  * 落盘后 store 内存值即换新；网络副作用由 applyConfigSideEffects 同步（三个
@@ -33,6 +34,7 @@ import { createLogger, type Logger } from '../logger'
 import { HttpClient, redactProxyUrl } from '../net/http'
 import { AiProvider } from '../ai/provider'
 import { SemanticEvaluator } from '../ai/evaluator'
+import { CommentGenerator } from '../ai/commentary'
 import { DailyReportService } from '../ai/daily-report'
 import { FileSeenStore } from '../monitor/dedup'
 import { MonitorEngine } from '../monitor/engine'
@@ -119,13 +121,16 @@ export class DesktopRuntime {
       getConfig: () => this.store.get().telegram
     })
 
-    // AI 装配（D4/D6）：provider 每次调用重读 store（热更新）；evaluator 批式评估；
-    // 日报服务读 hits JSONL、写 <userData>/reports、推送走 sendRaw、广播给渲染端
+    // AI 装配（D4/D6 + 第三轮锐评）：provider 每次调用重读 store（热更新）；
+    // evaluator 批式评估；锐评生成器与 evaluator 共用同一 provider 实例
+    // （provider 未配置时由 engine 的闸拦下，装配层无需判断）；日报服务读
+    // hits JSONL、写 <userData>/reports、推送走 sendRaw、广播给渲染端
     this.aiProvider = new AiProvider({
       post: (url, init) => this.aiClient.post(url, init),
       getConfig: () => this.store.get().ai.provider
     })
     const evaluator = new SemanticEvaluator({ provider: this.aiProvider })
+    const commentaryGenerator = new CommentGenerator({ provider: this.aiProvider })
     const hitsStore = new HitsStore(join(this.userDataDir, HITS_DIR_NAME))
     this.reportService = new DailyReportService({
       provider: this.aiProvider,
@@ -160,6 +165,7 @@ export class DesktopRuntime {
       scheduler,
       logger: this.logger,
       semanticEvaluator: evaluator,
+      commentaryGenerator,
       hitsStore,
       onStatus: (s) => this.emitStatus(s),
       onHit: (h) => this.emitHit(h)
