@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { HitList } from '../components/HitList'
 import { LogView } from '../components/LogView'
 import { StatusCard } from '../components/StatusCard'
+import { IconPause, IconPlay, IconRefresh, IconSend } from '../components/icons'
 import type { ApiState } from '../hooks/useApi'
 import { useNow } from '../hooks/useNow'
 
@@ -51,7 +52,8 @@ export function Dashboard(props: ApiState) {
       <section className="card">
         <div className="actions">
           <button type="button" className="btn" disabled={busy} onClick={() => void control(paused ? 'resume' : 'pause')}>
-            {paused ? '▶ 恢复监控' : '⏸ 暂停监控'}
+            {paused ? <IconPlay size={14} /> : <IconPause size={14} />}
+            {paused ? '恢复监控' : '暂停监控'}
           </button>
           <button
             type="button"
@@ -60,10 +62,12 @@ export function Dashboard(props: ApiState) {
             title={paused ? '已暂停：先恢复监控' : '忽略等待，立即补一轮轮询'}
             onClick={() => void control('runNow')}
           >
-            🔄 立即轮询
+            <IconRefresh size={14} />
+            立即轮询
           </button>
           <button type="button" className="btn" disabled={busy} onClick={() => void sendTest()}>
-            ✈ 发送测试通知
+            <IconSend size={14} />
+            发送测试通知
           </button>
           {feedback != null && <span className={`feedback ${feedback.kind}`}>{feedback.text}</span>}
         </div>

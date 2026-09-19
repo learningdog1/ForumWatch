@@ -5,14 +5,18 @@
  * 前端校验只提示不拦截（与主进程 sanitize 对齐）：
  * - 轮询间隔 <15 → 红字"最低 15 秒…"（sanitize 会钳到 15）
  * - 代理非 http(s):// 或 socks5(h):// 前缀 → 红字提醒（sanitize 会置空）
+ * - 兴趣描述超过 20 条 → 橙字提示（不硬拦）
  *
- * "发送测试消息"用的是**已保存**配置：表单 dirty 时先提示保存而非直接发送。
- * dirty 状态通过 onDirtyChange 上报给外壳（离开 tab 前的行内提示用）。
+ * 保存走 AppConfig v2 全量透传：sources 与 ai 段都由本页表单构建
+ * （ai 段来自 AI 模型/监控模式/每日总结三张卡，sources 透传已保存值）。
+ * "发送测试消息 / 测试连接"用的都是**已保存**配置：表单 dirty 时先提示保存
+ * 而非直接发送。dirty 状态通过 onDirtyChange 上报给外壳。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { AppConfig, ProxyScope } from '@shared/types'
+import type { AppConfig, MatchMode, ProxyScope } from '@shared/types'
 import { Field } from '../components/Field'
 import { KeywordTagInput } from '../components/KeywordTagInput'
+import { IconBolt, IconEye, IconEyeOff, IconSend } from '../components/icons'
 import { formatClock } from '../lib/time'
 
 interface Draft {
@@ -25,11 +29,33 @@ interface Draft {
   chatId: string
   notifyEnabled: boolean
   launchAtLogin: boolean
+  aiBaseUrl: string
+  aiApiKey: string
+  aiModel: string
+  matchMode: MatchMode
+  interests: string[]
+  dailyEnabled: boolean
+  dailyTime: string
 }
 
 type Msg = { kind: 'ok' | 'err' | 'warn' | 'pending' | 'muted'; text: string }
 
 const PROXY_SCHEME_RE = /^(https?|socks5h?):\/\//i
+
+/** 常用 AI 预设（点击填充 baseUrl/model，不自动保存、不碰 apiKey） */
+const AI_PRESETS: { name: string; baseUrl: string; model: string }[] = [
+  { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  { name: 'Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k2-0711-preview' },
+  { name: 'GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.7' }
+]
+
+const INTERESTS_MAX = 20
+
+const MATCH_MODES: { value: MatchMode; title: string; desc: string }[] = [
+  { value: 'literal', title: '字面匹配', desc: '按关键词包含判断；快、零成本、表达精确' },
+  { value: 'semantic', title: '语义匹配', desc: 'AI 按兴趣描述判断相关性；能捕捉同义表达，需要配置 AI 模型' },
+  { value: 'both', title: '字面 + 语义（任一命中）', desc: '两档叠加，先字面后 AI，任一命中即推送' }
+]
 
 function toDraft(c: AppConfig): Draft {
   return {
@@ -41,7 +67,14 @@ function toDraft(c: AppConfig): Draft {
     botToken: c.telegram.botToken,
     chatId: c.telegram.chatId,
     notifyEnabled: c.notifyEnabled,
-    launchAtLogin: c.launchAtLogin
+    launchAtLogin: c.launchAtLogin,
+    aiBaseUrl: c.ai.provider.baseUrl,
+    aiApiKey: c.ai.provider.apiKey,
+    aiModel: c.ai.provider.model,
+    matchMode: c.ai.matchMode,
+    interests: [...c.ai.interests],
+    dailyEnabled: c.ai.dailyReport.enabled,
+    dailyTime: c.ai.dailyReport.timeHHMM
   }
 }
 
@@ -53,6 +86,9 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
   const [testing, setTesting] = useState(false)
   const [testMsg, setTestMsg] = useState<Msg | null>(null)
   const [showToken, setShowToken] = useState(false)
+  const [aiTesting, setAiTesting] = useState(false)
+  const [aiTestMsg, setAiTestMsg] = useState<Msg | null>(null)
+  const [showApiKey, setShowApiKey] = useState(false)
 
   // onDirtyChange 上报：ref 镜像避免回调身份变化引起重复触发；卸载时归位 false
   const onDirtyRef = useRef(props.onDirtyChange)
@@ -95,13 +131,22 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
   const proxyTrim = (draft?.proxyUrl ?? '').trim()
   const proxySchemeBad = proxyTrim !== '' && !PROXY_SCHEME_RE.test(proxyTrim)
 
+  // 表单口径的 "AI 已配置"（与主进程 Provider 三项齐备判定一致）
+  const aiConfigured =
+    draft != null &&
+    draft.aiBaseUrl.trim() !== '' &&
+    draft.aiApiKey.trim() !== '' &&
+    draft.aiModel.trim() !== ''
+  const semanticMode = draft != null && draft.matchMode !== 'literal'
+  const interestsOver = draft != null && draft.interests.length > INTERESTS_MAX
+
   async function save(): Promise<void> {
     if (draft == null || saved == null) return
     setSaving(true)
     try {
       const cfg: AppConfig = {
-        // sources / ai 本页暂不可编辑（AI 设置 UI 属后续轮次）：透传已保存值，
-        // 只覆盖本表单管理的字段
+        // sources 透传已保存值（v2 仅 nodeseek，来源编辑 UI 留给后续轮次）；
+        // ai 段由本页三张 AI 卡构建，其余字段覆盖为本表单管理的值
         ...saved,
         includeKeywords: draft.includeKeywords,
         excludeKeywords: draft.excludeKeywords,
@@ -110,7 +155,17 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
         proxyScope: draft.proxyScope,
         telegram: { botToken: draft.botToken.trim(), chatId: draft.chatId.trim() },
         notifyEnabled: draft.notifyEnabled,
-        launchAtLogin: draft.launchAtLogin
+        launchAtLogin: draft.launchAtLogin,
+        ai: {
+          provider: {
+            baseUrl: draft.aiBaseUrl.trim(),
+            apiKey: draft.aiApiKey.trim(),
+            model: draft.aiModel.trim()
+          },
+          matchMode: draft.matchMode,
+          interests: draft.interests,
+          dailyReport: { enabled: draft.dailyEnabled, timeHHMM: draft.dailyTime }
+        }
       }
       const r = await window.api.saveConfig(cfg)
       if (r.ok) {
@@ -158,6 +213,33 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
     }
   }
 
+  async function testAi(): Promise<void> {
+    if (draft == null) return
+    if (dirty) {
+      setAiTestMsg({
+        kind: 'warn',
+        text: '设置有未保存的改动：测试连接使用的是已保存的配置，请先保存再测试'
+      })
+      return
+    }
+    if (!aiConfigured) {
+      setAiTestMsg({ kind: 'err', text: '请先填写并保存 Base URL、API Key 与模型名再测试' })
+      return
+    }
+    setAiTesting(true)
+    setAiTestMsg({ kind: 'pending', text: '正在测试连接…' })
+    try {
+      const r = await window.api.testAiProvider()
+      setAiTestMsg(
+        r.ok
+          ? { kind: 'ok', text: '✓ 连接成功，模型可用' }
+          : { kind: 'err', text: `连接失败：${r.error}` }
+      )
+    } finally {
+      setAiTesting(false)
+    }
+  }
+
   if (draft == null) {
     return (
       <div className="page page-settings">
@@ -185,7 +267,7 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
             onChange={(v) => patch({ includeKeywords: v })}
           />
         </Field>
-        <Field label="排除关键词" hint="任一命中则不推送（优先于包含词）。">
+        <Field label="排除关键词" hint="任一命中则不推送（优先于包含词，也优先于 AI 判定）。">
           <KeywordTagInput
             label="排除关键词"
             placeholder="如：福利 / 广告"
@@ -214,8 +296,9 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
               className="pw-toggle"
               onClick={() => setShowToken((v) => !v)}
               aria-label={showToken ? '隐藏 Token' : '显示 Token'}
+              title={showToken ? '隐藏 Token' : '显示 Token'}
             >
-              {showToken ? '隐藏' : '显示'}
+              {showToken ? <IconEyeOff size={14} /> : <IconEye size={14} />}
             </button>
           </div>
         </Field>
@@ -232,10 +315,175 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
         <Field label="测试推送" hint="按已保存的配置向该 Chat 发送一条测试消息。">
           <div className="input-row">
             <button type="button" className="btn" disabled={testing} onClick={() => void sendTest()}>
-              {testing ? '发送中…' : '✈ 发送测试消息'}
+              <IconSend size={14} />
+              {testing ? '发送中…' : '发送测试消息'}
             </button>
             {testMsg != null && <span className={`feedback ${testMsg.kind}`}>{testMsg.text}</span>}
           </div>
+        </Field>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <span className="card-title">AI 模型</span>
+          <span className="card-title-aux">OpenAI 兼容接口</span>
+        </div>
+        <Field label="常用预设" hint="点击填入对应服务的地址与模型名（不会自动保存，也不改动 API Key）。">
+          <div className="input-row">
+            {AI_PRESETS.map((p) => (
+              <button
+                type="button"
+                key={p.name}
+                className={`btn${draft.aiBaseUrl.trim() === p.baseUrl && draft.aiModel.trim() === p.model ? ' active' : ''}`}
+                title={`${p.baseUrl} · ${p.model}`}
+                onClick={() => patch({ aiBaseUrl: p.baseUrl, aiModel: p.model })}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <Field label="Base URL" hint="OpenAI 兼容服务的 API 根地址，请求时自动拼接 /chat/completions。">
+          <input
+            className="input mono"
+            type="text"
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="https://api.deepseek.com/v1"
+            value={draft.aiBaseUrl}
+            onChange={(e) => patch({ aiBaseUrl: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="API Key"
+          hint="仅存本机 config.json（600 权限），请求只发往你填的地址；不会出现在日志里。"
+        >
+          <div className="pw-wrap">
+            <input
+              className="input mono"
+              type={showApiKey ? 'text' : 'password'}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="sk-..."
+              value={draft.aiApiKey}
+              onChange={(e) => patch({ aiApiKey: e.target.value })}
+            />
+            <button
+              type="button"
+              className="pw-toggle"
+              onClick={() => setShowApiKey((v) => !v)}
+              aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}
+              title={showApiKey ? '隐藏 API Key' : '显示 API Key'}
+            >
+              {showApiKey ? <IconEyeOff size={14} /> : <IconEye size={14} />}
+            </button>
+          </div>
+        </Field>
+        <Field label="模型名" hint="该服务下可用的模型标识。">
+          <input
+            className="input mono"
+            type="text"
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="deepseek-chat"
+            value={draft.aiModel}
+            onChange={(e) => patch({ aiModel: e.target.value })}
+          />
+        </Field>
+        <Field label="测试连接" hint="按已保存的配置发一条最小对话，验证地址 / Key / 模型可用。">
+          <div className="input-row">
+            <button type="button" className="btn" disabled={aiTesting} onClick={() => void testAi()}>
+              <IconBolt size={14} />
+              {aiTesting ? '测试中…' : '测试连接'}
+            </button>
+            {aiTestMsg != null && (
+              <span className={`feedback ${aiTestMsg.kind}`}>{aiTestMsg.text}</span>
+            )}
+          </div>
+        </Field>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <span className="card-title">监控模式</span>
+        </div>
+        <Field
+          label="匹配模式"
+          hint="语义匹配与叠加模式需要先配置 AI 模型；未配置或当日配额耗尽时自动降级为字面匹配。"
+        >
+          <div className="radios radios-card">
+            {MATCH_MODES.map((m) => (
+              <label className="radio" key={m.value}>
+                <input
+                  type="radio"
+                  name="match-mode"
+                  checked={draft.matchMode === m.value}
+                  onChange={() => patch({ matchMode: m.value })}
+                />
+                <span className="radio-text">
+                  <span className="radio-title">{m.title}</span>
+                  <span className="radio-desc">{m.desc}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </Field>
+        <Field
+          label="兴趣描述"
+          hint={
+            interestsOver ? (
+              <span className="warn">已 {draft.interests.length} 条，超过建议上限 {INTERESTS_MAX} 条——兴趣越多，AI 判定越容易发散</span>
+            ) : (
+              <span>
+                语义匹配的兴趣清单，每条一句自然语言（如「Oracle 免费 ARM 的羊毛」）。输入后回车添加。
+                {draft.interests.length > 0 && ` 当前 ${draft.interests.length}/${INTERESTS_MAX} 条。`}
+              </span>
+            )
+          }
+        >
+          {semanticMode && !aiConfigured && (
+            <div className="notice muted-notice">尚未配置 AI 模型：语义匹配将自动降级为字面匹配，直到补齐并保存 AI 配置。</div>
+          )}
+          <KeywordTagInput
+            label="兴趣描述"
+            placeholder="如：Oracle 免费 ARM 的羊毛"
+            longText
+            value={draft.interests}
+            onChange={(v) => patch({ interests: v })}
+          />
+        </Field>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <span className="card-title">每日总结</span>
+        </div>
+        <Field
+          label="生成与推送"
+          hint="每天此时用 AI 总结当天命中并推送 Telegram；错过的时间点不回溯补做，暂停监控时不生成。"
+        >
+          <div className="switch-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={draft.dailyEnabled}
+              className="switch"
+              aria-label="每日总结"
+              onClick={() => patch({ dailyEnabled: !draft.dailyEnabled })}
+            />
+            <input
+              className={`input input-time num${draft.dailyEnabled ? '' : ' input-disabled'}`}
+              type="time"
+              value={draft.dailyTime}
+              disabled={!draft.dailyEnabled}
+              onChange={(e) => patch({ dailyTime: e.target.value })}
+              aria-label="每日总结时间"
+            />
+            <span className="feedback muted">{draft.dailyEnabled ? '开启' : '关闭'}</span>
+          </div>
+        </Field>
+        <Field label="补看历史" hint="已生成的日报在「今日回顾」页随时可查，也可在那页手动生成本日日报。">
+          <span className="feedback muted">今日回顾页支持手动「立即生成」</span>
         </Field>
       </section>
 
@@ -257,7 +505,7 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
         >
           <div className="input-row">
             <input
-              className={`input${intervalValid && !intervalTooLow ? '' : ' invalid'}`}
+              className={`input num${intervalValid && !intervalTooLow ? '' : ' invalid'}`}
               type="number"
               min={15}
               step={1}
@@ -293,7 +541,7 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
                 需以 http://、https://、socks5:// 或 socks5h:// 开头；当前值保存时会被清空，请修正
               </span>
             ) : (
-              <span>留空表示直连。</span>
+              <span>留空表示直连。AI 请求在「全部走代理」时走代理，否则直连。</span>
             )
           }
         >
@@ -325,7 +573,7 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
                 checked={draft.proxyScope === 'all'}
                 onChange={() => patch({ proxyScope: 'all' })}
               />
-              全部请求走代理（含 NodeSeek 抓取）
+              全部请求走代理（含 NodeSeek 抓取与 AI 请求）
             </label>
           </div>
         </Field>

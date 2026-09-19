@@ -1,5 +1,5 @@
 /**
- * 应用外壳：左侧栏（品牌 + 监控台/设置 两个 tab + 底部迷你运行状态）
+ * 应用外壳：左侧栏（品牌 + 监控台/今日回顾/设置 三个 tab + 底部迷你运行状态）
  * + 右侧内容区。
  *
  * - 状态数据只在壳层 useApi 一次，向下传给监控台（避免双份订阅/双份全量拉取）。
@@ -9,12 +9,14 @@
  */
 import { useCallback, useState } from 'react'
 import { deriveTrayLabel } from '@shared/ipc'
+import { IconPulse, IconRadar, IconReport, IconSliders } from './components/icons'
 import { useApi } from './hooks/useApi'
 import { deriveRunState } from './lib/status'
 import { Dashboard } from './pages/Dashboard'
+import { Reports } from './pages/Reports'
 import { Settings } from './pages/Settings'
 
-type Tab = 'dashboard' | 'settings'
+type Tab = 'dashboard' | 'reports' | 'settings'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('dashboard')
@@ -46,8 +48,13 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-icon">📡</span>
-          <span>ForumWatch · 论坛监控</span>
+          <span className="brand-icon">
+            <IconRadar size={20} />
+          </span>
+          <span className="brand-text">
+            <span className="brand-name">ForumWatch</span>
+            <span className="brand-sub">论坛监控</span>
+          </span>
         </div>
         <nav className="nav">
           <button
@@ -55,14 +62,24 @@ export default function App() {
             className={`nav-btn${tab === 'dashboard' ? ' active' : ''}`}
             onClick={() => switchTab('dashboard')}
           >
-            📊 监控台
+            <IconPulse size={16} />
+            监控台
+          </button>
+          <button
+            type="button"
+            className={`nav-btn${tab === 'reports' ? ' active' : ''}`}
+            onClick={() => switchTab('reports')}
+          >
+            <IconReport size={16} />
+            今日回顾
           </button>
           <button
             type="button"
             className={`nav-btn${tab === 'settings' ? ' active' : ''}`}
             onClick={() => switchTab('settings')}
           >
-            ⚙️ 设置
+            <IconSliders size={16} />
+            设置
             {settingsDirty && tab !== 'settings' && (
               <span className="dirty-dot" title="有未保存的修改" />
             )}
@@ -95,6 +112,8 @@ export default function App() {
         )}
         {tab === 'dashboard' ? (
           <Dashboard status={status} hits={hits} logs={logs} />
+        ) : tab === 'reports' ? (
+          <Reports />
         ) : (
           <Settings onDirtyChange={handleDirtyChange} />
         )}

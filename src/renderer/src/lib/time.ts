@@ -34,3 +34,32 @@ export function formatRelative(iso: string | null | undefined, nowMs: number): s
   if (Math.abs(diffSec) < 3) return diffSec >= 0 ? '即将' : '刚刚'
   return `${humanizeDuration(Math.abs(diffSec))}${diffSec > 0 ? '后' : '前'}`
 }
+
+/** 剩余毫秒 → "mm:ss"（来源退避倒计时用）；已到期/无效给 null */
+export function formatCountdown(remainMs: number): string | null {
+  if (!Number.isFinite(remainMs) || remainMs <= 0) return null
+  const totalSec = Math.ceil(remainMs / 1000)
+  if (totalSec >= 3600) {
+    return `${Math.floor(totalSec / 3600)}:${pad2(Math.floor((totalSec % 3600) / 60))}:${pad2(totalSec % 60)}`
+  }
+  return `${pad2(Math.floor(totalSec / 60))}:${pad2(totalSec % 60)}`
+}
+
+/** 本地时区 'YYYY-MM-DD'（日报日期口径与主进程一致：绝不用 ISO slice） */
+export function localDate(d: Date = new Date()): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+/** 'YYYY-MM-DD' → 展示标签："今天 · 09-19 周五" 这类；无效原样返回 */
+export function formatDayLabel(date: string, todayStr: string): string {
+  const d = new Date(`${date}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return date
+  const weekdays = ['日', '一', '二', '三', '四', '五', '六']
+  const md = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+  const weekday = `周${weekdays[d.getDay()]}` as const
+  if (date === todayStr) return `今天 · ${md} ${weekday}`
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (date === localDate(yesterday)) return `昨天 · ${md} ${weekday}`
+  return `${md} ${weekday}`
+}

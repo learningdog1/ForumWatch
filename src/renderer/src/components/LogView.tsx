@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LogEntry } from '@shared/types'
 import { formatClock } from '../lib/time'
+import { EmptyState } from './EmptyState'
 
 const BOTTOM_TOLERANCE_PX = 10
 
@@ -45,7 +46,7 @@ export function LogView(props: { logs: LogEntry[] }) {
       </div>
       <div className="logview" ref={boxRef} onScroll={handleScroll}>
         {logs.length === 0 ? (
-          <div className="empty">暂无日志</div>
+          <EmptyState title="暂无日志" hint="启动监控后，抓取与推送的运行记录会显示在这里" />
         ) : (
           logs.map((entry, i) => (
             <div className={`log-line ${entry.level}`} key={`${entry.ts}-${i}`}>

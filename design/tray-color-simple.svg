@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
   <!-- 彩色托盘简化版（16 自然尺寸，渲染为 tray.png）。
-       looker 返修：单环 + 针 + 青点；针端点 r=3.2（帽尖 r=4.0，距环内缘 4.8
-       留 0.8 缝隙不穿环）；青点在针上方留白处，与针/圆心均不粘连。 -->
+       looker 复核返修：16px 去掉青点（原青点距环内缘仅 0.2px，抗锯齿后与环顶描边
+       熔成糊团），与 Template 16 对齐只留「环 + 针」；青点保留在 32 档（tray-color.svg）。
+       针端点 r=3.2（帽尖 r=4.0，距环内缘 4.8 留 0.8 缝隙不穿环）。 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#4F46E5"/>
@@ -11,6 +12,4 @@
   <rect x="0" y="0" width="16" height="16" rx="4.5" fill="url(#bg)"/>
   <circle cx="8" cy="8.3" r="5.6" fill="none" stroke="#FFFFFF" stroke-width="1.6"/>
   <path d="M8 8.3 L11.01 7.21" fill="none" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round"/>
-  <circle cx="8" cy="8.3" r="1" fill="#FFFFFF"/>
-  <circle cx="6.73" cy="5.58" r="1.6" fill="#22D3EE"/>
 </svg>

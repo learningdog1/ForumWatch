@@ -85,10 +85,11 @@ async function buildPreview(buffers: Map<string, Buffer>): Promise<void> {
   const clr16 = buffers.get('tray-color-simple.svg')
   const clr32 = buffers.get('tray-color.svg')
   if (!app || !tpl16 || !tpl32 || !clr16 || !clr32) throw new Error('missing render buffers for preview')
-  // 小尺寸展示档用独立简化变体（单一环 + 针 + 青点），矢量按目标像素直出
+  // 小尺寸展示档用独立简化变体：64/32 = 环+针+青点；16 = 环+针（青点与环内缘的
+  // 缝隙折算到 16px 后小于抗锯齿精度，会熔成糊团，故 16 档去青点，与 Template 16 对齐）
   const appSimple64 = await svgToPng('icon-simple.svg', 64)
   const appSimple32 = await svgToPng('icon-simple.svg', 32)
-  const appSimple16 = await svgToPng('icon-simple.svg', 16)
+  const appSimple16 = await svgToPng('icon-simple-16.svg', 16)
 
   const tiles: Tile[] = []
 
@@ -134,7 +135,7 @@ async function buildPreview(buffers: Map<string, Buffer>): Promise<void> {
     {
       top: 944, bg: '#EFEFF4', titleFill: '#374151', subFill: '#6B7280', markFill: '#9CA3AF',
       title: 'Tray color (Windows) - light',
-      sub: 'gradient base, simplified: ring + needle + cyan blip',
+      sub: 'gradient base: 32 = ring + needle + cyan blip; 16 = ring + needle (no blip)',
       icons: [[clr16, 940, 984], [clr32, 1024, 976]]
     },
     {

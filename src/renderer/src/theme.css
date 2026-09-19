@@ -1,7 +1,13 @@
 /**
  * 设计令牌（CSS 变量）：浅色为基础，prefers-color-scheme: dark 整组覆盖。
  * 配合 index.html 的 color-scheme: light dark，原生控件（单选、滚动条）自动跟随系统。
- * 零外部资源：不引字体、不引图标（图标一律 emoji / 纯 CSS）。
+ * 零外部资源：不引字体、不引图标（图标一律内联 SVG / 纯 CSS）。
+ *
+ * D8 令牌纪律：
+ * - 字号只用 --fs-12/13/15/20/28 五档（12 辅助 / 13 正文 / 15 强调 / 20 页题 / 28 大数字）。
+ * - 间距只用 --space-1..6（4px 栅格：4/8/12/16/20/24）。
+ * - 圆角只用 --radius-s/m/l（6/10/14）。
+ * - 阴影双层：key（紧贴投影）+ ambient（环境漫射）。
  */
 :root {
   --font-ui:
@@ -11,9 +17,32 @@
     ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
+  /* 字号阶（12/13/15/20/28） */
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+  --fs-20: 20px;
+  --fs-28: 28px;
+
+  /* 间距阶（4px 栅格） */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* 圆角阶（6/10/14） */
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+
+  /* 动效时长（120-180ms） */
+  --t-fast: 120ms;
+  --t-base: 160ms;
+
   /* 表面 */
   --bg: #ececf0;          /* 窗口底 */
-  --bg-sidebar: #e4e4e9;  /* 侧栏（比窗口底略深/略异色） */
   --card: #ffffff;        /* 卡片 */
   --card-alt: #f6f6f8;    /* 卡片内嵌区（日志底） */
   --input-bg: #ffffff;
@@ -24,10 +53,12 @@
   --text-2: #5f5f66;
   --text-3: #8e8e96;
 
-  /* 线与投影 */
+  /* 线与投影（key + ambient 双层） */
   --border: #d9d9df;
   --border-strong: #c5c5cd;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow:
+    0 1px 2px rgba(24, 26, 32, 0.07),
+    0 6px 18px -8px rgba(24, 26, 32, 0.12);
 
   /* 语义色 */
   --accent: #2f6fd6;
@@ -39,24 +70,31 @@
   --warn-bg: rgba(168, 90, 0, 0.12);
   --err: #c73a34;
   --err-bg: rgba(199, 58, 52, 0.1);
+  --ai: #7c5cd6;
+  --ai-bg: rgba(124, 92, 214, 0.12);
+
+  /* 侧栏：窗口底混入少量 accent 色相（拉离纯灰，D8 ③） */
+  --bg-sidebar: color-mix(in srgb, var(--accent) 6%, var(--bg));
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #202024;
-    --bg-sidebar: #1a1a1e;
-    --card: #2a2a2f;
-    --card-alt: #222226;
-    --input-bg: #1f1f23;
-    --chip-bg: #3a3a41;
+    /* dark 拉开明度差：窗口更深、卡片更亮（原先三档挤在一起偏闷） */
+    --bg: #1b1b20;
+    --card: #2b2b32;
+    --card-alt: #232329;
+    --input-bg: #202026;
+    --chip-bg: #3b3b43;
 
     --text: #f0f0f2;
     --text-2: #b0b0b8;
-    --text-3: #7e7e87;
+    --text-3: #83838d;
 
     --border: #3b3b42;
     --border-strong: #4b4b54;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow:
+      0 1px 2px rgba(0, 0, 0, 0.4),
+      0 8px 22px -8px rgba(0, 0, 0, 0.55);
 
     --accent: #5a9bf7;
     --accent-hover: #6fa9ff;
@@ -67,5 +105,9 @@
     --warn-bg: rgba(237, 161, 63, 0.15);
     --err: #ff6f61;
     --err-bg: rgba(255, 111, 97, 0.14);
+    --ai: #a58bf0;
+    --ai-bg: rgba(165, 139, 240, 0.16);
+
+    --bg-sidebar: color-mix(in srgb, var(--accent) 7%, #141419);
   }
 }
