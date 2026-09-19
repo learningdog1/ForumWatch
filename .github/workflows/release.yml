@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 默认最小权限；release job 单独提权 contents: write。
+permissions:
+  contents: read
+
+jobs:
+  build-mac:
+    name: Build macOS (dmg)
+    runs-on: macos-latest # arm64 runner；产出 arm64 dmg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (electron-vite)
+        run: npm run build
+
+      - name: Package dmg (unsigned)
+        run: npx electron-builder --mac dmg --arm64 --x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  build-win:
+    name: Build Windows (nsis)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (electron-vite)
+        run: npm run build
+
+      - name: Package nsis installer (unsigned)
+        run: npx electron-builder --win nsis --x64
+
+      - name: Upload nsis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-nsis
+          path: dist/*-setup.exe
+          if-no-files-found: error
+
+  release:
+    name: Attach artifacts to Release
+    needs: [build-mac, build-win]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.dmg
+            artifacts/*-setup.exe
+          generate_release_notes: true

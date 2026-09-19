@@ -1,0 +1,48 @@
+# electron-builder 26 配置（schema 已对照 node_modules/app-builder-lib/scheme.json 校对）
+# 策略见 docs/decisions.md 第 4 条：双轨产出、不签名、无原生模块。
+# 注意：mac 未在 CLI 指定 --arch 时按当前机器架构打包（本机 arm64 / CI macos-latest 也是 arm64），
+# 不是双架构；要 x64 用 `--x64`，要单一包覆盖两种架构用 `--universal`（arch 只能走 CLI，config 无此字段）。
+appId: com.colmidad.nodeseek-monitor
+productName: NodeSeek Monitor
+
+directories:
+  buildResources: resources
+  output: dist
+
+# electron-vite 产物（main/preload/renderer）。package.json 与生产依赖的 node_modules
+# 由 electron-builder 自动附带，无需写进 files。
+files:
+  - out/**
+
+# 托盘图标等运行时资源：src/main/desktop/resources.ts 的 resolveResource 在 packaged
+# 时从 process.resourcesPath/resources/ 读取，与这里的 to: resources 对应。
+extraResources:
+  - from: resources
+    to: resources
+
+# 无原生模块（ADR 第 3 条），不需要 asar 解包。
+asarUnpack: []
+
+mac:
+  target:
+    - dmg
+  category: public.app-category.utilities
+  # electron-builder 26 不会自动探测 buildResources 下的 icon.png，必须显式指定；
+  # 指定 png（>=512px）后由内置 icon-converter 自动转 icns。
+  icon: resources/icon.png
+
+win:
+  target:
+    - nsis
+  # 同上，png 自动转 ico（exe 与安装器共用）。
+  icon: resources/icon.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+# 刻意不配置任何签名字段；CI 里用 CSC_IDENTITY_AUTO_DISCOVERY=false 显式关掉 mac 自动发现证书。
