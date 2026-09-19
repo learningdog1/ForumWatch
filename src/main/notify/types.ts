@@ -24,8 +24,15 @@ export interface HitMessageInput {
   matchedKeywords: string[]
   /** AI 锐评（可选）：null/undefined/空串 = 无锐评行 */
   commentary?: string | null
-  /** 命中的价格规则 label（可选）：非空 = 规则命中（matchedBy='rule'） */
+  /** 命中的价格规则 label（可选）：非空 = 规则命中（matchedBy='rule'）。展示用（文案「命中规则」行） */
   matchedRule?: string | null
+  /**
+   * 命中的价格规则 **id**（可选）：路由用——composite.routeContextOf 取它作
+   * ctx.ruleId，与配置 when.ruleId（存规则 id）严格相等比较。matchedRule 是
+   * 展示用 label，label ≠ id 的规则按 label 路由永不命中，故路由一律读这里。
+   * 与 matchedRule 同源同生（engine 规则命中两字段都带；其他命中方式恒 null）。
+   */
+  matchedRuleId?: string | null
   /** 语义命中的 AI 判定理由（可选）：webhook 通道随 payload 透传，bark/ntfy 进摘要行 */
   semanticReason?: string | null
   /**

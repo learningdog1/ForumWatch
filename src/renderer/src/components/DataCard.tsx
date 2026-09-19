@@ -5,7 +5,8 @@
  *   所选路径。**备份文件含明文凭据**（bot token / API key）——hint 里明说，
  *   导出成功后也再提醒一次妥善保管。
  * - 导入：先弹打开对话框选文件，选完出**确认弹层**（覆盖语义 + 重启生效），
- *   确认后主进程验包 → 按段原子写回。成功提示重启应用生效（needsRestart）。
+ *   确认后主进程验包 → 按段原子写回。成功后主进程即暂停监控并进入"待重启
+ *   禁写"（退出不再覆盖导入文件），提示"已导入，请尽快重启（监控已暂停）"。
  * - 两路的取消（对话框按了取消）按 muted 提示处理，不算错误。
  */
 import { useState } from 'react'
@@ -45,9 +46,11 @@ export function DataCard() {
       const r = await window.api.importBackup()
       if (r.ok) {
         setPendingImport(false)
+        // 导入成功即暂停监控（主进程侧），退出时不再写 seen/state——文案与
+        // 主进程行为对齐：提示"已暂停"，催促尽快重启而不是慢慢等下一轮
         setImportMsg({
           kind: 'ok',
-          text: '✓ 导入完成：请退出应用（托盘菜单 → 退出）后重新启动，新配置与已读记录即生效'
+          text: '✓ 已导入，请尽快重启应用生效（监控已暂停）'
         })
       } else {
         setImportMsg({ kind: 'muted', text: r.error })

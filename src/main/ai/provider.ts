@@ -67,8 +67,12 @@ export interface AiProviderDeps {
 const DEFAULT_TIMEOUT_MS = 30000
 const BODY_EXCERPT_LEN = 200
 
-/** 把文本中出现的密钥明文整体替换为 ***（密钥为空串时原样返回；本模块保证密钥非空） */
-function scrubSecret(text: string, secret: string): string {
+/**
+ * 把文本中出现的密钥明文整体替换为 ***（密钥为空串时原样返回；本模块保证密钥非空）。
+ * 导出供其他模块复用同款口径（如 telegram.ts 对 botToken 的错误详情脱敏——
+ * token 在 URL 路径里，fetch 异常消息可能回显完整 URL）。
+ */
+export function scrubSecret(text: string, secret: string): string {
   return secret === '' ? text : text.split(secret).join('***')
 }
 

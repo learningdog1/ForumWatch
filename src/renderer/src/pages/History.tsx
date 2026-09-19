@@ -11,7 +11,9 @@
  *   立即轮询，不适配历史分页，故本地复刻行渲染：matchedBy 徽标 / 规则 label /
  *   semanticReason / notifyError 红字 hover）。
  * - 数据面全部走 invoke（无事件订阅，历史文件静态），手动「刷新」重拉两个
- *   数据面；搜索框 300ms 防抖后再查询。请求带序号守卫，慢响应不覆盖新状态。
+ *   数据面；搜索框 300ms 防抖后再查询。请求带序号守卫，慢响应不覆盖新状态
+ *   （列表与统计各一套序号）。统计加载失败置错误态（文案 + 重试按钮，旧数据
+ *   保留展示），不停在"正在加载"。
  * - 全部样式复用既有类（.metrics/.substatus/.hit/.chip 等），本工作包不改
  *   global.css；个别尺寸/配色走内联 style（HitList 规则徽标先例）。
  */
@@ -20,6 +22,7 @@ import type { HitQueryResult, StatsResult } from '@shared/ipc'
 import type { HitRecord } from '@shared/types'
 import { EmptyState } from '../components/EmptyState'
 import { IconRefresh } from '../components/icons'
+import { openExternalWithTitleHint } from '../lib/open-external'
 import { localDate } from '../lib/time'
 import { sourceLabel } from '../lib/status'
 
@@ -183,8 +186,8 @@ function HistoryRow(props: { hit: HitRecord }) {
         type="button"
         className="hit-title"
         title={`打开：${hit.topic.title}`}
-        onClick={() => {
-          void window.api.openExternal(hit.topic.url)
+        onClick={(e) => {
+          openExternalWithTitleHint(e.currentTarget, hit.topic.url)
         }}
       >
         {hit.topic.title}
@@ -353,9 +356,13 @@ export function History() {
   const [loading, setLoading] = useState(true)
   const [result, setResult] = useState<HitQueryResult>({ total: 0, items: [] })
   const [stats, setStats] = useState<StatsResult | null>(null)
+  /** 统计面板的加载失败态（true 时顶部给错误文案 + 重试；有旧数据则保留展示） */
+  const [statsError, setStatsError] = useState(false)
   const [configSourceIds, setConfigSourceIds] = useState<string[]>([])
   /** 请求序号守卫：慢响应不得覆盖更新的查询状态 */
   const reqSeq = useRef(0)
+  /** 统计面板的独立序号守卫（与列表查询互不干扰） */
+  const statsSeq = useRef(0)
 
   // 来源下拉：配置来源 ∪ 统计里出现过的来源（已删来源仍有历史数据）
   const sourceOptions = useMemo(() => {
@@ -401,12 +408,21 @@ export function History() {
     if (page >= pageCount) setPage(pageCount - 1)
   }, [page, pageCount])
 
-  // 统计面板：挂载 + 手动刷新时拉（固定近 14 天口径）
+  // 统计面板：挂载 + 手动刷新时拉（固定近 14 天口径）。失败不再停在"正在加载"：
+  // 置错误态（顶部错误文案 + 重试入口，旧数据保留展示），成功清除错误态。
   useEffect(() => {
+    const seq = ++statsSeq.current
     void window.api
       .getStats(STATS_DAYS)
-      .then((s) => setStats(s))
-      .catch(() => setStats(null))
+      .then((s) => {
+        if (seq !== statsSeq.current) return
+        setStats(s)
+        setStatsError(false)
+      })
+      .catch(() => {
+        if (seq !== statsSeq.current) return
+        setStatsError(true)
+      })
   }, [reloadTick])
 
   // 来源下拉备料（一次性）
@@ -444,9 +460,27 @@ export function History() {
             </button>
           </span>
         </div>
-        {stats === null ? (
+        {statsError && (
+          <div
+            className="empty"
+            style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+          >
+            <span className="feedback err" style={{ padding: 0 }}>
+              统计加载失败{stats !== null ? '（下方为上次成功的数据）' : ''}
+            </span>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setReloadTick((t) => t + 1)}
+              title="重新拉取统计与列表"
+            >
+              重试
+            </button>
+          </div>
+        )}
+        {stats === null && !statsError ? (
           <div className="empty">正在加载统计…</div>
-        ) : (
+        ) : stats !== null ? (
           <>
             <div className="metrics">
               <div className="metric">
@@ -476,7 +510,7 @@ export function History() {
               <KeywordRank stats={stats} />
             </div>
           </>
-        )}
+        ) : null}
       </section>
 
       {/* 历史命中列表（R7-W2）：服务端过滤 + 分页 */}

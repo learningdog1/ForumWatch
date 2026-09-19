@@ -1030,6 +1030,12 @@ describe('语义评估管线（D4）', () => {
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
     expect(h.sendHit.mock.calls[0][0].matchedKeywords).toEqual([]) // semantic 命中不带关键词
+    // 即时路径的 sendHit payload 同样携带 semanticReason（与挂起 flush payload 形状
+    // 对齐——bark/ntfy 的「语义命中」行与 webhook payload 的字段不因即时/挂起而异）
+    expect(h.sendHit.mock.calls[0][0].semanticReason).toBe('与自建主机兴趣明确相关')
+    // 非 rule 命中：路由用 id 字段恒 null（matchedRule 保持 label 语义、亦为 null）
+    expect(h.sendHit.mock.calls[0][0].matchedRule).toBeNull()
+    expect(h.sendHit.mock.calls[0][0].matchedRuleId).toBeNull()
     const hits = h.engine.getRecentHits()
     expect(hits[0]).toMatchObject({
       matchedBy: 'semantic',
@@ -2463,7 +2469,9 @@ describe('价格规则命中（R5-P2a 第 6 步：先于 literal、命中即得�
     expect(h.sendHit).toHaveBeenCalledTimes(1)
     expect(h.sendHit.mock.calls[0]![0].matchedKeywords).toEqual([]) // 规则命中不带关键词
     expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull() // commentary 恒 string|null
-    expect(h.sendHit.mock.calls[0]![0].matchedRule).toBe('白菜月付') // 第 4 参 = 规则 label
+    expect(h.sendHit.mock.calls[0]![0].matchedRule).toBe('白菜月付') // matchedRule = 规则 label（展示）
+    expect(h.sendHit.mock.calls[0]![0].matchedRuleId).toBe('cheap-month') // matchedRuleId = 规则 id（路由）
+    expect(h.sendHit.mock.calls[0]![0].semanticReason).toBeNull() // 规则命中无语义理由
     const hits = h.engine.getRecentHits()
     expect(hits[0]).toMatchObject({
       matchedBy: 'rule',
@@ -2502,6 +2510,7 @@ describe('价格规则命中（R5-P2a 第 6 步：先于 literal、命中即得�
     h1.fetchLatest.mockImplementation(async () => [topic('2', { title: '5元/月 小鸡' }), topic('1')])
     await h1.engine.pollOnce()
     expect(h1.engine.getRecentHits()[0]).toMatchObject({ matchedBy: 'rule', matchedRule: 'cheap-month' })
+    expect(h1.sendHit.mock.calls[0]![0].matchedRuleId).toBe('cheap-month') // 无 label 时 id 兼任 label，两字段同值
 
     // b) 唯一规则 disabled + 字面命中 → literal，matchedRule=null，sendHit 第 4 参 null
     // （h2 与 h1 共享 tmpdir 的 seen/state：换 topic id 9/10 避开已入集的 1/2）

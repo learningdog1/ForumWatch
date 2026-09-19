@@ -408,6 +408,63 @@ describe('allowlist 硬闸', () => {
   })
 })
 
+describe('非数字 chat id 配置告警（start 时 warn，不改变匹配行为）', () => {
+  it('主 chatId 非数字（如 @username）：start 时 warn 一条，原样带值（chatId 非秘密）', async () => {
+    const h = makeHarness()
+    h.setCredentials({ botToken: BOT_TOKEN, chatId: '@my_bot_chat' })
+    h.stopAfterGetUpdates(1)
+    h.controller.start()
+    await h.controller.waitStopped()
+
+    const warns = h.logs.filter((l) => l.level === 'warn' && l.msg.includes('chatId "@my_bot_chat"'))
+    expect(warns).toHaveLength(1)
+    expect(warns[0]!.msg).toContain('数字')
+  })
+
+  it('allowedChatIds 含非数字项：逐项 warn；数字项（私聊正数 / -100 群 id）不 warn', async () => {
+    const h = makeHarness({ allowedChatIds: ['@someone', '-100999', '100200'] })
+    h.stopAfterGetUpdates(1)
+    h.controller.start()
+    await h.controller.waitStopped()
+
+    const warns = h.logs.filter((l) => l.level === 'warn' && l.msg.includes('allowedChatIds'))
+    expect(warns).toHaveLength(1) // 只有 '@someone' 一项
+    expect(warns[0]!.msg).toContain('"@someone"')
+  })
+
+  it('全数字配置（主 chatId 与清单均合法）：零告警，正常路径不受影响', async () => {
+    const h = makeHarness({ allowedChatIds: ['-100999'] })
+    h.stopAfterGetUpdates(1)
+    h.controller.start()
+    await h.controller.waitStopped()
+
+    expect(h.controller.isRunning).toBe(false) // 循环正常启动过并退出
+    expect(
+      h.logs.some(
+        (l) => l.level === 'warn' && (l.msg.includes('chatId') || l.msg.includes('allowedChatIds'))
+      )
+    ).toBe(false)
+  })
+
+  it('enabled=false / 凭据缺失（start noop）：即使配置含非数字值也不告警', () => {
+    const h1 = makeHarness({ allowedChatIds: ['@someone'] })
+    h1.setCredentials({ botToken: BOT_TOKEN, chatId: '@chat' })
+    h1.setEnabled(false)
+    h1.controller.start()
+    const h2 = makeHarness({ allowedChatIds: ['@someone'], credentialsNull: true })
+    h2.controller.start()
+
+    for (const h of [h1, h2]) {
+      expect(
+        h.logs.some(
+          (l) =>
+            l.level === 'warn' && (l.msg.includes('chatId') || l.msg.includes('allowedChatIds'))
+        )
+      ).toBe(false)
+    }
+  })
+})
+
 describe('409 与错误退避（坑8 第三条）', () => {
   const conflictRes = (): HttpResponse => ({
     status: 409,

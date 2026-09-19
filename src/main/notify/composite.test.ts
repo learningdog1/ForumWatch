@@ -162,14 +162,44 @@ describe('CompositeNotifier', () => {
     expect(b.hits).toHaveLength(2)
   })
 
-  it('matchedBy 推导：matchedRule 非空 → rule，ruleId 条件按该值路由', async () => {
+  it('matchedBy 推导：规则字段非空 → rule，ruleId 条件按 matchedRuleId（规则 id）路由', async () => {
     const a = mockNotifier('a')
     const b = mockNotifier('b')
     const routing: RoutingRule[] = [r('cheap', { ruleId: 'cheap-vps' }, ['b'])]
     const c = new CompositeNotifier([a.notifier, b.notifier], { getRouting: () => routing })
-    await c.sendHit({ topic, matchedKeywords: [], matchedRule: 'cheap-vps' })
+    await c.sendHit({ topic, matchedKeywords: [], matchedRuleId: 'cheap-vps' })
 
     expect(a.hits).toHaveLength(0)
+    expect(b.hits).toHaveLength(1)
+  })
+
+  it('label ≠ id 的规则命中：when.ruleId 按规则 id 命中、按 label 不命中（路由不读展示 label）', async () => {
+    // when.ruleId = 规则 id 'r1'：matchedRuleId='r1'（label 是 '便宜VPS'）→ 命中
+    const a = mockNotifier('a')
+    const b = mockNotifier('b')
+    const byId: RoutingRule[] = [r('cheap', { ruleId: 'r1' }, ['b'])]
+    const c1 = new CompositeNotifier([a.notifier, b.notifier], { getRouting: () => byId })
+    await c1.sendHit({ topic, matchedKeywords: [], matchedRule: '便宜VPS', matchedRuleId: 'r1' })
+    expect(a.hits).toHaveLength(0)
+    expect(b.hits).toHaveLength(1)
+
+    // when.ruleId = label '便宜VPS'（配错的口径）：ctx.ruleId='r1' 严格不等 → 不命中 → 广播
+    const byLabel: RoutingRule[] = [r('cheap', { ruleId: '便宜VPS' }, ['b'])]
+    const c2 = new CompositeNotifier([a.notifier, b.notifier], { getRouting: () => byLabel })
+    await c2.sendHit({ topic, matchedKeywords: [], matchedRule: '便宜VPS', matchedRuleId: 'r1' })
+    expect(a.hits).toHaveLength(1) // 未命中 → 广播
+    expect(b.hits).toHaveLength(2) // 广播也发 b
+  })
+
+  it('matchedRuleId=null/undefined（旧形状只带 label）→ ctx.ruleId=null，带 ruleId 条件的规则永不命中 → 广播', async () => {
+    const a = mockNotifier('a')
+    const b = mockNotifier('b')
+    const routing: RoutingRule[] = [r('cheap', { ruleId: 'r1' }, ['b'])]
+    const c = new CompositeNotifier([a.notifier, b.notifier], { getRouting: () => routing })
+    // matchedBy 仍推导为 rule（matchedRule 非空），但路由 id 缺失 → 严格相等不成立
+    await c.sendHit({ topic, matchedKeywords: [], matchedRule: '便宜VPS' })
+
+    expect(a.hits).toHaveLength(1)
     expect(b.hits).toHaveLength(1)
   })
 

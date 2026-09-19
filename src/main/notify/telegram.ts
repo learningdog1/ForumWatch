@@ -20,6 +20,7 @@
 
 import type { FetchLike, HttpResponse, HttpRequestInit } from '../net/http-types'
 import type { TelegramConfig, Topic } from '@shared/types'
+import { scrubSecret } from '../ai/provider'
 import type { HitMessageInput, Notifier } from './types'
 
 export class TelegramError extends Error {
@@ -240,8 +241,12 @@ export class TelegramNotifier implements Notifier {
       delayBeforeNext = attempt * 1000 // 1s / 2s
     }
 
+    // 错误详情脱敏：botToken 在 URL 路径里，URL 解析失败类 fetch 异常的消息可能
+    // 回显完整 URL → token 明文绝不能进 notifyError/日志。先抹（scrubSecret，与
+    // ai/provider 的 apiKey 同款口径）后截 200（先抹后截，截断边界也不残留
+    // 完整 token）；cfg.botToken 在 deliver 顶部已判非空。
     throw new TelegramError(
-      `telegram send failed after ${MAX_ATTEMPTS} attempts: ${lastDetail.slice(0, 200)}`,
+      `telegram send failed after ${MAX_ATTEMPTS} attempts: ${scrubSecret(lastDetail, cfg.botToken).slice(0, 200)}`,
       lastRetryAfterSec
     )
   }

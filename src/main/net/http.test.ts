@@ -77,6 +77,16 @@ function flattenError(e: unknown): string {
   return s
 }
 
+/** 执行预期抛错的函数并返回错误消息文本（不抛时 fail） */
+function captureError(fn: () => unknown): string {
+  try {
+    fn()
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e)
+  }
+  throw new Error('expected fn to throw')
+}
+
 describe('redactProxyUrl（日志脱敏）', () => {
   it('带 user:pass 凭据：凭据替换为 ***，scheme/host/port 保留', () => {
     expect(redactProxyUrl('http://user:pass@127.0.0.1:7890')).toBe('http://***@127.0.0.1:7890')
@@ -159,6 +169,28 @@ describe('resolveDispatcherSpec（纯函数）', () => {
     expect(() => resolveDispatcherSpec('socks5://')).toThrow(/missing host/)
     expect(() => resolveDispatcherSpec('socks5:///only/path')).toThrow(/missing host/)
     expect(() => resolveDispatcherSpec('socks5://h:notaport')).toThrow(/cannot parse/)
+  })
+
+  it('错误消息过 redactProxyUrl：不泄漏代理 URL 里的 user:pass 凭据', () => {
+    // cannot parse（非法端口导致 URL 解析失败，凭据在 authority 段）
+    let err = captureError(() => resolveDispatcherSpec('socks5://alice:s3cret@h:notaport'))
+    expect(err).toMatch(/cannot parse/)
+    expect(err).not.toContain('alice')
+    expect(err).not.toContain('s3cret')
+    expect(err).toContain('socks5://***@h:notaport')
+
+    // unsupported scheme（URL 能解析，scheme 不支持）
+    err = captureError(() => resolveDispatcherSpec('socks4://user:pass@1.2.3.4:1080'))
+    expect(err).toMatch(/unsupported proxy scheme/)
+    expect(err).not.toContain('user:pass')
+    expect(err).toContain('socks4://***@1.2.3.4:1080')
+
+    // 凭据后空 authority（user:pass@ 无 host）：无论落入 cannot parse 还是
+    // missing host 分支，凭据都必须被抹掉
+    err = captureError(() => resolveDispatcherSpec('socks5://user:pass@/'))
+    expect(err).toMatch(/cannot parse|missing host/)
+    expect(err).not.toContain('user:pass')
+    expect(err).toContain('***')
   })
 })
 

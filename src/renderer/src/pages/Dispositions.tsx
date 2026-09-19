@@ -74,18 +74,23 @@ export function Dispositions() {
   const [day, setDay] = useState('')
   const dayRef = useRef(day)
   dayRef.current = day
+  /** 请求序号守卫：切日/手动刷新/自动刷新并发时，慢响应不得覆盖新状态 */
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (targetDay: string): Promise<void> => {
+    const seq = ++loadSeq.current
     setLoading(true)
     try {
       const list =
         targetDay === '' ? await window.api.dispositionsRecent() : await window.api.dispositionsDay(targetDay)
+      if (seq !== loadSeq.current) return
       // 两个数据面都返回旧→新（写入序）；展示时间倒序（新→旧）
       setItems(list.slice().reverse())
     } catch {
+      if (seq !== loadSeq.current) return
       setItems([])
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [])
 

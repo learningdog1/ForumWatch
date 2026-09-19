@@ -35,6 +35,12 @@ export const GITHUB_LATEST_RELEASE_URL = `https://api.github.com/repos/${UPDATE_
 export const UPDATE_INITIAL_DELAY_MS = 15_000
 /** start() 轮询间隔：24h */
 export const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000
+/**
+ * 单次检查的整体超时（ms），以 init.timeoutMs 交给注入的 fetchFn（ipc.ts 的
+ * directFetch 会转成 AbortSignal.timeout）：不带超时的裸 fetch 挂到 TCP 超时
+ * 为止（分钟级），15s 未响应按失败静默收敛（下次轮询再试）。
+ */
+export const UPDATE_CHECK_TIMEOUT_MS = 15_000
 
 /** 有新版时的检查结果（latest > current 才产生） */
 export interface UpdateCheckResult {
@@ -145,7 +151,9 @@ export class UpdateChecker {
         headers: {
           // GitHub API 强制 UA；标识应用与版本，便于排查
           'User-Agent': `ForumWatch-UpdateCheck/${this.current}`
-        }
+        },
+        // 检查整体超时（防裸 fetch 挂到 TCP 超时；适配层转 AbortSignal.timeout）
+        timeoutMs: UPDATE_CHECK_TIMEOUT_MS
       })
       if (res.status < 200 || res.status >= 300) {
         throw new Error(`HTTP ${String(res.status)}`)

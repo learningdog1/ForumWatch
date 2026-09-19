@@ -6,8 +6,9 @@
  * 通道数（W1 契约不变）。
  *
  * - 路由（sendHit）：从 HitMessageInput 推导 RouteContext（matchedKeywords 非空
- *   → literal；matchedRule 非空 → rule；否则 semantic——与 engine.processHit
- *   的三档命中传参约定一致：literal/semantic 命中恒传 matchedRule=null），
+ *   → literal；规则字段非空 → rule；否则 semantic——与 engine.processHit
+ *   的三档命中传参约定一致：literal/semantic 命中恒传 matchedRule/matchedRuleId
+ *   = null；ctx.ruleId 取 matchedRuleId（规则 id），matchedRule 是展示用 label），
  *   resolveChannelIds → null 则目标=全部 notifiers（默认全员广播），非 null
  *   则目标=id 命中的 notifiers（id 不在列表里的忽略）。**每次发送 getRouting()
  *   现读**，配置热更新即时生效。
@@ -112,18 +113,23 @@ export class CompositeNotifier implements Notifier {
 
 /**
  * 从 HitMessageInput 推导路由上下文。matchedBy 推导优先级与 engine 的命中
- * 管线互斥性一致：matchedKeywords 非空 → literal；否则 matchedRule 非空 →
- * rule（engine 仅规则命中传非空 matchedRule，且此时 matchedKeywords 恒空，
- * 两条件现实里不并存，这里按 literal 优先防御）；否则 semantic。
+ * 管线互斥性一致：matchedKeywords 非空 → literal；否则规则字段非空 → rule
+ * （engine 仅规则命中传非空 matchedRule/matchedRuleId，且此时 matchedKeywords
+ * 恒空，两条件现实里不并存，这里按 literal 优先防御）；否则 semantic。
+ * ctx.ruleId 取 **matchedRuleId**（规则 id，与配置 when.ruleId 同口径）；
+ * matchedRule 是展示用 label——label ≠ id 的规则按 label 路由永不命中，故
+ * 路由绝不读它（文案消费仍在各通道的 formatHitMessage）。
  */
 function routeContextOf(input: HitMessageInput): RouteContext {
-  const isRule = typeof input.matchedRule === 'string' && input.matchedRule.length > 0
+  const isRule =
+    (typeof input.matchedRuleId === 'string' && input.matchedRuleId.length > 0) ||
+    (typeof input.matchedRule === 'string' && input.matchedRule.length > 0)
   const matchedBy: RouteContext['matchedBy'] =
     input.matchedKeywords.length > 0 ? 'literal' : isRule ? 'rule' : 'semantic'
   return {
     sourceId: input.topic.sourceId,
     matchedBy,
-    ruleId: isRule ? (input.matchedRule as string) : null
+    ruleId: isRule ? (input.matchedRuleId ?? null) : null
   }
 }
 

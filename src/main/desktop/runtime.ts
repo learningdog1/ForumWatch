@@ -31,8 +31,8 @@
  *
  * 生命周期：startup() = engine.start()（launch 即开始监控，desired 默认 running）+
  * 起 watchdog；shutdown() 在 app 的 before-quit 与 will-quit 之间调用（退出路径统一
- * 走这里）：engine.pause → 停 watchdog/日报定时器 → seen flush → clients close →
- * logger close。
+ * 走这里）：engine.pause → 停 watchdog/日报定时器 → seen flush（备份导入后的
+ * pendingRestart 态跳过——见 beginPendingRestart）→ clients close → logger close。
  *
  * 引擎看门狗（R8-A 任务一，E2）：EngineWatchdog 旁路观察 nextPollAt 超期
  * （desired=running 且 now > nextPollAt + max(interval*2, 90s)）并强制 runNow
@@ -165,6 +165,13 @@ export class DesktopRuntime {
   private reportTimer: ReturnType<typeof setTimeout> | null = null
   /** 上一帧 engine desired（F6：检测 paused→running 翻转补跑日报 tick；null=尚未见帧） */
   private lastDesired: EngineStatus['desired'] | null = null
+  /**
+   * 备份导入后的"待重启禁写"（R8-B/E4 评审修复）：置位后 shutdown 跳过 seen
+   * flush——导入写回的 seen.json 不能在退出时被运行中内存集全量覆盖（见
+   * beginPendingRestart）。state 无独立 shutdown 写点（setFor 只随轮询发生，
+   * pause 后不再轮询），无需另行守卫。
+   */
+  private pendingRestart = false
   private shutdownStarted = false
 
   /** 由 initRuntime 创建（必须在 app.whenReady 之后）；不要直接 new */
@@ -513,6 +520,35 @@ export class DesktopRuntime {
     }
   }
 
+  /**
+   * 备份导入后的"待重启禁写"（R8-B/E4 评审修复，ipc.ts importBackup 成功路径调用）：
+   * 置 pendingRestart 并暂停引擎（desired 翻转，停轮询停定时）。此后：
+   * - 运行中的 runtime 不再产生 seen/state 落盘（engine 写点全部在 pollOnce
+   *   内，pause 后排程器停、runNow 尊重 desired 不再触发新轮询）；
+   * - shutdown() 跳过 seen flush（旧内存集不会在退出时覆盖导入的 seen.json）；
+   * - seen/state/engine 内存不热换（重启后从盘加载新值）。config 段例外：
+   *   importBackup 随后显式调 store.load() 重读内存（防用户导入后继续在
+   *   设置页保存把旧内存配置写回盘上）。
+   * 可观测性：info 日志 + UI 导入成功文案提示"监控已暂停，请尽快重启"。
+   */
+  beginPendingRestart(reason: string): void {
+    if (this.shutdownStarted || this.pendingRestart) return
+    this.pendingRestart = true
+    try {
+      this.engine.pause() // 停排程；状态事件同时驱动 powerSaveBlocker 释放
+    } catch (err) {
+      console.error(`[runtime] engine.pause failed during pendingRestart: ${describe(err)}`)
+    }
+    this.logger.info(
+      `pending restart (${reason}): monitoring paused, seen/state persistence suspended until restart`
+    )
+  }
+
+  /** 是否处于"待重启禁写"（备份导入后置位；ipc hitFeedback 等写入面据此拒绝） */
+  get isPendingRestart(): boolean {
+    return this.pendingRestart
+  }
+
   /** 退出路径统一走这里（before-quit 与 will-quit 之间调用）；幂等 */
   async shutdown(): Promise<void> {
     if (this.shutdownStarted) return
@@ -525,8 +561,13 @@ export class DesktopRuntime {
     } catch (err) {
       console.error(`[runtime] engine.pause failed: ${describe(err)}`)
     }
-    // flush 不再向上抛（失败返回 false）——退出路径只补一条日志
-    if (!(await this.seen.flush())) {
+    // 待重启禁写（备份导入）：flush 会用运行中内存集**全量覆盖**盘文件——退出时
+    // 它会把导入写回的 seen.json 冲回旧集合，故跳过（重启后直接加载导入文件）。
+    // state.json 无 shutdown 写点可跳（见 pendingRestart 字段注释）。
+    if (this.pendingRestart) {
+      console.info('[runtime] pending restart: skipping seen flush during shutdown')
+    } else if (!(await this.seen.flush())) {
+      // flush 不再向上抛（失败返回 false）——退出路径只补一条日志
       console.error('[runtime] seen flush failed during shutdown')
     }
     this.siteClient.close()

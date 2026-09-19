@@ -97,8 +97,10 @@ export const IPC = {
   /** invoke(EngineControlCommand) → EngineControlResult */
   engineControl: 'engine:control',
   /**
-   * invoke(url) → {ok:boolean}；仅允许 https 且 host 为已配置来源的域
-   * （v2：nodeseek.com 及其子域；由主进程按 sources 派生白名单）。
+   * invoke(url) → {ok:boolean}；仅允许 https 且 host 在主进程的白名单内
+   * （= 按已配置 enabled 来源派生的域及其子域 ∪ 静态 github.com——R8-B/E1
+   * 起合并：更新检查的「打开下载页」指向 GitHub Releases，不来自任何来源
+   * 配置）。拒绝或打开失败均 {ok:false}。
    */
   openExternal: 'external:open',
   /** invoke() → AiTestResult；AI Provider 连通性测试（发一条最小对话） */
@@ -159,7 +161,9 @@ export const IPC = {
    * invoke() → BackupImportResult（R8-B/E4）：showOpenDialog → unpackBackup 验包
    * → restorePlan（seen 无效则删 seen.json + state 全员 baselineDone 重置，ADR 8.9）
    * → config/seen/state/feedback 按段原子写回 userData。成功恒
-   * {ok:true, needsRestart:true}——内存里的旧配置/seen/状态不热换，重启生效。
+   * {ok:true, needsRestart:true}——seen/引擎状态内存不热换，重启生效；导入成功
+   * 后主进程即暂停监控并进入"待重启禁写"（shutdown 不再 flush 覆盖导入文件），
+   * config 段内存重读（防导入后在设置页保存把旧配置写回）。
    */
   importBackup: 'backup:import',
   /** 主进程 push EngineStatus */

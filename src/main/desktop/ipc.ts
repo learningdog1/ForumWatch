@@ -108,6 +108,13 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
   // 日志事件流：新条目实时推（渲染进程启动时用 getLogs 拉内存环形的全量）
   rt.logger.onLog((entry) => bc.log(entry))
 
+  /**
+   * 'YYYY-MM-DD' 形状（锚定；日期入参共用校验）：getDailyReport /
+   * dispositionsDay / queryHits 三处共用。日期会拼进读文件路径（reports/
+   * pipeline/<date>.jsonl），不锚定形状即放行路径穿越串——非法形状按缺省处理。
+   */
+  const DATE_SHAPE_RE = /^\d{4}-\d{2}-\d{2}$/
+
   ipcMain.handle(IPC.getConfig, () => rt.store.get())
 
   // store.update（浅合并 + sanitize + 原子落盘）——渲染端漏字段时按合并语义
@@ -199,12 +206,17 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
     }
   })
 
-  /** invoke(dateLocal?) → DailyReportInfo：缺省取今天（本地时区），无日报则 markdown:null */
+  /**
+   * invoke(dateLocal?) → DailyReportInfo：缺省/非法形状（非 'YYYY-MM-DD' 锚定，
+   * 日期会拼进 reports 读路径）取今天（本地时区），无日报则 markdown:null
+   */
   ipcMain.handle(
     IPC.getDailyReport,
     async (_event, dateLocal?: unknown): Promise<DailyReportInfo> => {
       const date =
-        typeof dateLocal === 'string' && dateLocal !== '' ? dateLocal : formatLocalDate()
+        typeof dateLocal === 'string' && DATE_SHAPE_RE.test(dateLocal)
+          ? dateLocal
+          : formatLocalDate()
       return { date, markdown: await rt.reportService.loadReport(date) }
     }
   )
@@ -236,11 +248,15 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
 
   /**
    * invoke(dateLocal) → Disposition[]：某本地日的持久化记录（旧→新）。
-   * 参数缺省/非字符串按今天处理；文件缺失/坏行由 store 按空/跳过收口。
+   * 参数缺省/非字符串/形状非法（非锚定 'YYYY-MM-DD'——date 会拼进 pipeline/
+   * <date>.jsonl 读路径，不锚定即放行路径穿越）按今天处理；文件缺失/坏行由
+   * store 按空/跳过收口。
    */
   ipcMain.handle(IPC.dispositionsDay, (_event, dateLocal: unknown) => {
     const date =
-      typeof dateLocal === 'string' && dateLocal !== '' ? dateLocal : formatLocalDate()
+      typeof dateLocal === 'string' && DATE_SHAPE_RE.test(dateLocal)
+        ? dateLocal
+        : formatLocalDate()
     return rt.dispositions.readDay(date)
   })
 
@@ -249,9 +265,6 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
   /** getStats 的 days 钳位：缺省 14（UI 统计区固定口径），下限 1，上限 90 */
   const STATS_DAYS_DEFAULT = 14
   const STATS_DAYS_MAX = 90
-
-  /** 'YYYY-MM-DD' 形状（queryHits 的日期入参校验；非法 → 空结果） */
-  const DATE_SHAPE_RE = /^\d{4}-\d{2}-\d{2}$/
 
   /**
    * 渲染进程传来的 unknown 载荷 → HitQueryOptions（不信任 renderer 内存）。
@@ -309,6 +322,11 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
    * （键不存在也 ok）。载荷不信任 renderer 内存：逐字段判型，非法 → {ok:false}。
    */
   ipcMain.handle(IPC.hitFeedback, (_event, raw: unknown): HitFeedbackResult => {
+    // 备份导入后的待重启窗口：feedback.json 已被导入件覆盖，此处写入会用旧内存
+    // 环冲掉它——拒绝（重启后投票面恢复）
+    if (rt.isPendingRestart) {
+      return { ok: false, error: '备份已导入待重启：反馈投票暂不可用，请重启应用' }
+    }
     const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
     const sourceId = typeof o['sourceId'] === 'string' ? o['sourceId'] : ''
     const topicId = typeof o['topicId'] === 'string' ? o['topicId'] : ''
@@ -334,6 +352,9 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
 
   // ---- 匹配测试台（R5-P2c） -----------------------------------------------
 
+  /** matchTest 的 title 长度上限（字符；超长在输入阶段 block，不进判定管线） */
+  const MATCH_TEST_TITLE_MAX_CHARS = 500
+
   /**
    * invoke(MatchTestRequest) → MatchTestResult：按已保存配置对单个标题跑一遍
    * 判定管线（testbench.runMatchTest 纯函数）。只读诊断：不写 seen / hits、
@@ -358,6 +379,21 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
         wouldPush: false,
         stages: [
           { stage: 'input', label: '输入', outcome: 'block', detail: '参数无效：需要非空 title' }
+        ]
+      }
+    }
+    // 长度上限：真实帖子标题远短于此；超长输入（误贴整篇文章等）直接在输入阶段
+    // 拦下，不进管线（匹配/相似度/语义调用都不该为无意义载荷买单）
+    if (title.length > MATCH_TEST_TITLE_MAX_CHARS) {
+      return {
+        wouldPush: false,
+        stages: [
+          {
+            stage: 'input',
+            label: '输入',
+            outcome: 'block',
+            detail: `标题超长（>${MATCH_TEST_TITLE_MAX_CHARS} 字符）`
+          }
         ]
       }
     }
@@ -440,9 +476,25 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
    * （Node ≥18）自带 fetch；更新检查走直连——不掺 proxy 的 site/ai client
    * （那些归 runtime 管，且 GitHub API 通常无需代理即可达；真不可达也只是
    * 静默失败，下次轮询再试）。
+   * timeoutMs → AbortSignal.timeout（runtime.ts createBrowserStackFetch 同款，
+   * 老运行时缺 AbortSignal.any 时以 timeout 为准）；外部 signal 经
+   * AbortSignal.any 合并。不给超时的全局 fetch 会挂到 TCP 超时为止（分钟级），
+   * 手动「检查更新」期间 UI 会一直等。
    */
   const directFetch: FetchLike = async (url, init) => {
-    const res = await fetch(url, { headers: init?.headers, signal: init?.signal })
+    let signal = init?.signal
+    if (init?.timeoutMs !== undefined) {
+      const timeoutSignal = AbortSignal.timeout(init.timeoutMs)
+      if (signal !== undefined && typeof AbortSignal.any === 'function') {
+        signal = AbortSignal.any([signal, timeoutSignal])
+      } else {
+        signal = timeoutSignal
+      }
+    }
+    const res = await fetch(url, {
+      headers: init?.headers,
+      ...(signal !== undefined ? { signal } : {})
+    })
     const headers: Record<string, string> = {}
     res.headers.forEach((value, key) => {
       headers[key] = value
@@ -624,8 +676,18 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
           JSON.stringify(unpacked.data.feedback, null, 2)
         )
       }
-      // 内存不热换（store/engine 手里的还是旧值）：重启生效，needsRestart 恒 true
-      rt.logger.info(`backup imported from ${basename(filePath)}; restart required`)
+      // 四段已落盘 → "待重启禁写"：暂停引擎（停轮询/停定时，此后 runtime 不再
+      // 产生 seen/state 落盘），shutdown 也不会再用旧内存集 flush 覆盖导入的
+      // seen.json。UI 提示"监控已暂停，请尽快重启"。
+      rt.beginPendingRestart('backup-imported')
+      // config 段内存重读（防"导入后继续在设置页保存"把旧内存配置写回盘上）：
+      // 导入的 config.json 是明文凭据信封，load 读路径原样透传（不带 enc:v1:
+      // marker 的值不进解密）。seen/state/engine 内存不热换——重启生效，
+      // needsRestart 语义不变。
+      rt.store.load()
+      rt.logger.info(
+        `backup imported from ${basename(filePath)}; monitoring paused, restart required`
+      )
       return { ok: true, needsRestart: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }

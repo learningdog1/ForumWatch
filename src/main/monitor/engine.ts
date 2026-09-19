@@ -353,8 +353,8 @@ export interface EngineDeps {
    * 推送器（R6-W1 起为 Notifier 接口——通道无关抽象，本轮实现只有
    * TelegramNotifier；W3 router/composite 在引擎外侧扇出，engine 不感知通道数）。
    * sendHit 收 HitMessageInput 单参对象（topic/matchedKeywords/commentary/
-   * matchedRule——matchedRule 仅 rule 命中非 null，与 commentary 同款"不留
-   * undefined"约定）。单测可全 mock。
+   * matchedRule/matchedRuleId/semanticReason——后三者的规则/语义字段仅对应命中
+   * 方式非 null，与 commentary 同款"不留 undefined"约定）。单测可全 mock。
    */
   notifier: Notifier
   /** 每轮轮询前重读的配置访问器（装配方保证热更新） */
@@ -890,7 +890,15 @@ export class MonitorEngine {
       if (cfg.priceRules.length > 0) {
         const ruleMatch = evaluateRules(topic.title, cfg.priceRules)
         if (ruleMatch !== null) {
-          await this.processHit(topic, [], cfg, 'rule', null, ruleMatch.label)
+          await this.processHit(
+            topic,
+            [],
+            cfg,
+            'rule',
+            null,
+            ruleMatch.label,
+            ruleMatch.ruleId
+          )
           continue
         }
       }
@@ -1424,7 +1432,8 @@ export class MonitorEngine {
    * matchedBy：literal（字面管线，matchedKeywords 非空）/ semantic（语义管线，
    * matchedKeywords 恒空数组，semanticReason 带 AI 判定理由或 null）/ rule（价格
    * 规则管线，matchedKeywords 恒空数组，matchedRule 带规则 label——id 无 label
-   * 时即 id，rules.ts 的 RuleMatch.label 已归一）。
+   * 时即 id，rules.ts 的 RuleMatch.label 已归一；matchedRuleId 带规则 id，供
+   * router 的 when.ruleId 路由用——两字段同源同生，label ≠ id 时路由只认 id）。
    * commentary：sendHit 之前生成（无论推送是否会被静音——HitRecord/内存环仍要
    * 展示）；恒 string|null，不留 undefined、不写空串（见 maybeGenerateCommentary）。
    * 相似降噪闸在锐评生成**之前**（吞并的帖子不打 LLM、不耗配额）。
@@ -1435,7 +1444,8 @@ export class MonitorEngine {
     cfg: AppConfig,
     matchedBy: 'literal' | 'semantic' | 'rule' = 'literal',
     semanticReason: string | null = null,
-    matchedRule: string | null = null
+    matchedRule: string | null = null,
+    matchedRuleId: string | null = null
   ): Promise<void> {
     // 窗口重建就位保障（R5-P2a 第 11 步）：构造期发起的重建在这里被 await——
     // 首轮推送（含相似检查）前窗口必须就位；此后 promise 已 settle，await 零成本。
@@ -1496,6 +1506,7 @@ export class MonitorEngine {
             matchedKeywords,
             commentary,
             matchedRule: matchedBy === 'rule' ? matchedRule : null,
+            matchedRuleId: matchedBy === 'rule' ? matchedRuleId : null,
             semanticReason,
             matchedBy
           },
@@ -1508,13 +1519,18 @@ export class MonitorEngine {
       }
       try {
         // matchedRule 仅 rule 命中传 label（telegram 侧渲染「命中规则」行），
-        // 其余命中方式恒传 null（与 commentary 同款"不留 undefined"约定）；
-        // report 挂外层 collector（成功/失败两路径的 HitRecord 共用同一明细）
+        // matchedRuleId 同源带规则 id（router 的 when.ruleId 路由用）；semanticReason
+        // 语义命中带 AI 理由、其余恒 null——三字段与挂起 payload 形状对齐（bark/
+        // nfy/webhook 通道即时/挂起两路径消费一致）；其余命中方式恒传 null（与
+        // commentary 同款"不留 undefined"约定）；report 挂外层 collector（成功/
+        // 失败两路径的 HitRecord 共用同一明细）
         await this.deps.notifier.sendHit({
           topic,
           matchedKeywords,
           commentary,
           matchedRule: matchedBy === 'rule' ? matchedRule : null,
+          matchedRuleId: matchedBy === 'rule' ? matchedRuleId : null,
+          semanticReason,
           report: collector.report
         })
         notifiedAt = this.isoNow()

@@ -254,6 +254,25 @@ describe('TelegramNotifier', () => {
     expect(h.sleeps).toEqual([1000, 2000])
   })
 
+  it('fetch 异常消息回显完整请求 URL 时：最终错误不残留 botToken 明文（先抹后截）', async () => {
+    // token 在 URL 路径里；模拟 URL 解析失败类异常——消息带完整 URL
+    const h = makeHarness(() => {
+      throw new TypeError(
+        `Invalid URL "https://api.telegram.org/bot${defaultConfig.botToken}/sendMessage"`
+      )
+    })
+    let caught: unknown
+    await h.notifier.sendTest().catch((e: unknown) => {
+      caught = e
+    })
+
+    expect(caught).toBeInstanceOf(TelegramError)
+    const msg = (caught as TelegramError).message
+    expect(msg).toContain('after 3 attempts')
+    expect(msg).not.toContain(defaultConfig.botToken) // token 明文不进 notifyError/日志
+    expect(msg).toContain('***') // 明文被整体替换为 ***
+  })
+
   it('连续 3 次 429 → TelegramError 且带 retryAfterSec', async () => {
     const h = makeHarness(() => tooManyRes)
     let caught: unknown

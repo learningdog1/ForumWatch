@@ -7,6 +7,7 @@ import {
   compareSemver,
   GITHUB_LATEST_RELEASE_URL,
   parseLatestRelease,
+  UPDATE_CHECK_TIMEOUT_MS,
   UPDATE_INTERVAL_MS,
   UPDATE_INITIAL_DELAY_MS,
   UpdateChecker,
@@ -213,9 +214,22 @@ describe('UpdateChecker.check（三态，fetch 注入）', () => {
     expect(typeof ua === 'string' && ua.length > 0).toBe(true)
   })
 
-  it('导出常量：默认延迟 15s / 24h，端点与 UPDATE_REPO 一致', () => {
+  it('请求形状：整体超时随 init.timeoutMs 下发（裸 fetch 会挂到 TCP 超时）', async () => {
+    const ff = fakeFetch()
+    ff.queue.push(okBody(release('v1.0.0')))
+    const checker = new UpdateChecker({
+      currentVersion: '0.2.0',
+      repo: 'colmidad/forumwatch',
+      fetchFn: ff.fetchFn
+    })
+    await checker.check()
+    expect(ff.calls[0].init?.timeoutMs).toBe(UPDATE_CHECK_TIMEOUT_MS)
+  })
+
+  it('导出常量：默认延迟 15s / 24h / 检查超时 15s，端点与 UPDATE_REPO 一致', () => {
     expect(UPDATE_INITIAL_DELAY_MS).toBe(15_000)
     expect(UPDATE_INTERVAL_MS).toBe(24 * 60 * 60 * 1000)
+    expect(UPDATE_CHECK_TIMEOUT_MS).toBe(15_000)
     expect(GITHUB_LATEST_RELEASE_URL).toBe(
       'https://api.github.com/repos/colmidad/forumwatch/releases/latest'
     )

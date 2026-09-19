@@ -207,6 +207,8 @@ export interface HitRecord {
    * 命中的价格规则 id/label（matchedBy='rule' 时给出）。**可选**：旧 hits/*.jsonl
    * 行没有此字段，消费方必须容忍 undefined（等价"非规则命中"）；新写入的记录一律给
    * string|null——非规则命中时为 null，规则命中时为规则的 id（无 label）或 label。
+   * 展示语义字段：**路由不读它**（router 的 when.ruleId 按规则 id 匹配，推送链路
+   * 的规则 id 在 HitMessageInput.matchedRuleId，不进 HitRecord）。
    */
   matchedRule?: string | null
   /**

@@ -51,7 +51,8 @@ function safeDecode(s: string): string {
 /**
  * 解析代理 URL 为 dispatcher 构造规格（纯函数，不产生副作用）。
  * '' → direct；http/https → ProxyAgent；socks5/socks5h → fetch-socks。
- * 非法输入（不支持的 scheme / 缺 host / URL 语法错误）抛 Error，消息带原文。
+ * 非法输入（不支持的 scheme / 缺 host / URL 语法错误 / 坏端口）抛 Error，消息带
+ * **脱敏后**的 URL（redactProxyUrl——原文可含 user:pass 凭据，不得进日志）。
  */
 export function resolveDispatcherSpec(proxyUrl: string): DispatcherSpec {
   const trimmed = proxyUrl.trim()
@@ -63,10 +64,10 @@ export function resolveDispatcherSpec(proxyUrl: string): DispatcherSpec {
   try {
     url = new URL(trimmed)
   } catch {
-    throw new Error(`invalid proxy url (cannot parse): ${proxyUrl}`)
+    throw new Error(`invalid proxy url (cannot parse): ${redactProxyUrl(proxyUrl)}`)
   }
   if (!url.hostname) {
-    throw new Error(`invalid proxy url (missing host): ${proxyUrl}`)
+    throw new Error(`invalid proxy url (missing host): ${redactProxyUrl(proxyUrl)}`)
   }
 
   switch (url.protocol) {
@@ -79,7 +80,7 @@ export function resolveDispatcherSpec(proxyUrl: string): DispatcherSpec {
     case 'socks5h:': {
       const port = url.port === '' ? SOCKS_DEFAULT_PORT : Number(url.port)
       if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-        throw new Error(`invalid proxy url (bad port): ${proxyUrl}`)
+        throw new Error(`invalid proxy url (bad port): ${redactProxyUrl(proxyUrl)}`)
       }
       return {
         kind: 'socks5',
@@ -93,7 +94,7 @@ export function resolveDispatcherSpec(proxyUrl: string): DispatcherSpec {
 
     default:
       throw new Error(
-        `unsupported proxy scheme "${url.protocol}" (expected http://, https://, socks5:// or socks5h://): ${proxyUrl}`
+        `unsupported proxy scheme "${url.protocol}" (expected http://, https://, socks5:// or socks5h://): ${redactProxyUrl(proxyUrl)}`
       )
   }
 }

@@ -9,6 +9,7 @@
  */
 import { useState, type CSSProperties } from 'react'
 import type { HitRecord } from '@shared/types'
+import { openExternalWithTitleHint } from '../lib/open-external'
 import { sourceLabel } from '../lib/status'
 import { formatClock } from '../lib/time'
 import { EmptyState } from './EmptyState'
@@ -241,7 +242,7 @@ export function HitList(props: {
           )
         ) : (
           hits.map((hit) => (
-            <div className="hit" key={hit.topic.id}>
+            <div className="hit" key={`${hit.topic.sourceId}:${hit.topic.id}`}>
               <time className="num">{formatClock(hit.notifiedAt ?? hit.topic.lastActiveAt)}</time>
               <span className="src-badge" title={`来源：${sourceLabel(hit.topic.sourceId)}`}>
                 {sourceLabel(hit.topic.sourceId)}
@@ -253,8 +254,8 @@ export function HitList(props: {
                 type="button"
                 className="hit-title"
                 title={`打开：${hit.topic.title}`}
-                onClick={() => {
-                  void window.api.openExternal(hit.topic.url)
+                onClick={(e) => {
+                  void openExternalWithTitleHint(e.currentTarget, hit.topic.url)
                 }}
               >
                 {hit.topic.title}

@@ -20,6 +20,9 @@
  *   负数群 id 原样合法）且不等于当前主 Chat ID（getCredentials 的 chatId，
  *   隐含允许）→ 完全忽略（不回复），log warn 一分钟去重。未授权会话得不到
  *   任何回声，无法探测 bot 存活。
+ *   注意 Telegram 的 chat.id 恒为数字（私聊正整数、群组 -100 开头负数），配置里
+ *   填 @username 之类非数字值永远无法与数字字符串精确相等——start 时对这类值
+ *   warn 一次提示（不改变匹配行为；chatId 不是秘密，warn 原样带值便于排查）。
  * - offset 内存推进，不持久化：重启从 0 重新拉（getUpdates 无 offset 返回
  *   最新一批，够用）。
  * - 运行中配置现读（getEnabled / getCredentials 每轮循环重读）：enabled 翻
@@ -80,6 +83,9 @@ interface TgUpdate {
   update_id: number
   message?: { chat?: { id?: unknown }; text?: unknown }
 }
+
+/** Telegram chat id 的合法形态：数字字符串（私聊正数 / 群组 -100 开头负数） */
+const NUMERIC_CHAT_ID_RE = /^-?\d+$/
 
 function describeError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err)
@@ -182,13 +188,16 @@ export class BotCommandController {
 
   /**
    * 启动指令监听。enabled=false 或凭据缺失 → **noop**（不 log、不发请求）。
-   * 已在运行 → 幂等 noop。启动流程：deleteWebhook（清历史 webhook，坑8 第三条
-   * 的另一半来源；失败仅 warn）→ 长轮询循环。
+   * 已在运行 → 幂等 noop。启动流程：非数字 chat id 配置告警（warn，不改匹配
+   * 行为）→ deleteWebhook（清历史 webhook，坑8 第三条的另一半来源；失败仅
+   * warn）→ 长轮询循环。
    */
   start(): void {
     if (this.running) return
     if (!this.deps.getEnabled().enabled) return
-    if (this.deps.getCredentials() === null) return
+    const creds = this.deps.getCredentials()
+    if (creds === null) return
+    this.warnNonNumericChatIds(creds)
     this.running = true
     this.offset = 0
     this.dedupLast.clear()
@@ -216,6 +225,30 @@ export class BotCommandController {
   }
 
   // ---- 内部实现 ----------------------------------------------------------
+
+  /**
+   * 非数字 chat id 配置告警（启动时一次）：Telegram 的 chat.id 恒为数字字符串，
+   * allowlist 按字符串精确比较，@username / 别名之类的值永远无法命中——配置侧
+   * 静默失效，这里 warn 提示排查（不改变匹配行为；chatId 不是秘密，原样带值）。
+   */
+  private warnNonNumericChatIds(creds: { chatId: string }): void {
+    const mainChatId = creds.chatId.trim()
+    if (mainChatId !== '' && !NUMERIC_CHAT_ID_RE.test(mainChatId)) {
+      this.deps.log.warn(
+        `telegram remote control: chatId "${mainChatId}" 不是数字 id（私聊为正数、群组为 -100 开头负数），` +
+          '可能与 allowlist 的字符串精确比较永远无法命中'
+      )
+    }
+    for (const raw of this.deps.getEnabled().allowedChatIds) {
+      const id = raw.trim()
+      if (id !== '' && !NUMERIC_CHAT_ID_RE.test(id)) {
+        this.deps.log.warn(
+          `telegram remote control: allowedChatIds 含非数字 id "${id}"（chat.id 恒为数字，` +
+            '字符串精确比较永远无法命中；应填数字 id，群组为 -100 开头）'
+        )
+      }
+    }
+  }
 
   /** 主循环：每轮现读配置（enabled/凭据失效自动退出）→ getUpdates → 逐条处理 */
   private async loop(myRun: number): Promise<void> {
