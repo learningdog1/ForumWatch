@@ -291,6 +291,9 @@ async function main(): Promise<number | null> {
 
   engine = new MonitorEngine({
     getSources,
+    // R5-P2a：per-source 过滤访问器（headless 配置是启动快照 effective）
+    getSourceFilters: (sourceId) =>
+      effective.sources.find((s) => s.id === sourceId)?.filters,
     seen,
     state: engineState,
     notifier,

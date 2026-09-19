@@ -122,6 +122,33 @@ describe('formatHitMessage', () => {
     expect(formatHitMessage(topic, ['冰箱', '便宜&实惠'], null)).toBe(baseline)
     expect(formatHitMessage(topic, ['冰箱', '便宜&实惠'], '')).toBe(baseline)
   })
+
+  it('规则命中（第四参 matchedRule 非空）：「🎯 命中」行改为 🎯 命中规则: {label}（转义），关键词行不再出现', () => {
+    const msg = formatHitMessage(topic, [], null, '白菜月付 <年付> & 88')
+    const expected = [
+      `🔔 <b>${escapeHtml(topic.title)}</b>`,
+      `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
+      `🎯 命中规则: 白菜月付 &lt;年付&gt; &amp; 88`,
+      `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
+    ].join('\n')
+    expect(msg).toBe(expected)
+    expect(msg).not.toContain('命中: ') // 关键词行被替换
+  })
+
+  it('规则命中 + 锐评并存：💬 行仍在「🎯 命中规则」行之后', () => {
+    const msg = formatHitMessage(topic, [], '这价格可以冲', '白菜月付')
+    expect(msg.split('\n')).toHaveLength(5)
+    expect(msg.split('\n')[2]).toBe('🎯 命中规则: 白菜月付')
+    expect(msg.split('\n')[3]).toBe('💬 锐评: 这价格可以冲')
+  })
+
+  it('回归：matchedRule 不传 / null / 空串（literal/semantic 命中）→ 与三参版本逐字节一致', () => {
+    const baseline = formatHitMessage(topic, ['冰箱'], '锐评')
+    expect(formatHitMessage(topic, ['冰箱'], '锐评', undefined)).toBe(baseline)
+    expect(formatHitMessage(topic, ['冰箱'], '锐评', null)).toBe(baseline)
+    expect(formatHitMessage(topic, ['冰箱'], '锐评', '')).toBe(baseline)
+    expect(baseline).toContain('🎯 命中: 冰箱')
+  })
 })
 
 describe('TelegramNotifier', () => {
@@ -161,6 +188,15 @@ describe('TelegramNotifier', () => {
     expect(body.text).toContain('💬 锐评: 便宜 &lt;但&gt; 要谨慎 &amp; 快冲')
     expect(body.parse_mode).toBe('HTML')
     expect(h.sleeps).toEqual([]) // 首条不等待
+  })
+
+  it('sendHit 第四参透传（R5-P2a）：规则 label 进 body.text 的「命中规则」行，与四参版本一致', async () => {
+    const h = makeHarness(() => okRes)
+    await h.notifier.sendHit(topic, [], null, '白菜月付')
+    const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as { text: string }
+    expect(body.text).toBe(formatHitMessage(topic, [], null, '白菜月付'))
+    expect(body.text).toContain('🎯 命中规则: 白菜月付')
+    expect(body.text).not.toContain('命中: ')
   })
 
   it('sendTest 成功：固定文案', async () => {

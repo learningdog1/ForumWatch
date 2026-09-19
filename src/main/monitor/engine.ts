@@ -8,7 +8,8 @@
  * 新帖按页面逆序处理（推送顺序旧→新）→ 置顶只入集（ADR 8.5）→
  * 匹配管线（D4，逐条）：排除词字面一票否决 → literal 命中即推送（不走 AI）→
  * 生效模式含 semantic 时剩余帖进 AI 批评（cap 12/批，verdict 三态：
- * hit 推送 / miss 入 seen / 未决不入 seen 下轮重评）→
+ * hit 且 score >= ai.semanticThreshold（R5-P2b 置信度闸，0=不过滤）推送 /
+ * miss 或低置信 hit 入 seen / 未决不入 seen 下轮重评）→
  * 尝试推送（单个失败不中断本轮；真实失败不入集下轮重试，ADR 8.10）→
  * 该 source 轮末 flush/prune/按 source 持久化 totalHits。
  *
@@ -55,6 +56,20 @@
  *   互不影响；pageMax 下降时 warn（id 单调性异常信号）。
  * - 非数字 id（非 /^\d+$/ 或超出安全整数）跳过过滤且不计入阈值。
  *
+ * R5-P2a（第五轮引擎确定性管线）：
+ * - per-source 过滤（getSourceFilters 访问器，可选依赖）：unseen 链第 2 步，
+ *   滤帖入 seen 不推送不评估（filters.ts 纯函数）。
+ * - 价格规则（rules.ts）：第 6 步、先于 literal、命中即得（同一帖只记一种命中
+ *   方式，规则优先）；matchedBy='rule' + matchedRule（规则 label，无 label 用 id）。
+ * - 相似降噪（similarity.ts，DEC-4）：命中帖推送前与 48h"近期已推"窗口比对
+ *   （第 8 步，作用于 rule/literal/semantic 全部命中方式；enabled=false 跳过），
+ *   相似 → 入 seen 不推送 + log + 内存计数。推送成功入窗（第 10 步，失败/静音
+ *   不入），轮末 48h prune；启动自 hits 近 3 天记录重建（第 11 步，构造期发起、
+ *   首个 pollOnce 顶部 await 保证就位）。
+ * - 第 2 页自适应（DEC-8）：上一轮有效新帖数（进入匹配管线的帖子数）≥ 40 且
+ *   health=ok → fetchLatest({pages:2})（第 2 页失败由 adapter 吞并，按第 1 页
+ *   成功收尾）；观测面 SourceStatus.page2Fetches（内存累计）。
+ *
  * 全局聚合（每轮收尾 finishRound 派生，既有消费方——托盘/UI——不破）：
  * health = 各 source 最差（challenged > backoff > ok；无 source → ok）；
  * consecutiveFailures 取最差、lastError 取最新、lastSuccessAt 取最新；
@@ -79,7 +94,10 @@
  * - HttpClient 与代理路由由装配方负责，本引擎只面向注入的 sources 与 notifier；
  *   semanticEvaluator / hitsStore 同样由装配方注入（缺省 = 不做语义、不落命中）。
  */
+import { applySourceFilters } from './filters'
 import { isExcluded, matchTopic } from './matcher'
+import { evaluateRules } from './rules'
+import { isSimilarToAny, normalizeTitle } from './similarity'
 import { computeBackoffMs, type PollScheduler } from './poller'
 import type { FileSeenStore } from './dedup'
 import { formatLocalDate } from './hits-store'
@@ -98,6 +116,7 @@ import {
   type HealthState,
   type HitRecord,
   type MatchMode,
+  type SourceFilters,
   type SourceStatus,
   type Topic
 } from '../../shared/types'
@@ -107,6 +126,25 @@ export const HIT_RING_CAPACITY = 200
 
 /** AI 每日调用上限（D4：常量 300，v2 不进配置） */
 export const DAILY_AI_CALL_LIMIT = 300
+
+/**
+ * 相似降噪"近期已推"窗口时长（R5-P2a，DEC-4）：48h，引擎侧常量不进配置。
+ * 生命周期：推送成功入窗（推送失败/静音不入）；每轮轮末按时间 prune。
+ */
+export const SIMILARITY_WINDOW_MS = 48 * 60 * 60 * 1000
+
+/**
+ * 启动重建窗口读取的天数（R5-P2a 第 11 步）：48h 跨本地日最多涉 3 个日桶
+ * （今天 + 前 2 天），读 3 天即完整覆盖；超出 48h 的记录不进窗（窗口不变式）。
+ */
+const SIMILARITY_REBUILD_DAYS = 3
+
+/**
+ * 第 2 页补抓触发阈值（DEC-8）：上一轮**有效新帖数**（过了 id 阈值 + 置顶 +
+ * 排除词 + per-source 过滤之后进入匹配管线的帖子数）≥ 此值才请求第 2 页。
+ * 40 ≈ NodeSeek 单页 49 条去掉置顶后的全量新页，即"整页都是新帖"的信号。
+ */
+export const PAGE2_TRIGGER_EFFECTIVE_NEW = 40
 
 /**
  * 锐评每日调用子限额（第三轮：常量 100，v2 不进配置）。与 300 总桶共用
@@ -174,6 +212,17 @@ interface SourceRuntime {
   prevUnseenKeys: Set<string>
   /** 上一轮页面的最大合法数值 id（W3 观测：pageMax 下降 warn 的比较基准）；null = 未观测过 */
   lastPageMaxId: number | null
+  /**
+   * 上一轮**有效新帖数**（R5-P2a / DEC-8 第 2 页自适应的输入）：过了 id 阈值 +
+   * 置顶 + 排除词 + per-source 过滤之后**进入匹配管线**（规则/字面/语义）的帖子
+   * 数——不是裸 unseen。≥ PAGE2_TRIGGER_EFFECTIVE_NEW(40) 且 health=ok 时下一轮
+   * fetchLatest 请求 2 页。轮末成功观测后更新；失败/冷却轮不更新（保留上一次
+   * 成功观测值，与 prevUnseenKeys 同款生命周期）。基线/升级初始化轮置 0（整页
+   * 吞并，没有帖子进管线）。
+   */
+  prevEffectiveNewCount: number
+  /** 第 2 页补抓累计次数（DEC-8 观测面，内存：SourceStatus.page2Fetches；重启清零） */
+  page2Fetches: number
 }
 
 export interface EngineDeps {
@@ -187,13 +236,25 @@ export interface EngineDeps {
   /** 引擎状态持久化（per-source baselineDone / totalHits；按 sourceId getFor/setFor） */
   state: FileEngineState
   /**
+   * per-source 过滤访问器（R5-P2a，可选依赖）：sourceId → 该来源的 SourceFilters
+   * （来自 config.sources[].filters；配置热更新语义——engine 每轮 pollSource 取，
+   * 装配方闭包读 store 当前值）。未注入 / 返回 undefined = 不过滤（默认行为不变，
+   * headless/桌面装配方各接一行）。
+   */
+  getSourceFilters?: (sourceId: string) => SourceFilters | undefined
+  /**
    * Telegram 推送（TelegramNotifier 结构满足此接口；单测可全 mock）。
-   * sendHit 第三参 commentary（第三轮 AI 锐评）：engine 统一传 string|null
-   * （不传 undefined）——null/空串时消息与两参版本逐字节一致，两参实现的
-   * 旧装配方结构兼容无需改动。
+   * sendHit 第三参 commentary（第三轮 AI 锐评）与第四参 matchedRule（第五轮
+   * 价格规则命中的规则 label；literal/semantic 命中恒传 null——不传 undefined）：
+   * 两参/三参实现的旧装配方结构兼容无需改动（参数少的方法可赋给参数多的签名）。
    */
   notifier: {
-    sendHit(topic: Topic, matchedKeywords: string[], commentary?: string | null): Promise<void>
+    sendHit(
+      topic: Topic,
+      matchedKeywords: string[],
+      commentary?: string | null,
+      matchedRule?: string | null
+    ): Promise<void>
     sendTest(): Promise<void>
   }
   /** 每轮轮询前重读的配置访问器（装配方保证热更新） */
@@ -217,8 +278,14 @@ export interface EngineDeps {
   /**
    * 命中持久化（D5 hits/<date>.jsonl；可选）。每次 emit onHit 的同处 append；
    * append 失败只 log warn 不中断（调用方 catch，hits-store 的 append 会 reject）。
+   * readRecent（R5-P2a 第 11 步，可选）：启动重建相似降噪窗口的数据源——
+   * HitsStore 自带该方法；只注入 { append } 的旧装配/测试结构兼容（缺省 = 窗口
+   * 从空开始，行为等于全新安装）。
    */
-  hitsStore?: { append(hit: HitRecord, now?: Date): Promise<void> }
+  hitsStore?: {
+    append(hit: HitRecord, now?: Date): Promise<void>
+    readRecent?(days: number, now?: Date): Promise<HitRecord[]>
+  }
   /** 状态变化回调（desired/health/nextPollAt 等每次变化后发出实时快照） */
   onStatus?: (s: EngineStatus) => void
   /** 命中回调（推送尝试 settle 后发出；含推送失败与静音两种非成功态） */
@@ -239,17 +306,39 @@ export class MonitorEngine {
    */
   private readonly pendingNotifyErrors = new Map<string, string>()
   /**
-   * 已判 hit 但推送失败中的语义帖缓存（D4 坑⑥，F2）：seen 键 -> AI 判定理由。
-   * 下轮该帖仍在首页时不重进 AI 批（不耗配额、不冒改变判定风险），直接按
-   * 已判 hit 走 processHit 重试；推送成功/转静音清除；帖子滚出首页随轮末
-   * 清理回收（pruneRetryMaps，F5）。与 pendingNotifyErrors 是两套机制：后者
-   * 是全部命中共用的「失败原因去重 emit」表，前者只服务语义档的 verdict 复用。
+   * 已过置信度闸（R5-P2b：score >= semanticThreshold）且已判 hit、但推送失败
+   * 中的语义帖缓存（D4 坑⑥，F2）：seen 键 -> AI 判定理由。
+   * 下轮该帖仍在首页时不重进 AI 批（不耗配额、不冒改变判定风险，也**不再过
+   * 阈值**——过闸是既成事实），直接按已判 hit 走 processHit 重试；推送成功/
+   * 转静音清除；帖子滚出首页随轮末清理回收（pruneRetryMaps，F5）。与
+   * pendingNotifyErrors 是两套机制：后者是全部命中共用的「失败原因去重 emit」
+   * 表，前者只服务语义档的 verdict 复用。缓存值只存 reason：重试路径不读
+   * score（不再过闸），无需保存。
    */
   private readonly semanticVerdicts = new Map<string, { reason: string | null }>()
   /** sourceId -> 运行态（含热更新后加入的 source；移除的 source 保留卡但退出聚合） */
   private readonly runtimes = new Map<string, SourceRuntime>()
   /** sourceId -> 本轮新增命中数（轮末按 source 持久化 totalHits 后清零） */
   private readonly pendingHits = new Map<string, number>()
+  /**
+   * 相似降噪"近期已推"窗口（R5-P2a 第 8/10 步）：成功推送过的标题（normalizeTitle
+   * 归一化后）+ 推送时刻（epoch ms），数组旧→新。命中帖推送前与窗口比对，相似则
+   * 入 seen 不推送（log info + 计数）。推送失败（pendingNotifyErrors 路径）/静音
+   * 不入窗——窗口语义是"用户已收到"。每轮轮末按 48h prune（对齐 pruneRetryMaps
+   * 调用点）。内存态：重启靠 hits 重建（similarityWindowReady）。
+   */
+  private readonly pushedTitles: { title: string; at: number }[] = []
+  /**
+   * 相似降噪吞并计数（R5-P2a，内存、重启清零；后续 D1 流水再接观测面）。
+   * 测试通过 internals 模式观测（同 retryMapSize 先例）。
+   */
+  private similarSwallowedCount = 0
+  /**
+   * 启动窗口重建 promise（构造期发起、首个 pollOnce 顶部 await）：保证首轮
+   * 推送前窗口已就位——避免重建晚于首轮回填导致跨重启的近重复漏网。
+   * 重建内部消化一切异常（fail-safe：失败 = 空窗开始，只 log warn）。
+   */
+  private readonly similarityWindowReady: Promise<void>
   /** 无法归因到任何 source 的失败（getConfig/getSources 抛错）且当时无 source 的兜底 */
   private configFailures = 0
   private configLastError: string | null = null
@@ -284,6 +373,9 @@ export class MonitorEngine {
     } catch (err) {
       deps.logger.error(`cannot enumerate sources at construction: ${describeError(err)}`)
     }
+    // R5-P2a 第 11 步：启动重建相似降噪窗口（近 3 天 hits、notifiedAt 非空、
+    // 仍在 48h 窗口内）。构造期发起（异步，不阻塞构造），首个 pollOnce 顶部 await。
+    this.similarityWindowReady = this.rebuildSimilarityWindow()
   }
 
   /** desired='running' 并立即触发首轮（首启基线在这一轮完成） */
@@ -392,6 +484,10 @@ export class MonitorEngine {
       }
     }
     this.pruneRetryMaps(roundTopicKeys, observedSources)
+    // 相似降噪窗口轮末 prune（R5-P2a 第 10 步）：只保留仍在 48h 窗口内的条目
+    // （时间维度全局裁剪，与 per-source 的 roundTopicKeys 无关；生命周期对齐
+    // pruneRetryMaps 的调用点）
+    this.pruneSimilarityWindow()
     // 锐评缓存清理（第三轮）：与 pruneRetryMaps 同一调用点、同一 roundTopicKeys
     // 键集与 observedSources 守卫（键注册在 pollSource 的提前 return 之前，基线/
     // 升级初始化轮同样覆盖；冷却跳过的 source 未观测 → 其键保留，F1）；
@@ -453,12 +549,15 @@ export class MonitorEngine {
   }
 
   /**
-   * 轮询单个 source 的完整管线（D4 匹配管线逐条）：
-   * 盖章 → 基线判断（W3：基线轮末同轮初始化 id 阈值）→ 存量升级静默初始化轮
+   * 轮询单个 source 的完整管线（unseen 处理链的最终顺序，ultrabrain 裁定）：
+   * 盖章（1）→ per-source 过滤（2，R5-P2a：滤帖入 seen 不推送不评估）→
+   * 基线判断（W3：基线轮末同轮初始化 id 阈值）→ 存量升级静默初始化轮
    * （W3：baselineDone=true 但阈值 null 时整页入 seen 不推送）→ 新帖逆序处理
-   * （旧帖 id 过滤 → 排除词否决 → literal → 语义候选收集）→ 语义批评估 →
+   * （旧帖 id 过滤(3) → 置顶(4) → 排除词否决(5) → 价格规则(6，R5-P2a：先于
+   * literal、命中即得) → literal(7) → 语义候选收集(9)）→ 命中帖推送前统一过
+   * 相似降噪闸（8，R5-P2a：与 48h 已推窗口相似 → 入 seen 不推）→ 语义批评估 →
    * 轮末 flush/prune/prevUnseenKeys 轮换/阈值推进与 totalHits 合并持久化。
-   * 推送顺序：literal 命中按页面逆序（旧→新）在遍历中即时推送；语义命中在其后
+   * 推送顺序：literal/规则命中按页面逆序（旧→新）在遍历中即时推送；语义命中在其后
    * 按批内顺序（旧→新）推送——批式评估天然滞后一轮内位置，跨档顺序不保证。
    * 异常上抛给 pollOnce 的 per-source catch。
    */
@@ -468,7 +567,15 @@ export class MonitorEngine {
     cfg: AppConfig,
     roundTopicKeys: Set<string>
   ): Promise<void> {
-    const topics = await adapter.fetchLatest()
+    // 第 2 页自适应（R5-P2a / DEC-8 修正口径）：上一轮有效新帖数 ≥ 40 且来源当前
+    // 健康（health=ok——challenged/backoff 恢复后的第一轮不补抓，防双倍 CF 暴露）
+    // 才请求 2 页。Adapter 不支持 pages（rss/v2ex 收 opts 忽略）时行为不变。
+    // page2Fetches 口径 = 引擎发起 2 页请求的次数（内存累计；第 2 页在 adapter
+    // 内部失败也计——观测的是"补抓被触发"这个引擎侧事实）。
+    const wantPage2 =
+      rt.prevEffectiveNewCount >= PAGE2_TRIGGER_EFFECTIVE_NEW && rt.health === 'ok'
+    const topics = await adapter.fetchLatest({ pages: wantPage2 ? 2 : 1 })
+    if (wantPage2) rt.page2Fetches++
 
     // sourceId 盖章（处理前）：adapter 不感知来源归属（D2/D3）
     for (const t of topics) t.sourceId = adapter.id
@@ -511,6 +618,7 @@ export class MonitorEngine {
           (idFilter && pageMaxId !== null ? `, id threshold initialized at ${pageMaxId}` : '')
       )
       rt.prevUnseenKeys = new Set() // 基线整页入集：无在途帖，豁免集清空
+      rt.prevEffectiveNewCount = 0 // 整页吞并：无帖进管线，page2 触发条件复位
       return
     }
 
@@ -536,6 +644,7 @@ export class MonitorEngine {
           `${unseenCount} topics swallowed (upgrade init)`
       )
       rt.prevUnseenKeys = new Set() // 整页已入集：无在途帖
+      rt.prevEffectiveNewCount = 0 // 整页吞并：无帖进管线
       return
     }
 
@@ -544,6 +653,10 @@ export class MonitorEngine {
     const roundUnseenKeys = new Set(unseen.map((t) => seenKeyFor(adapter.id, t.id)))
     /** W3：本轮被旧帖过滤吞并（入 seen 不推送）的帖子数（观测用） */
     let swallowedOld = 0
+    /** R5-P2a：本轮被 per-source 过滤吞并（入 seen 不推送不评估）的帖子数（观测用） */
+    let swallowedByFilters = 0
+    /** R5-P2a：本轮进入匹配管线（规则/字面/语义）的有效新帖数——page2 自适应的输入 */
+    let effectiveNew = 0
     const effective = this.deriveAiStatus().effectiveMode
     const literalActive = effective === 'literal' || effective === 'both'
     const semanticActive =
@@ -551,13 +664,24 @@ export class MonitorEngine {
       this.deps.semanticEvaluator !== undefined
     /** 语义候选（页面顺序旧→新）：遍历后按批评估 */
     const aiPending: Topic[] = []
+    // per-source 过滤配置（R5-P2a 第 2 步）：访问器每轮重读（配置热更新语义），
+    // 未注入/undefined = 不过滤
+    const sourceFilters = this.deps.getSourceFilters?.(adapter.id)
 
     // 页面最新在前 → 逆序处理，推送顺序旧→新
     for (const topic of [...unseen].reverse()) {
       const key = seenKeyFor(adapter.id, topic.id)
-      // W3 旧帖过滤（先于置顶/排除词分支）：首页按最后回复排序，被回复顶回首页
+      // per-source 过滤（R5-P2a 第 2 步，先于 id 阈值——ultrabrain 裁定管线顺序）：
+      // 分类白/黑名单（显示名或 slug 双口径）与作者黑名单。被滤帖入 seen 不推送
+      // 不评估（与旧帖阈值同款语义）。
+      if (sourceFilters !== undefined && !applySourceFilters(topic, sourceFilters)) {
+        this.deps.seen.add(key)
+        swallowedByFilters++
+        continue
+      }
+      // W3 旧帖过滤（第 3 步）：首页按最后回复排序，被回复顶回首页
       // 的旧帖满足 "unseen 且数值 id ≤ 阈值" → 入 seen 不推送。豁免：上一轮就在
-      // unseen 处理流里的帖子（prevUnseenKeys，含推送失败重试/语义未决——它们
+      // unseen 处理流里的帖子（prevUnseenKeys，含推送失败重试/语义未决——他们
       // 不入 seen，而轮末阈值会追上其 id，不豁免会永久吞掉重试机会）。
       // 非数字 id 不过滤（也不进阈值计算）。
       if (idFilter && threshold !== null) {
@@ -569,16 +693,31 @@ export class MonitorEngine {
         }
       }
       if (topic.pinned) {
-        // 置顶是旧帖：入去重集但绝不推送
+        // 置顶是旧帖（第 4 步）：入去重集但绝不推送
         this.deps.seen.add(key)
         continue
       }
-      // 排除词字面一票否决（D4：永远先于 AI；语义模式下同样否决）
+      // 排除词字面一票否决（第 5 步，D4：永远先于 AI；语义模式下同样否决）
       if (isExcluded(topic, cfg.excludeKeywords)) {
         this.deps.seen.add(key)
         continue
       }
-      // literal 档（mode 含 literal 时生效；语义档未配置/配额耗尽也会降到这里）
+      // 过了全部四道闸（per-source / id 阈值 / 置顶 / 排除词）：进入匹配管线，
+      // 计入有效新帖数（page2 自适应的输入——不是裸 unseen）
+      effectiveNew++
+      // 价格规则（R5-P2a 第 6 步）：结构化第三命中通道，先于 literal 评估——
+      // 命中即得、不再走 literal（同一帖只记一种命中方式，规则优先）。不受
+      // matchMode 门控（matchMode 只管字面关键词 vs AI 语义的分派；规则是零
+      // 成本的结构化匹配，semantic-only 模式下同样生效）。规则列表为空时短路
+      // （省掉逐标题的正则提取开销）。
+      if (cfg.priceRules.length > 0) {
+        const ruleMatch = evaluateRules(topic.title, cfg.priceRules)
+        if (ruleMatch !== null) {
+          await this.processHit(topic, [], cfg, 'rule', null, ruleMatch.label)
+          continue
+        }
+      }
+      // literal 档（第 7 步；mode 含 literal 时生效；语义档未配置/配额耗尽也降到这里）
       if (literalActive) {
         const { matched, matchedKeywords } = matchTopic(
           topic,
@@ -614,10 +753,18 @@ export class MonitorEngine {
     // 对齐 pruneRetryMaps：滚出首页/已入 seen 的键自然消失；本轮冷却跳过或抓取
     // 失败的 source 不走到这里，其豁免集原样保留到下一次成功观测）
     rt.prevUnseenKeys = roundUnseenKeys
+    // R5-P2a：有效新帖数轮末落位（page2 自适应下一轮的输入；失败/冷却轮走不到
+    // 这里，保留上一次成功观测值）
+    rt.prevEffectiveNewCount = effectiveNew
     if (swallowedOld > 0) {
       this.deps.logger.info(
         `source ${adapter.id}: ${swallowedOld} old topic(s) swallowed ` +
           `(bumped by replies, id <= threshold ${threshold})`
+      )
+    }
+    if (swallowedByFilters > 0) {
+      this.deps.logger.info(
+        `source ${adapter.id}: ${swallowedByFilters} topic(s) swallowed by per-source filters`
       )
     }
 
@@ -650,10 +797,13 @@ export class MonitorEngine {
    * interests 为空 → 直接短路（F3）：不调 evaluator、不计 callsToday，全部
    * 按语义未命中入 seen（evaluator 本就快速全 miss，引擎侧跳过更干净，
    * 行为一致只是不再空转计数）。
-   * verdict 三态：
-   * - hit=true → processHit(matchedBy='semantic'，semanticReason=reason)；
-   *   其中推送真失败的 reason 会进 semanticVerdicts 缓存（坑⑥，见 pollSource）；
-   * - hit=false → 入 seen（与字面未命中同待遇，不再重评）；
+   * verdict 三态（R5-P2b：hit 的去留多一道置信度闸）：
+   * - hit=true **且 score >= cfg.ai.semanticThreshold** → processHit(matchedBy=
+   *   'semantic'，semanticReason=reason)；threshold=0（默认）时 score>=0 恒真 =
+   *   行为不变。其中推送真失败的 reason 会进 semanticVerdicts 缓存（坑⑥，见
+   *   pollSource）——缓存的是**已过闸**的 verdict，重试轮直接重推、不再过阈值；
+   * - hit=false，或 hit=true 但 score < 阈值 → 入 seen（与字面未命中同待遇，
+   *   不再重评；低置信 hit 不推送、不写语义理由/任何记录，只 log 一条观测）；
    * - 无 verdict（未决）→ 不入 seen，下轮重评（帖子滚出首页即止，对齐 8.10）。
    * evaluate 整体抛错 → 该批全部未决 + 记 lastAiError + log warn，
    * **不动 consecutiveFailures**（AI 故障 ≠ 抓取故障）。每次真实调用计入
@@ -692,9 +842,18 @@ export class MonitorEngine {
         for (const topic of batch) {
           const verdict = verdicts.get(seenKeyFor(sourceId, topic.id))
           if (verdict === undefined) continue // 未决：不入 seen，下轮重评
-          if (verdict.hit) {
+          if (verdict.hit && verdict.score >= cfg.ai.semanticThreshold) {
             await this.processHit(topic, [], cfg, 'semantic', verdict.reason)
           } else {
+            // hit=false，或 hit=true 但置信度 < cfg.ai.semanticThreshold（R5-P2b）：
+            // 都按不相关处理——入 seen 不再重评、不推送、语义理由不写任何记录。
+            // threshold=0（默认）时 score >= 0 恒真 = 行为与阈值特性引入前完全一致。
+            if (verdict.hit) {
+              this.deps.logger.info(
+                `semantic hit below confidence threshold ` +
+                  `(${verdict.score} < ${cfg.ai.semanticThreshold}): "${topic.title}"`
+              )
+            }
             this.deps.seen.add(seenKeyFor(sourceId, topic.id))
           }
         }
@@ -721,7 +880,9 @@ export class MonitorEngine {
         cooldownUntilMs: null,
         baselineChecked: false,
         prevUnseenKeys: new Set(),
-        lastPageMaxId: null
+        lastPageMaxId: null,
+        prevEffectiveNewCount: 0,
+        page2Fetches: 0
       }
       this.runtimes.set(sourceId, rt)
       this.status.totalHits += this.deps.state.getFor(sourceId).totalHits
@@ -838,7 +999,9 @@ export class MonitorEngine {
         lastError: rt.lastError,
         consecutiveFailures: rt.consecutiveFailures,
         cooldownUntil:
-          rt.cooldownUntilMs === null ? null : new Date(rt.cooldownUntilMs).toISOString()
+          rt.cooldownUntilMs === null ? null : new Date(rt.cooldownUntilMs).toISOString(),
+        // R5-P2a / DEC-8：第 2 页补抓累计（内存；旧快照读者容忍缺失，这里恒下发）
+        page2Fetches: rt.page2Fetches
       })
       if (HEALTH_SEVERITY[rt.health] > HEALTH_SEVERITY[health]) health = rt.health
       consecutiveFailures = Math.max(consecutiveFailures, rt.consecutiveFailures)
@@ -904,8 +1067,14 @@ export class MonitorEngine {
   }
 
   /**
-   * 处理一条命中的新帖：生成锐评（第三轮）→ 尝试推送 → 组 HitRecord →
-   * 计数入环 → emit onHit。
+   * 处理一条命中的新帖：相似降噪闸 → 生成锐评（第三轮）→ 尝试推送 →
+   * 组 HitRecord → 计数入环 → emit onHit。
+   *
+   * 相似降噪（R5-P2a 第 8 步，作用于**所有**命中方式推送前）：cfg.similarity.enabled
+   * 时与"近期已推"窗口比对标题，相似 → 入 seen 不推送不 emit 不计 HitRecord
+   * （不是命中），log info + 引擎计数；重试在途的键一并清（推送已无意义）。
+   * enabled=false 时整段跳过（行为与升级前一致）。
+   *
    * 推送结果语义（ADR 8.10）：
    * - **成功 / 静音**（notifyEnabled=false 或 telegram 未配置）→ 入去重集。
    *   静音是用户主动行为，不重试；
@@ -915,24 +1084,51 @@ export class MonitorEngine {
    * 推送失败不中断本轮后续 topic。重试去重键 = 全局键 `${sourceId}:${topicId}`
    * （跨 source 同 id 帖子不互相吞 emit）。
    * matchedBy：literal（字面管线，matchedKeywords 非空）/ semantic（语义管线，
-   * matchedKeywords 恒空数组，semanticReason 带 AI 判定理由或 null）。
+   * matchedKeywords 恒空数组，semanticReason 带 AI 判定理由或 null）/ rule（价格
+   * 规则管线，matchedKeywords 恒空数组，matchedRule 带规则 label——id 无 label
+   * 时即 id，rules.ts 的 RuleMatch.label 已归一）。
    * commentary：sendHit 之前生成（无论推送是否会被静音——HitRecord/内存环仍要
    * 展示）；恒 string|null，不留 undefined、不写空串（见 maybeGenerateCommentary）。
+   * 相似降噪闸在锐评生成**之前**（吞并的帖子不打 LLM、不耗配额）。
    */
   private async processHit(
     topic: Topic,
     matchedKeywords: string[],
     cfg: AppConfig,
-    matchedBy: 'literal' | 'semantic' = 'literal',
-    semanticReason: string | null = null
+    matchedBy: 'literal' | 'semantic' | 'rule' = 'literal',
+    semanticReason: string | null = null,
+    matchedRule: string | null = null
   ): Promise<void> {
+    // 窗口重建就位保障（R5-P2a 第 11 步）：构造期发起的重建在这里被 await——
+    // 首轮推送（含相似检查）前窗口必须就位；此后 promise 已 settle，await 零成本。
+    // 放在 processHit 而非 pollOnce 顶部：保持 pollOnce 到 fetchLatest 的同步
+    // 调用深度（start() 的同步首轮语义，既有契约），基线轮也没有推送可等。
+    await this.similarityWindowReady
+    // 相似降噪（第 8 步）：与近窗内已推送帖相似 → 入 seen 不推送
+    if (cfg.similarity.enabled && this.isSimilarToRecentlyPushed(topic.title, cfg)) {
+      const swallowedKey = seenKeyFor(topic.sourceId, topic.id)
+      this.deps.seen.add(swallowedKey)
+      // 重试在途的键一并收口（相似帖已被更早的推送覆盖，重试无意义）
+      this.pendingNotifyErrors.delete(swallowedKey)
+      this.semanticVerdicts.delete(swallowedKey)
+      this.similarSwallowedCount++
+      this.deps.logger.info(`similar topic swallowed: ${topic.title}`)
+      return
+    }
     const commentary = await this.maybeGenerateCommentary(topic, cfg)
     let notifiedAt: string | null = null
     let notifyError: string | null = null
     const configured = cfg.telegram.botToken !== '' && cfg.telegram.chatId !== ''
     if (cfg.notifyEnabled && configured) {
       try {
-        await this.deps.notifier.sendHit(topic, matchedKeywords, commentary)
+        // 第四参 matchedRule：rule 命中传 label（telegram 侧渲染「命中规则」行），
+        // 其余命中方式恒传 null（与 commentary 同款"不留 undefined"约定）
+        await this.deps.notifier.sendHit(
+          topic,
+          matchedKeywords,
+          commentary,
+          matchedBy === 'rule' ? matchedRule : null
+        )
         notifiedAt = this.isoNow()
       } catch (err) {
         notifiedAt = null
@@ -943,7 +1139,8 @@ export class MonitorEngine {
     const key = seenKeyFor(topic.sourceId, topic.id)
 
     if (notifyError !== null) {
-      // 真实推送失败：不入去重集（下轮重试）；同失败态只 emit/log 一次
+      // 真实推送失败：不入去重集（下轮重试）；不入相似窗口（第 10 步——窗口语义
+      // 是"用户已收到"）；同失败态只 emit/log 一次
       const prevError = this.pendingNotifyErrors.get(key)
       if (prevError !== notifyError) {
         this.pendingNotifyErrors.set(key, notifyError)
@@ -957,6 +1154,7 @@ export class MonitorEngine {
         matchedKeywords,
         matchedBy,
         semanticReason,
+        matchedRule: matchedBy === 'rule' ? matchedRule : null,
         commentary,
         notifiedAt: null,
         notifyError
@@ -975,11 +1173,17 @@ export class MonitorEngine {
     this.pendingNotifyErrors.delete(key)
     this.semanticVerdicts.delete(key)
     this.deps.seen.add(key)
+    // 成功推送 → 标题（归一化）连同推送时刻入"近期已推"窗口（R5-P2a 第 10 步；
+    // 静音/失败不入——用户没收到的不算"已推"）
+    if (notifiedAt !== null) {
+      this.pushedTitles.push({ title: normalizeTitle(topic.title), at: this.now() })
+    }
     const hit: HitRecord = {
       topic,
       matchedKeywords,
       matchedBy,
       semanticReason,
+      matchedRule: matchedBy === 'rule' ? matchedRule : null,
       commentary,
       notifiedAt,
       notifyError: null
@@ -989,6 +1193,10 @@ export class MonitorEngine {
       if (matchedBy === 'semantic') {
         this.deps.logger.info(
           `hit pushed (semantic): "${topic.title}" (reason: ${semanticReason ?? 'n/a'})`
+        )
+      } else if (matchedBy === 'rule') {
+        this.deps.logger.info(
+          `hit pushed (rule): "${topic.title}" (rule: ${matchedRule ?? 'n/a'})`
         )
       } else {
         this.deps.logger.info(
@@ -1025,6 +1233,73 @@ export class MonitorEngine {
     this.aiCallsToday++
     this.commentaryToday++
     return await gen.generate(topic)
+  }
+
+  // ---- 相似降噪窗口（R5-P2a 第 8/10/11 步） --------------------------------
+
+  /**
+   * 标题是否与"近期已推"窗口里的任一条相似（DEC-4）。
+   * 窗口条目在入窗时已 normalizeTitle（isSimilarToAny 的契约：recentTitles 须传
+   * 已归一化串）；待判标题传原始串，函数内部自行归一。窗口为空恒 false。
+   * 检查时跳过已超出 48h 的条目——轮末 prune 之外的时刻（如长睡眠恢复后的
+   * 首轮）窗口里可能还留着过期条目，48h 契约以**判定时点**为准（过期放行）。
+   */
+  private isSimilarToRecentlyPushed(title: string, cfg: AppConfig): boolean {
+    if (this.pushedTitles.length === 0) return false
+    const cutoff = this.now() - SIMILARITY_WINDOW_MS
+    const inWindow = this.pushedTitles.filter((e) => e.at >= cutoff)
+    if (inWindow.length === 0) return false
+    return isSimilarToAny(
+      title,
+      inWindow.map((e) => e.title),
+      cfg.similarity.threshold
+    )
+  }
+
+  /**
+   * 轮末窗口 prune：只保留仍在 48h 窗口内的条目（保序过滤）。数组整体按 at
+   * 旧→新（入窗序即时间序，重建条目也按 notifiedAt 旧→新追加），但重建 promise
+   * 晚于首轮推送 settle 的竞态下可能出现乱序尾巴——用过滤而非头部截断，任何
+   * 位置的过期条目都能被清掉。时间维度全局裁剪，与 per-source 的
+   * roundTopicKeys 无关。
+   */
+  private pruneSimilarityWindow(): void {
+    if (this.pushedTitles.length === 0) return
+    const cutoff = this.now() - SIMILARITY_WINDOW_MS
+    const kept = this.pushedTitles.filter((e) => e.at >= cutoff)
+    if (kept.length !== this.pushedTitles.length) {
+      this.pushedTitles.splice(0, this.pushedTitles.length, ...kept)
+    }
+  }
+
+  /**
+   * 启动重建窗口（第 11 步）：从 hits 存储读近 3 天记录，notifiedAt 非空（= 成功
+   * 推送过）且仍在 48h 窗口内的标题（归一化、at=notifiedAt 时刻）回填内存窗口。
+   * 3 天读取是数据面（48h 跨本地日最多涉 3 个日桶），48h 过滤是窗口不变式——
+   * 超龄记录不进窗。deps 未注入 hitsStore / readRecent（旧装配、测试）或读取
+   * 失败：空窗开始（等于全新安装），只 log，绝不抛（构造期调用）。
+   */
+  private async rebuildSimilarityWindow(): Promise<void> {
+    const store = this.deps.hitsStore
+    if (store === undefined || store.readRecent === undefined) return
+    try {
+      const recent = await store.readRecent(SIMILARITY_REBUILD_DAYS, new Date(this.now()))
+      const nowMs = this.now()
+      for (const hit of recent) {
+        if (hit.notifiedAt === null) continue // 只重建成功推送（失败/静音从不入窗）
+        const at = Date.parse(hit.notifiedAt)
+        if (!Number.isFinite(at)) continue // 防御：坏时间戳跳过
+        if (nowMs - at >= SIMILARITY_WINDOW_MS) continue // 48h 不变式
+        this.pushedTitles.push({ title: normalizeTitle(hit.topic.title), at })
+      }
+      if (this.pushedTitles.length > 0) {
+        this.deps.logger.info(
+          `similarity window rebuilt from recent hits (${this.pushedTitles.length} title(s))`
+        )
+      }
+    } catch (err) {
+      this.deps.logger.warn(`similarity window rebuild failed: ${describeError(err)}`)
+    }
   }
 
   /** 计入 totalHits（聚合 + 该 source 的待持久化 delta）并压入内存环形（超容量淘汰最老） */

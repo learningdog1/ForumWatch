@@ -13,6 +13,9 @@
  *   **只有 AI 明确给了裁决的帖子在 Map 里**：hit=false 也是已裁决（engine 据此入
  *   seen）；Map 里没有的键 = 未决（engine 不入 seen，下轮重评）。
  * - 响应缺 key / hit 非布尔 → 跳过该项（视为未决），不炸整批。
+ * - 裁决元素可带 score（R5-P2b 置信度，0-1）：缺失/非数字回退 1.0（旧模型
+ *   行为完全不变——hit 就命中），数值钳到 [0,1]；**score 不参与元素合法性
+ *   判定**（缺 score 的元素仍是合法裁决，D11 兼容链不受影响）。
  * - **裁决数组定位（W3 线上修复）**：实测有模型无视提示词用 `{"results":[...]}`
  *   回包，旧代码只认 `verdicts` → bad-json → 整批未决每轮重评（烧配额+刷错误
  *   日志）。现按兼容顺序定位：显式键 `verdicts` → 显式键 `results` → 兜底扫描
@@ -34,6 +37,13 @@ const EVALUATE_MAX_TOKENS = 2000
 
 export interface SemanticVerdict {
   hit: boolean
+  /**
+   * AI 自报的置信度（R5-P2b，0-1 浮点；1 = 非常确定相关）。
+   * 解析规则：缺失/非数字 → 回退 1.0（旧模型行为完全不变——hit 就命中）；
+   * 数值钳到 [0,1]（>1 → 1，<0 → 0）。engine 只在 hit=true 时消费它
+   * （cfg.ai.semanticThreshold 过闸）；hit=false 时仅透传、不参与判定。
+   */
+  score: number
   /** AI 的一句话判定理由；hit=false 或模型未给出时为 null */
   reason: string | null
 }
@@ -48,15 +58,19 @@ export interface SemanticEvaluatorDeps {
  * D4 协议：system 提示词（中文，宁可漏报不要误报，只输出 JSON）。
  * W3 收紧：给出精确输出示例并钉死键名 `verdicts`——线上实测模型会自作主张
  * 换键名（"results"），示例是对此最直接的免疫。
+ * R5-P2b：示例的每个裁决元素钉死 `"score"` 键（0-1 置信度，1 = 非常确定
+ * 相关，不确定给低分）——同样的免疫逻辑：示例是对换键名行为最直接的防线；
+ * "仅当明确相关才判 hit=true" 的既有原则不变（score 是补充信号，不是放行）。
  */
 const SYSTEM_PROMPT =
   '你是论坛帖子筛选器。仅当帖子标题与任一兴趣**明确相关**才判 hit=true；' +
   '宁可漏报不要误报。只输出 JSON，不要任何其他文本（不要 markdown 代码围栏、' +
   '不要解释）。输出的顶层键名必须是 "verdicts"，其值为数组；数组每个元素形如 ' +
-  '{"key":"<原样返回输入里的 key>","hit":true 或 false,"reason":"一句话理由"}。' +
-  '完整输出示例：' +
-  '{"verdicts":[{"key":"nodeseek:1","hit":true,"reason":"与自建主机相关"},' +
-  '{"key":"nodeseek:2","hit":false}]}。'
+  '{"key":"<原样返回输入里的 key>","hit":true 或 false,' +
+  '"score":0 到 1 的小数（你对这条裁决的置信度，1 = 非常确定相关，不确定给低分），' +
+  '"reason":"一句话理由"}。完整输出示例：' +
+  '{"verdicts":[{"key":"nodeseek:1","hit":true,"score":0.95,"reason":"与自建主机相关"},' +
+  '{"key":"nodeseek:2","hit":false,"score":0.1}]}。'
 
 export class SemanticEvaluator {
   private readonly provider: Pick<AiProvider, 'chat'>
@@ -75,7 +89,7 @@ export class SemanticEvaluator {
     // 空兴趣 = 永不命中：不调 API，全量判 hit:false（镜像字面档防风暴规则）
     if (interests.length === 0) {
       const all = new Map<string, SemanticVerdict>()
-      for (const t of topics) all.set(verdictKey(t), { hit: false, reason: null })
+      for (const t of topics) all.set(verdictKey(t), { hit: false, score: 1, reason: null })
       return all
     }
     if (topics.length === 0) return new Map()
@@ -111,11 +125,25 @@ export class SemanticEvaluator {
       const rawReason = (item as { reason?: unknown }).reason
       out.set(item.key, {
         hit: item.hit,
+        score: normalizeScore((item as { score?: unknown }).score),
         reason: item.hit && typeof rawReason === 'string' ? rawReason : null
       })
     }
     return out
   }
+}
+
+/**
+ * score 字段归一（R5-P2b）：缺失/非数字 → 回退 1.0（旧模型行为完全不变——
+ * hit 就命中，D11 兼容）；数字钳到 [0,1]。**score 缺失不影响元素合法性**
+ * （isValidVerdictItem 只看 key/hit，缺 score 的元素仍是合法裁决）。
+ * Number.isFinite 守卫：JSON 文本出不了 NaN/Infinity，这里纯防御（万一调用方
+ * 程序化构造），非有限数按"坏值"走回退而不是钳位（钳 NaN 会产出 NaN，
+ * NaN >= 任何阈值恒 false，会静默吞 hit）。
+ */
+function normalizeScore(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 1.0
+  return Math.min(1, Math.max(0, raw))
 }
 
 /** Map 键 / 协议里的 key：与 engine 全局去重键同口径（D2/D3） */
@@ -176,7 +204,11 @@ function isValidVerdictArray(value: unknown): value is unknown[] {
   return Array.isArray(value) && value.some(isValidVerdictItem)
 }
 
-/** 单个裁决元素合法性：对象且 key 为 string 且 hit 为 boolean */
+/**
+ * 单个裁决元素合法性：对象且 key 为 string 且 hit 为 boolean。
+ * R5-P2b：score 不参与判定（缺失/非法只影响 normalizeScore 的回退值，
+ * 不让元素变未决——旧模型不带 score 的回包仍全量可解析）。
+ */
 function isValidVerdictItem(item: unknown): item is { key: string; hit: boolean } {
   if (typeof item !== 'object' || item === null) return false
   const { key, hit } = item as { key?: unknown; hit?: unknown }

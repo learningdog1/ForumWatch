@@ -115,6 +115,33 @@ describe('HitsStore', () => {
     expect(await store.readDay('2030-01-01')).toEqual([])
   })
 
+  it('readRecent（R5-P2a 窗口重建数据源）：近 N 个本地自然日合并、整体旧→新、含跨日桶', async () => {
+    // 三天数据：17 日两条、18 日一条、19 日（今天口径由注入 now 决定）两条；16 日有一条（窗口外）
+    await store.append(makeHit('a1'), new Date(2026, 8, 16, 12, 0))
+    await store.append(makeHit('b1'), new Date(2026, 8, 17, 12, 0))
+    await store.append(makeHit('b2'), new Date(2026, 8, 17, 13, 0))
+    await store.append(makeHit('c1'), new Date(2026, 8, 18, 23, 59))
+    await store.append(makeHit('d1'), new Date(2026, 8, 19, 0, 1))
+    await store.append(makeHit('d2'), new Date(2026, 8, 19, 8, 0))
+
+    // now = 2026-09-19 09:00：近 3 天 = 19/18/17（16 日在窗口外）
+    const hits = await store.readRecent(3, new Date(2026, 8, 19, 9, 0))
+    expect(hits.map((h) => h.topic.id)).toEqual(['b1', 'b2', 'c1', 'd1', 'd2']) // 旧→新
+    // days=1 只读今天；days 覆盖更早的窗口时把 16 日也带上
+    expect((await store.readRecent(1, new Date(2026, 8, 19, 9, 0))).map((h) => h.topic.id)).toEqual(['d1', 'd2'])
+    expect((await store.readRecent(4, new Date(2026, 8, 19, 9, 0))).map((h) => h.topic.id)).toEqual([
+      'a1', 'b1', 'b2', 'c1', 'd1', 'd2'
+    ])
+  })
+
+  it('readRecent：days<=0 / 非整数 → []；某日文件不存在按空处理', async () => {
+    expect(await store.readRecent(0)).toEqual([])
+    expect(await store.readRecent(-3)).toEqual([])
+    expect(await store.readRecent(1.5)).toEqual([])
+    // 空目录（无任何命中）：读 3 天也安全
+    expect(await store.readRecent(3, new Date(2026, 8, 19, 9, 0))).toEqual([])
+  })
+
   it('坏行容错：中间行是垃圾 / 形状不对的行都被跳过，其余照常返回', async () => {
     const good1 = makeHit('1')
     const good2 = makeHit('2')

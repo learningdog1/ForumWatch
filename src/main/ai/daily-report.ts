@@ -191,6 +191,8 @@ export class DailyReportService {
         category: h.topic.category,
         sourceId: h.topic.sourceId,
         matchedBy: h.matchedBy,
+        // 第五轮：规则命中的 label（旧 hits/*.jsonl 行没有该字段，?? null 归一）
+        matchedRule: h.matchedRule ?? null,
         // 第三轮锐评：旧 hits/*.jsonl 行没有该字段，?? null 归一（LLM 按需引用）
         commentary: h.commentary ?? null,
         pushed: h.notifiedAt !== null
@@ -278,7 +280,16 @@ function fallbackReport(date: string, hits: HitRecord[]): string {
       lines.push(`## ${lastSource}`, '')
     }
     const time = h.notifiedAt !== null ? hhmmLocal(h.notifiedAt) : '--:--'
-    const how = h.matchedBy === 'semantic' ? '语义命中' : '字面命中'
+    // 命中方式三档（第五轮）：语义 / 价格规则（带 label）/ 字面
+    const ruleLabel = h.matchedRule ?? ''
+    const how =
+      h.matchedBy === 'semantic'
+        ? '语义命中'
+        : h.matchedBy === 'rule'
+          ? ruleLabel !== ''
+            ? `规则命中：${ruleLabel}`
+            : '规则命中'
+          : '字面命中'
     // 第三轮锐评：非空时以「」附在命中行尾；无（含旧记录缺字段 → null）不加
     const commentary = h.commentary ?? null
     const remark = commentary !== null && commentary !== '' ? `「${commentary}」` : ''

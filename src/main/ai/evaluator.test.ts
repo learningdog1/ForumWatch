@@ -5,6 +5,9 @@
  * 平衡块提取（前后包垃圾文本）/ W3：results 形状兼容、verdicts 优先、任意
  * 键名兜底扫描、纯字符串数组不误吞（bad-json 且消息含顶层键名）、
  * system prompt 钉死 verdicts 键名。
+ * R5-P2b：score 置信度解析矩阵（正常/缺失回退 1.0/非数字回退/越界钳位）、
+ * hit×score 组合、D11 兼容链（verdicts→results→兜底）带 score 仍工作、
+ * prompt 示例钉死 "score" 键名。
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { Topic } from '../../shared/types'
@@ -55,8 +58,9 @@ describe('SemanticEvaluator.evaluate', () => {
     const out = await h.evaluator.evaluate(topics, ['自建主机', 'NAS'])
 
     expect(out.size).toBe(2)
-    expect(out.get('nodeseek:1')).toEqual({ hit: true, reason: '与自建主机相关' })
-    expect(out.get('nodeseek:2')).toEqual({ hit: false, reason: null })
+    // R5-P2b：fixture 无 score → 回退 1.0（旧模型回包行为不变）
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, score: 1, reason: '与自建主机相关' })
+    expect(out.get('nodeseek:2')).toEqual({ hit: false, score: 1, reason: null })
 
     // 请求形状：system 提示词 + user JSON（interests + topics 摘要），jsonMode/超时/上限
     expect(h.chat).toHaveBeenCalledTimes(1)
@@ -95,13 +99,13 @@ describe('SemanticEvaluator.evaluate', () => {
     expect(out.has('nodeseek:1')).toBe(true)
     expect(out.has('nodeseek:3')).toBe(false) // hit 非布尔：跳过
     expect(out.has('nodeseek:4')).toBe(true)
-    expect(out.get('nodeseek:4')).toEqual({ hit: false, reason: null })
+    expect(out.get('nodeseek:4')).toEqual({ hit: false, score: 1, reason: null })
   })
 
   it('hit:false 也在 Map 里（已裁决不命中，调用方据此入 seen）', async () => {
     const h = makeHarness(() => '{"verdicts":[{"key":"nodeseek:9","hit":false}]}')
     const out = await h.evaluator.evaluate([topic('9')], ['x'])
-    expect(out.get('nodeseek:9')).toEqual({ hit: false, reason: null })
+    expect(out.get('nodeseek:9')).toEqual({ hit: false, score: 1, reason: null })
   })
 
   it('空 interests：不调 chat，返回全量 Map（全部 hit:false）', async () => {
@@ -109,7 +113,7 @@ describe('SemanticEvaluator.evaluate', () => {
     const out = await h.evaluator.evaluate([topic('1'), topic('2')], [])
     expect(h.chat).not.toHaveBeenCalled()
     expect(out.size).toBe(2)
-    for (const v of out.values()) expect(v).toEqual({ hit: false, reason: null })
+    for (const v of out.values()) expect(v).toEqual({ hit: false, score: 1, reason: null })
   })
 
   it('空 topics：不调 chat，返回空 Map', async () => {
@@ -158,8 +162,8 @@ describe('SemanticEvaluator.evaluate', () => {
     )
     const out = await h.evaluator.evaluate([topic('933617'), topic('933618')], ['自建主机'])
     expect(out.size).toBe(2)
-    expect(out.get('nodeseek:933617')).toEqual({ hit: false, reason: null })
-    expect(out.get('nodeseek:933618')).toEqual({ hit: true, reason: '与自建主机相关' })
+    expect(out.get('nodeseek:933617')).toEqual({ hit: false, score: 1, reason: null })
+    expect(out.get('nodeseek:933618')).toEqual({ hit: true, score: 1, reason: '与自建主机相关' })
   })
 
   it('verdicts 与 results 并存：优先取 verdicts', async () => {
@@ -169,7 +173,7 @@ describe('SemanticEvaluator.evaluate', () => {
         '"results":[{"key":"nodeseek:1","hit":false}]}'
     )
     const out = await h.evaluator.evaluate([topic('1')], ['x'])
-    expect(out.get('nodeseek:1')).toEqual({ hit: true, reason: '来自 verdicts' })
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, score: 1, reason: '来自 verdicts' })
   })
 
   it('兜底扫描：任意键名（judgements）的合法数组可解析，且跳过回显的 interests 字符串数组', async () => {
@@ -178,7 +182,7 @@ describe('SemanticEvaluator.evaluate', () => {
         '{"interests":["自建主机","NAS"],"judgements":[{"key":"nodeseek:1","hit":true,"reason":"r"}]}'
     )
     const out = await h.evaluator.evaluate([topic('1')], ['x'])
-    expect(out.get('nodeseek:1')).toEqual({ hit: true, reason: 'r' })
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, score: 1, reason: 'r' })
   })
 
   it('数组存在但全无合法元素（纯字符串数组 / 空数组）→ bad-json，错误消息含顶层键名', async () => {
@@ -214,6 +218,7 @@ describe('SemanticEvaluator.evaluate', () => {
     const out = await h.evaluator.evaluate([topic('1')], ['x'])
     expect(out.get('nodeseek:1')).toEqual({
       hit: true,
+      score: 1,
       reason: '标题含 {花括号} 与转义引号 " 也按字符串处理'
     })
   })
@@ -240,7 +245,120 @@ describe('SemanticEvaluator.evaluate', () => {
       () => '{"verdicts":[{"key":"aa:1","hit":true,"reason":"r"},{"key":"bb:1","hit":false}]}'
     )
     const out = await h.evaluator.evaluate([topic('1', 'aa'), topic('1', 'bb')], ['x'])
-    expect(out.get('aa:1')).toEqual({ hit: true, reason: 'r' })
-    expect(out.get('bb:1')).toEqual({ hit: false, reason: null })
+    expect(out.get('aa:1')).toEqual({ hit: true, score: 1, reason: 'r' })
+    expect(out.get('bb:1')).toEqual({ hit: false, score: 1, reason: null })
+  })
+})
+
+// ---- R5-P2b：score 置信度解析 ------------------------------------------------
+
+describe('SemanticEvaluator score（R5-P2b）', () => {
+  it('score 正常解析：0-1 浮点透传到 verdict.score，hit/reason 不受影响', async () => {
+    const h = makeHarness(
+      () => '{"verdicts":[{"key":"nodeseek:1","hit":true,"score":0.85,"reason":"与自建主机相关"}]}'
+    )
+    const out = await h.evaluator.evaluate([topic('1')], ['x'])
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, score: 0.85, reason: '与自建主机相关' })
+  })
+
+  it('score 缺失 → 回退 1.0（旧模型回包行为完全不变：hit 就命中）', async () => {
+    const h = makeHarness(
+      () => '{"verdicts":[{"key":"nodeseek:1","hit":true,"reason":"r"},{"key":"nodeseek:2","hit":false}]}'
+    )
+    const out = await h.evaluator.evaluate([topic('1'), topic('2')], ['x'])
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, score: 1, reason: 'r' })
+    expect(out.get('nodeseek:2')).toEqual({ hit: false, score: 1, reason: null })
+  })
+
+  it('score 非数字（字符串/布尔/null/对象/数组）→ 回退 1.0，元素仍算合法裁决', async () => {
+    const h = makeHarness(
+      () =>
+        '{"verdicts":[' +
+        '{"key":"nodeseek:1","hit":true,"score":"0.9"},' +
+        '{"key":"nodeseek:2","hit":true,"score":true},' +
+        '{"key":"nodeseek:3","hit":true,"score":null},' +
+        '{"key":"nodeseek:4","hit":true,"score":{"v":0.9}},' +
+        '{"key":"nodeseek:5","hit":true,"score":[0.9]}' +
+        ']}'
+    )
+    const out = await h.evaluator.evaluate(
+      [topic('1'), topic('2'), topic('3'), topic('4'), topic('5')],
+      ['x']
+    )
+    // 全部回退 1.0 且都在 Map 里（非数字 score 不把元素打成未决）
+    expect(out.size).toBe(5)
+    for (const id of ['1', '2', '3', '4', '5']) {
+      expect(out.get(`nodeseek:${id}`)).toEqual({ hit: true, score: 1, reason: null })
+    }
+  })
+
+  it('score 越界钳位：>1 → 1；<0 → 0（数值保留、只钳不弃）', async () => {
+    const h = makeHarness(
+      () =>
+        '{"verdicts":[' +
+        '{"key":"nodeseek:1","hit":true,"score":1.7},' +
+        '{"key":"nodeseek:2","hit":true,"score":-0.3},' +
+        '{"key":"nodeseek:3","hit":true,"score":0},' +
+        '{"key":"nodeseek:4","hit":true,"score":1}' +
+        ']}'
+    )
+    const out = await h.evaluator.evaluate([topic('1'), topic('2'), topic('3'), topic('4')], ['x'])
+    expect(out.get('nodeseek:1')!.score).toBe(1) // 钳到上界（= 回退值，行为等价）
+    expect(out.get('nodeseek:2')!.score).toBe(0) // 钳到下界（低置信，过闸交由 engine 阈值判）
+    expect(out.get('nodeseek:3')!.score).toBe(0) // 边界值原样保留
+    expect(out.get('nodeseek:4')!.score).toBe(1)
+  })
+
+  it('hit × score 组合矩阵：score 独立于 hit 解析（miss 也保留 score，engine 只在 hit 时消费）', async () => {
+    const h = makeHarness(
+      () =>
+        '{"verdicts":[' +
+        '{"key":"nodeseek:1","hit":true,"score":0.8},' +
+        '{"key":"nodeseek:2","hit":true},' +
+        '{"key":"nodeseek:3","hit":false,"score":0.4},' +
+        '{"key":"nodeseek:4","hit":false}' +
+        ']}'
+    )
+    const out = await h.evaluator.evaluate(
+      [topic('1'), topic('2'), topic('3'), topic('4')],
+      ['x']
+    )
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, score: 0.8, reason: null })
+    expect(out.get('nodeseek:2')).toEqual({ hit: true, score: 1, reason: null })
+    expect(out.get('nodeseek:3')).toEqual({ hit: false, score: 0.4, reason: null })
+    expect(out.get('nodeseek:4')).toEqual({ hit: false, score: 1, reason: null })
+  })
+
+  it('D11 兼容链带 score：verdicts / results / 兜底扫描三种形状的带 score 元素均正常解析', async () => {
+    // ① 显式 verdicts
+    const h1 = makeHarness(() => '{"verdicts":[{"key":"nodeseek:1","hit":true,"score":0.9}]}')
+    const out1 = await h1.evaluator.evaluate([topic('1')], ['x'])
+    expect(out1.get('nodeseek:1')!.score).toBe(0.9)
+
+    // ② 显式 results（W3 线上形状）
+    const h2 = makeHarness(() => '{"results":[{"key":"nodeseek:1","hit":true,"score":0.7}]}')
+    const out2 = await h2.evaluator.evaluate([topic('1')], ['x'])
+    expect(out2.get('nodeseek:1')!.score).toBe(0.7)
+
+    // ③ 兜底扫描（任意键名）
+    const h3 = makeHarness(
+      () => '{"interests":["x"],"judgements":[{"key":"nodeseek:1","hit":true,"score":0.6}]}'
+    )
+    const out3 = await h3.evaluator.evaluate([topic('1')], ['x'])
+    expect(out3.get('nodeseek:1')!.score).toBe(0.6)
+  })
+
+  it('system prompt 钉死 score 键名：元素形如与完整示例均含 "score"（对换键名行为的免疫）', async () => {
+    const h = makeHarness(() => '{"verdicts":[{"key":"nodeseek:1","hit":true,"score":0.9}]}')
+    await h.evaluator.evaluate([topic('1')], ['x'])
+    const req = h.chat.mock.calls[0]![0] as { system: string }
+    expect(req.system).toContain('"score"')
+    // 元素形如描述与完整示例都带 score（示例是对模型自作主张换键名最直接的免疫）
+    expect(req.system).toContain('"hit":true 或 false,"score"')
+    expect(req.system).toContain('"hit":true,"score":0.95,"reason":"与自建主机相关"')
+    expect(req.system).toContain('"hit":false,"score":0.1')
+    // 既有原则不变：明确相关才 hit、宁可漏报
+    expect(req.system).toContain('宁可漏报不要误报')
+    expect(req.system).toContain('明确相关')
   })
 })

@@ -150,3 +150,120 @@ describe('HtmlSourceAdapter.fetchLatest', () => {
     await expect(adapter.fetchLatest()).rejects.toBe(boom)
   })
 })
+
+describe('HtmlSourceAdapter.fetchLatest 第 2 页补抓（R5-P2a / DEC-8）', () => {
+  /** 迷你页：两条帖子（id 见参），结构与 parseHomepage 选择器对齐 */
+  function miniPage(idA: string, idB: string): string {
+    return (
+      '<html><body><ul class="post-list">' +
+      `<li class="post-list-item"><div class="post-title"><a href="/post-${idA}-1">页面帖子A</a></div>` +
+      '<div class="post-info"><span class="info-item info-author"><a href="/space/1">bob</a></span>' +
+      '<a href="/categories/trade" class="info-item post-category">交易</a>' +
+      '<a class="info-item info-last-comment-time"><time datetime="2026-09-19T01:00:00.000Z">t</time></a></div></li>' +
+      `<li class="post-list-item"><div class="post-title"><a href="/post-${idB}-1">页面帖子B</a></div>` +
+      '<div class="post-info"><span class="info-item info-author"><a href="/space/2">carol</a></span>' +
+      '<a href="/categories/chat" class="info-item post-category">闲聊</a>' +
+      '<a class="info-item info-last-comment-time"><time datetime="2026-09-19T02:00:00.000Z">t</time></a></div></li>' +
+      '</ul></body></html>'
+    )
+  }
+
+  /** 按 URL 分派响应体；第 2 页 URL 含 page-2 */
+  function pagedFetch(page1: string, page2: string | Error) {
+    return vi.fn(async (url: string, _init?: HttpRequestInit): Promise<HttpResponse> => {
+      if (url.includes('page-2')) {
+        if (page2 instanceof Error) throw page2
+        return makeResponse({ body: page2 })
+      }
+      return makeResponse({ body: page1 })
+    })
+  }
+
+  it('pages 缺省 / pages:1：仍只抓一页（现状不变）', async () => {
+    const fetchHtml = okFetch()
+    const adapter = new HtmlSourceAdapter({ fetchHtml })
+    await adapter.fetchLatest()
+    await adapter.fetchLatest({ pages: 1 })
+    expect(fetchHtml).toHaveBeenCalledTimes(2)
+    expect(fetchHtml.mock.calls.map((c) => c[0])).toEqual([
+      'https://www.nodeseek.com/?sort=createTime',
+      'https://www.nodeseek.com/?sort=createTime'
+    ])
+  })
+
+  it('pages:2：第 2 页请求 ?sort=createTime&page-2；两页合并按 id 去重保序（第 1 页原序在前）', async () => {
+    // 第 1 页：950100、950101；第 2 页：950101（重复）+ 950200（新）
+    const fetchHtml = pagedFetch(miniPage('950100', '950101'), miniPage('950101', '950200'))
+    const adapter = new HtmlSourceAdapter({ fetchHtml })
+    const topics = await adapter.fetchLatest({ pages: 2 })
+
+    expect(fetchHtml).toHaveBeenCalledTimes(2)
+    expect(fetchHtml.mock.calls[0][0]).toBe('https://www.nodeseek.com/?sort=createTime')
+    expect(fetchHtml.mock.calls[1][0]).toBe('https://www.nodeseek.com/?sort=createTime&page-2')
+    expect(topics.map((t) => t.id)).toEqual(['950100', '950101', '950200'])
+    // 重复 id 保留第 1 页的条目：第 1 页的 950101 是第二项（帖子B/carol），
+    // 第 2 页的 950101 是第一项（帖子A/bob）——后者被丢弃
+    expect(topics[1]).toMatchObject({ id: '950101', title: '页面帖子B', author: 'carol' })
+    expect(topics[2]).toMatchObject({ id: '950200', title: '页面帖子B', author: 'carol' })
+  })
+
+  it('pages:2 且两页内容完全相同（服务端忽略页参数形态）：合并后等价单页', async () => {
+    const same = miniPage('950100', '950101')
+    const fetchHtml = pagedFetch(same, same)
+    const adapter = new HtmlSourceAdapter({ fetchHtml })
+    const topics = await adapter.fetchLatest({ pages: 2 })
+    expect(topics.map((t) => t.id)).toEqual(['950100', '950101'])
+  })
+
+  it('第 2 页网络失败：整轮按第 1 页成功处理（console.warn，不抛）', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fetchHtml = pagedFetch(miniPage('950100', '950101'), new Error('network down'))
+      const adapter = new HtmlSourceAdapter({ fetchHtml })
+      const topics = await adapter.fetchLatest({ pages: 2 })
+      expect(topics.map((t) => t.id)).toEqual(['950100', '950101'])
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('page 2 fetch failed'))
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('第 2 页被挑战（403 → ChallengeError）：同样吞并，返回第 1 页', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fetchHtml = vi.fn(async (url: string, _init?: HttpRequestInit): Promise<HttpResponse> => {
+        if (url.includes('page-2')) return makeResponse({ status: 403, body: '' })
+        return makeResponse({ body: miniPage('950100', '950101') })
+      })
+      const adapter = new HtmlSourceAdapter({ fetchHtml })
+      const topics = await adapter.fetchLatest({ pages: 2 })
+      expect(topics.map((t) => t.id)).toEqual(['950100', '950101'])
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('第 1 页失败：原样上抛（现状语义不变，即使 pages:2）', async () => {
+    const boom = new Error('network down')
+    const fetchHtml = vi.fn(async (_url: string, _init?: HttpRequestInit): Promise<HttpResponse> => {
+      throw boom
+    })
+    const adapter = new HtmlSourceAdapter({ fetchHtml })
+    await expect(adapter.fetchLatest({ pages: 2 })).rejects.toBe(boom)
+    expect(fetchHtml).toHaveBeenCalledTimes(1) // 第 1 页就失败：不会去抓第 2 页
+  })
+
+  it('第 2 页解析 0 条（改版/被拦形态）：视为第 2 页失败，按第 1 页成功收尾', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fetchHtml = pagedFetch(miniPage('950100', '950101'), '<html><body>nothing</body></html>')
+      const adapter = new HtmlSourceAdapter({ fetchHtml })
+      const topics = await adapter.fetchLatest({ pages: 2 })
+      expect(topics.map((t) => t.id)).toEqual(['950100', '950101'])
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('parsed 0 topics'))
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})

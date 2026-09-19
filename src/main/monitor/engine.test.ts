@@ -10,7 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import {
   DAILY_AI_CALL_LIMIT,
   DAILY_COMMENTARY_LIMIT,
-  MonitorEngine
+  MonitorEngine,
+  PAGE2_TRIGGER_EFFECTIVE_NEW,
+  SIMILARITY_WINDOW_MS
 } from './engine'
 import { computeBackoffMs, PollScheduler } from './poller'
 import { FileSeenStore } from './dedup'
@@ -21,7 +23,14 @@ import { CommentGenerator } from '../ai/commentary'
 import type { ChatRequest } from '../ai/provider'
 import { TelegramError } from '../notify/telegram'
 import { createLogger, type Logger } from '../logger'
-import { DEFAULT_APP_CONFIG, type AppConfig, type HitRecord, type Topic } from '../../shared/types'
+import {
+  DEFAULT_APP_CONFIG,
+  type AppConfig,
+  type HitRecord,
+  type PriceRuleConfig,
+  type SourceFilters,
+  type Topic
+} from '../../shared/types'
 
 let dir: string
 
@@ -88,10 +97,12 @@ function build(
     preSeed?: (seen: FileSeenStore, state: FileEngineState) => void
     /** 语义评估器 mock（D4；缺省不注入 = 语义档不可用） */
     evaluator?: { evaluate: Mock }
-    /** 命中持久化 mock（D5） */
-    hitsStore?: { append: Mock }
+    /** 命中持久化 mock（D5；readRecent 可选 = R5-P2a 窗口重建数据源） */
+    hitsStore?: { append: Mock; readRecent?: Mock }
     /** 锐评生成器（第三轮；mock 或真实 CommentGenerator 实例；缺省不注入 = 恒无锐评） */
     commentaryGenerator?: Pick<CommentGenerator, 'generate' | 'prune'>
+    /** per-source 过滤访问器（R5-P2a；缺省不注入 = 不过滤，行为与升级前一致） */
+    getSourceFilters?: (sourceId: string) => SourceFilters | undefined
   } = {}
 ): Harness {
   const config: AppConfig = {
@@ -146,6 +157,10 @@ function build(
       ? { semanticEvaluator: opts.evaluator as unknown as SemanticEvaluator }
       : {}),
     ...(opts.hitsStore !== undefined ? { hitsStore: opts.hitsStore } : {}),
+    // R5-P2a：per-source 过滤访问器可选注入（不注入 = 不过滤）
+    ...(opts.getSourceFilters !== undefined
+      ? { getSourceFilters: opts.getSourceFilters }
+      : {}),
     // 第三轮：锐评生成器可选注入（不注入 = 恒 null，与旧装配行为一致）
     ...(opts.commentaryGenerator !== undefined
       ? { commentaryGenerator: opts.commentaryGenerator }
@@ -175,6 +190,24 @@ function retryMapSize(
   name: 'semanticVerdicts' | 'pendingNotifyErrors'
 ): number {
   return (engine as unknown as Record<string, Map<string, unknown>>)[name]!.size
+}
+
+/** 观测引擎私有相似吞并计数（R5-P2a，测试专用观测面——同 retryMapSize 先例） */
+function similarSwallowedCount(engine: MonitorEngine): number {
+  return (engine as unknown as Record<string, number>).similarSwallowedCount!
+}
+
+/** 已配置好的 AI 段（provider 三项齐备、semantic 模式；R5-P2a 新用例共用） */
+function aiSemanticConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
+  return {
+    provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-k', model: 'm' },
+    matchMode: 'semantic',
+    interests: ['自建主机'],
+    dailyReport: { enabled: false, timeHHMM: '22:00' },
+    commentary: { enabled: false },
+    semanticThreshold: 0,
+    ...overrides
+  }
 }
 
 describe('首启基线（防通知风暴）', () => {
@@ -856,6 +889,7 @@ describe('语义评估管线（D4）', () => {
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false },
+      semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
   }
@@ -883,9 +917,8 @@ describe('语义评估管线（D4）', () => {
   it("AI 命中：processHit 走 semantic 分支，matchedBy='semantic'、matchedKeywords=[]、semanticReason 透传", async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([
-          ['nodeseek:2', { hit: true, reason: '与自建主机兴趣明确相关' }]
-        ])
+        // score: 1 = 旧模型回退口径（R5-P2b 必填字段；本 describe 阈值全 0，score 不参与判定）
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 1, reason: '与自建主机兴趣明确相关' }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -919,7 +952,7 @@ describe('语义评估管线（D4）', () => {
   it('verdict hit:false：入 seen（与字面未命中同待遇），下轮不再重评', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -991,7 +1024,7 @@ describe('语义评估管线（D4）', () => {
 
     // 恢复：评估成功后 lastAiError 清空
     evaluate.mockImplementation(async (_topics: Topic[], _interests: string[]) =>
-      new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+      new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
     )
     await h.engine.pollOnce()
     expect(h.engine.getStatus().ai.lastAiError).toBeNull()
@@ -1070,7 +1103,7 @@ describe('语义评估管线（D4）', () => {
   it('纯 semantic 模式：标题即使字面可命中也不走字面管线，仍进 AI（字面结果不被改变）', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -1108,7 +1141,7 @@ describe('语义评估管线（D4）', () => {
   it('interests 为空（F3）：不调 evaluator、callsToday 不涨，全部按语义未命中入 seen，不降级 unconfigured', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -1170,6 +1203,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false },
+      semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1177,7 +1211,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
   it('语义命中×推送失败：reason 进缓存；下轮不进 AI 批直接重试；成功后缓存清除，再下轮不复活', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '与自建主机相关' }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 1, reason: '与自建主机相关' }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -1223,7 +1257,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
   it('重试仍失败：缓存保留继续重试（每轮都真推），同失败态仍只 emit 一次', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '相关' }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 1, reason: '相关' }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -1282,7 +1316,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
   it('F5：失败帖滚出首页 → 轮末清理，pendingNotifyErrors 与 semanticVerdicts 尺寸归零', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '相关' }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 1, reason: '相关' }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -1310,6 +1344,164 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
   })
 })
 
+describe('语义置信度阈值（R5-P2b：ai.semanticThreshold）', () => {
+  /** 已配置好的 AI 段（provider 三项齐备、semantic 模式；阈值按用例覆写） */
+  function aiConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
+    return {
+      provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-k', model: 'm' },
+      matchMode: 'semantic',
+      interests: ['自建主机'],
+      dailyReport: { enabled: false, timeHHMM: '22:00' },
+      commentary: { enabled: false },
+      semanticThreshold: 0,
+      ...overrides
+    }
+  }
+
+  it('threshold=0（默认）：低分 hit 照常推送——score >= 0 恒真，行为与阈值特性引入前一致', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 0.05, reason: '弱相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ semanticThreshold: 0 }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 0.05 >= 0：照常推送
+    expect(h.engine.getRecentHits()[0]).toMatchObject({
+      matchedBy: 'semantic',
+      semanticReason: '弱相关'
+    })
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+  })
+
+  it('threshold=0.7：hit + score 0.8 → 推送（matchedBy=semantic、reason 透传入 seen）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 0.8, reason: '与自建主机相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ semanticThreshold: 0.7 }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 0.8 >= 0.7：过闸推送
+    expect(h.sendHit.mock.calls[0][1]).toEqual([])
+    expect(h.engine.getRecentHits()[0]).toMatchObject({
+      matchedBy: 'semantic',
+      semanticReason: '与自建主机相关',
+      notifiedAt: expect.any(String)
+    })
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+  })
+
+  it('threshold=0.7：hit + score 0.5 → 按不相关处理：记 seen、不推送、无 HitRecord、下轮不重评；有低于阈值的观测日志', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 0.5, reason: '有点相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ semanticThreshold: 0.7 }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).not.toHaveBeenCalled() // 0.5 < 0.7：拦下
+    expect(h.onHit).not.toHaveBeenCalled() // 不产生任何命中记录（语义理由不写）
+    expect(h.engine.getRecentHits()).toHaveLength(0)
+    expect(h.engine.getStatus().totalHits).toBe(0)
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 已裁决：不再重评
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(0) // 未过闸：不写 verdict 缓存
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(0)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'info' && e.msg.includes('below confidence threshold'))
+    ).toBe(true)
+
+    await h.engine.pollOnce() // 同帖在首页：已入 seen，不重进 AI 批
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).not.toHaveBeenCalled()
+  })
+
+  it('verdict 缓存重试轮不再过闸（P2a 现状保持）：过闸 hit 推失败 → 阈值热更新抬高后，重试轮仍直接重推', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 0.9, reason: '相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ semanticThreshold: 0.7 }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+
+    // 第 1 轮：0.9 >= 0.7 过闸 → 推送失败 → 已过闸 verdict 进缓存（不入 seen）
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.onHit).toHaveBeenCalledTimes(1) // 失败态 emit
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(1)
+
+    // 热更新把阈值抬到 0.95（0.9 < 0.95——若重试轮重过闸会被拦）
+    h.config.ai.semanticThreshold = 0.95
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1) // 未重进 AI 批（缓存生效 = 未重新评估/过闸）
+    expect(h.sendHit).toHaveBeenCalledTimes(2) // 重试轮仍真推且成功
+    expect(h.onHit).toHaveBeenCalledTimes(2) // 最终态 emit
+    expect(h.engine.getRecentHits()[1]).toMatchObject({
+      matchedBy: 'semantic',
+      semanticReason: '相关', // 缓存的 reason 透传
+      notifiedAt: expect.any(String)
+    })
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(0) // 成功后缓存清除
+  })
+
+  it('阈值只作用于语义档：threshold=0.9 不影响 literal / rule 命中（两通道无 score 概念）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: {
+        ai: aiConfig({ matchMode: 'both', semanticThreshold: 0.9 }),
+        priceRules: [
+          { id: 'cheap-month', label: '白菜月付', enabled: true, cycle: 'monthly', maxPrice: 10 }
+        ]
+      },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: '羊毛大促' }), // literal 命中
+      topic('3', { title: '9.9元/月 小鸡' }), // rule 命中
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+
+    expect(evaluate).not.toHaveBeenCalled() // 两条都在语义批之前被接管
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    const hits = h.engine.getRecentHits()
+    expect(hits.some((x) => x.matchedBy === 'literal' && x.topic.id === '2')).toBe(true)
+    expect(hits.some((x) => x.matchedBy === 'rule' && x.topic.id === '3')).toBe(true)
+  })
+})
+
 describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 来源）', () => {
   /** 已配置好的 AI 段（provider 三项齐备）——语义未决豁免用例需要 */
   function aiConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
@@ -1319,6 +1511,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false },
+      semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1664,6 +1857,7 @@ describe('AI 锐评集成（第三轮）', () => {
       interests: [],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false },
+      semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1724,7 +1918,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock('语义锐评')
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '与自建主机相关' }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 1, reason: '与自建主机相关' }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -1814,7 +2008,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock()
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
-        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
     )
     const h = build({
       impl: async () => [topic('1')],
@@ -2061,5 +2255,470 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(hit.commentary).toBe('失败轮锐评')
     expect(hit.notifiedAt).toBeNull()
     expect(hit.notifyError).toContain('telegram send failed')
+  })
+})
+
+describe('per-source 过滤（R5-P2a 第 2 步：滤帖入 seen 不推送不评估）', () => {
+  it('分类白名单（slug 双口径放行）：不符的帖入 seen 不推送，观测日志一行', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['羊毛'] },
+      getSourceFilters: () => ({ includeCategories: ['trade'] })
+    })
+    await h.engine.pollOnce() // 基线
+    // 2：分类显示名/slug 都不在白名单；3：slug 命中（显示名故意写歪）
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛交易', category: '乱写', categorySlug: 'trade' }),
+      topic('2', { title: '羊毛闲聊', category: '闲聊', categorySlug: 'chat' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('3')
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 被滤帖只入 seen
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    expect(h.engine.getRecentHits()).toHaveLength(1)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'info' && e.msg.includes('swallowed by per-source filters'))
+    ).toBe(true)
+  })
+
+  it('分类黑名单与作者黑名单（大小写不敏感）一票否决；exclude 优先于 include', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['羊毛'] },
+      getSourceFilters: () => ({
+        includeCategories: ['trade', 'chat'],
+        excludeCategories: ['CHAT'], // 大小写不敏感；2 在 chat（slug）被否决
+        blockedAuthors: ['SpamBot'] // 3 的作者是 spambot（小写）被否决
+      })
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [
+      topic('4', { title: '羊毛正常', category: '交易', categorySlug: 'trade' }),
+      topic('3', { title: '羊毛广告号', author: 'spambot' }),
+      topic('2', { title: '羊毛黑名单分类', category: '闲聊', categorySlug: 'chat' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('4')
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(h.seen.has('nodeseek:3')).toBe(true)
+  })
+
+  it('被滤帖不进语义批（先于语义评估）； getSourceFilters 未注入时行为不变', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['不存在的关键词'], ai: aiSemanticConfig() },
+      evaluator: { evaluate },
+      getSourceFilters: () => ({ includeCategories: ['trade'] })
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: '不在白名单的小主机', category: '闲聊', categorySlug: 'chat' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(evaluate).not.toHaveBeenCalled() // 被滤帖不评估：连 AI 批都不进
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+
+    // 热更新语义：访问器返回 undefined（filters 被清空）→ 下一轮不再过滤
+    let filters: SourceFilters | undefined = { blockedAuthors: ['spambot'] }
+    const h2 = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['羊毛'] },
+      getSourceFilters: () => filters
+    })
+    await h2.engine.pollOnce() // 基线
+    h2.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛', author: 'spambot' }), topic('1')])
+    await h2.engine.pollOnce()
+    expect(h2.sendHit).not.toHaveBeenCalled() // 黑名单生效：被滤
+    filters = undefined // 配置热更新：filters 移除
+    h2.fetchLatest.mockImplementation(async () => [topic('3', { title: '羊毛again', author: 'spambot' }), topic('1')])
+    await h2.engine.pollOnce()
+    expect(h2.sendHit).toHaveBeenCalledTimes(1) // 不再过滤：照常命中
+    expect(h2.sendHit.mock.calls[0]![0].id).toBe('3')
+  })
+})
+
+describe('价格规则命中（R5-P2a 第 6 步：先于 literal、命中即得）', () => {
+  /** 规则命中用例的关键词故意设为不含在标题里——证明规则通道独立于字面 */
+  const ruleCfg = (rules: PriceRuleConfig[]): Partial<AppConfig> => ({
+    includeKeywords: ['羊毛'],
+    priceRules: rules
+  })
+
+  it('规则命中（OR 语义：首条不匹配、第二条命中）→ matchedBy=rule、matchedRule=label、sendHit 第 4 参 label、关键词为空', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: ruleCfg([
+        { id: 'cheap-year', label: '百元内年付', enabled: true, cycle: 'yearly', maxPrice: 100 },
+        { id: 'cheap-month', label: '白菜月付', enabled: true, cycle: 'monthly', maxPrice: 10 }
+      ])
+    })
+    await h.engine.pollOnce() // 基线
+    // 标题不含「羊毛」（字面不可命中）；月付 9.9元 → 命中第二条规则
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '出一只 9.9元/月 512M 小鸡' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![1]).toEqual([]) // 规则命中不带关键词
+    expect(h.sendHit.mock.calls[0]![2]).toBeNull() // commentary 恒 string|null
+    expect(h.sendHit.mock.calls[0]![3]).toBe('白菜月付') // 第 4 参 = 规则 label
+    const hits = h.engine.getRecentHits()
+    expect(hits[0]).toMatchObject({
+      matchedBy: 'rule',
+      matchedRule: '白菜月付',
+      matchedKeywords: [],
+      semanticReason: null
+    })
+    expect(hits[0].notifiedAt).not.toBeNull()
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+  })
+
+  it('规则优先于 literal：同一帖字面也可命中 → 只记 rule 一种命中方式（不走 literal 形态）', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: ruleCfg([{ id: 'cheap-year', label: '百元内年付', enabled: true, cycle: 'yearly', maxPrice: 100 }])
+    })
+    await h.engine.pollOnce()
+    // 标题同时含关键词「羊毛」与 年付 88元（≤100）→ 规则优先
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛 年付 88元 出一台' }), topic('1')])
+    await h.engine.pollOnce()
+
+    const hits = h.engine.getRecentHits()
+    expect(hits[0]).toMatchObject({ matchedBy: 'rule', matchedRule: '百元内年付', matchedKeywords: [] })
+    expect(h.sendHit.mock.calls[0]![3]).toBe('百元内年付')
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+  })
+
+  it('规则无 label 时 matchedRule=id；规则未命中（disabled / 条件不满足）→ 走 literal 现状，HitRecord.matchedRule=null', async () => {
+    // a) 无 label → id
+    const h1 = build({
+      impl: async () => [topic('1')],
+      config: ruleCfg([{ id: 'cheap-month', enabled: true, cycle: 'monthly', maxPrice: 10 }])
+    })
+    await h1.engine.pollOnce()
+    h1.fetchLatest.mockImplementation(async () => [topic('2', { title: '5元/月 小鸡' }), topic('1')])
+    await h1.engine.pollOnce()
+    expect(h1.engine.getRecentHits()[0]).toMatchObject({ matchedBy: 'rule', matchedRule: 'cheap-month' })
+
+    // b) 唯一规则 disabled + 字面命中 → literal，matchedRule=null，sendHit 第 4 参 null
+    // （h2 与 h1 共享 tmpdir 的 seen/state：换 topic id 9/10 避开已入集的 1/2）
+    const h2 = build({
+      impl: async () => [topic('9')],
+      config: ruleCfg([{ id: 'x', label: '已停用', enabled: false, cycle: 'any' }])
+    })
+    await h2.engine.pollOnce()
+    h2.fetchLatest.mockImplementation(async () => [topic('10', { title: '羊毛大促' }), topic('9')])
+    await h2.engine.pollOnce()
+    expect(h2.engine.getRecentHits()[0]).toMatchObject({ matchedBy: 'literal', matchedKeywords: ['羊毛'] })
+    expect(h2.engine.getRecentHits()[0].matchedRule).toBeNull()
+    expect(h2.sendHit.mock.calls[0]![3]).toBeNull()
+  })
+
+  it('semantic-only 模式下规则仍生效（不受 matchMode 门控）：规则命中帖不进 AI 批', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: {
+        includeKeywords: ['羊毛'],
+        priceRules: [{ id: 'cheap-month', label: '白菜月付', enabled: true, cycle: 'monthly', maxPrice: 10 }],
+        ai: aiSemanticConfig()
+      },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    // 2 命中规则（不进 AI）；3 不命中规则 → 语义批
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '闲聊一台小主机' }),
+      topic('2', { title: '9.9元/月 小鸡' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(evaluate.mock.calls[0]![0].map((t: Topic) => t.id)).toEqual(['3']) // 只有 3 进批
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.engine.getRecentHits()[0]).toMatchObject({ matchedBy: 'rule', matchedRule: '白菜月付' })
+  })
+})
+
+describe('相似降噪（R5-P2a 第 8/10/11 步，DEC-4：48h 已推窗口）', () => {
+  it('命中→相似→入 seen 不推送：无 HitRecord、无 onHit、log info + 引擎计数', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { includeKeywords: ['vps'] } })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '年付88的VPS小鸡分享' }), topic('1')])
+    await h.engine.pollOnce() // 推送成功 → 入窗
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+
+    // 装饰级变体（前后缀装饰符）：与窗口内标题相似 → 吞
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '[转发]年付88的VPS小鸡分享' }),
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 没有第二次推送
+    expect(h.seen.has('nodeseek:3')).toBe(true) // 入 seen
+    expect(h.onHit).toHaveBeenCalledTimes(1) // 不 emit（不是命中）
+    expect(h.engine.getRecentHits()).toHaveLength(1) // 无新 HitRecord
+    expect(similarSwallowedCount(h.engine)).toBe(1)
+    expect(
+      h.logger
+        .getRecent()
+        .some((e) => e.level === 'info' && e.msg.includes('similar topic swallowed: [转发]年付88的VPS小鸡分享'))
+    ).toBe(true)
+  })
+
+  it('推送失败不入窗口：重试轮不被自己吞（若失败入窗，同标题重试相似度=1 必被吞）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { includeKeywords: ['vps'] } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: 'cheap vps deal for yearly 88' }),
+      topic('1')
+    ])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce() // 失败：不入 seen、不入窗口
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+
+    await h.engine.pollOnce() // 重试：窗口为空（失败没入窗）→ 不被吞 → 成功
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(similarSwallowedCount(h.engine)).toBe(0)
+  })
+
+  it('窗口命中用归一化标题：全角/大小写装饰级变体被吞', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { includeKeywords: ['羊毛'] } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: '羊毛 ＶＰＳ ９９元/年 限时' }), // 全角字母数字
+      topic('1')
+    ])
+    await h.engine.pollOnce() // 推送（字面命中「羊毛」）→ 归一化 '羊毛 vps 99元 年 限时' 入窗
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛 VPS 99元/年 限时' }), // 半角写法：归一化后全等
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 相似（全等）→ 吞
+    expect(h.seen.has('nodeseek:3')).toBe(true)
+    expect(similarSwallowedCount(h.engine)).toBe(1)
+  })
+
+  it('48h 过期放行：跨过窗口后同标题新帖照常推送（检查时跳过已过期条目）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { includeKeywords: ['vps'] } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: 'yearly 88 vps deal today' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce() // 入窗
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(SIMILARITY_WINDOW_MS + 60_000) // 跨过 48h
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: 'yearly 88 vps deal today' }), // 同标题
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2) // 过期放行：照常推送
+    expect(similarSwallowedCount(h.engine)).toBe(0)
+  })
+
+  it('similarity.enabled=false：整段跳过（同标题立即照推、无吞并日志）', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['vps'], similarity: { enabled: false, threshold: 0.72 } }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: 'identical vps title repeated' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce() // 第 1 次推送
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: 'identical vps title repeated' }), // 同标题新帖
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2) // 关闭降噪：同标题两次都推
+    expect(similarSwallowedCount(h.engine)).toBe(0)
+    expect(h.logger.getRecent().some((e) => e.msg.includes('similar topic swallowed'))).toBe(false)
+  })
+
+  it('启动重建（第 11 步）：自 hits 近 3 天成功推送记录回填窗口，首轮相似帖即被吞', async () => {
+    const pastHit = (title: string, minutesAgo: number, notified: boolean): HitRecord => ({
+      topic: topic('old1', { title }),
+      matchedKeywords: ['vps'],
+      matchedBy: 'literal',
+      semanticReason: null,
+      notifiedAt: notified ? new Date(Date.now() - minutesAgo * 60_000).toISOString() : null,
+      notifyError: notified ? null : 'telegram send failed'
+    })
+    const readRecent = vi.fn(async () => [
+      pastHit('年付88的VPS小鸡分享', 60, true), // 1h 前成功推送 → 入窗
+      pastHit('完全无关的另一条', 30, false), // 推送失败 → 不入窗
+      pastHit('三天前的老推送', 3 * 24 * 60, true) // 超 48h → 不入窗（48h 不变式）
+    ])
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['vps'] },
+      hitsStore: { append: vi.fn(async () => {}), readRecent }
+    })
+    expect(readRecent).toHaveBeenCalledWith(3, expect.any(Date)) // 构造期即发起
+    await h.engine.pollOnce() // 基线（首轮推送前窗口已就位）
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: '[转发]年付88的VPS小鸡分享' }), // 与重建条目装饰级相似
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).not.toHaveBeenCalled() // 被重建窗口吞掉
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(similarSwallowedCount(h.engine)).toBe(1)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'info' && e.msg.includes('similarity window rebuilt'))
+    ).toBe(true)
+  })
+
+  it('重建只认 notifiedAt 非空：只有失败记录（同标题）时不吞；readRecent 抛错只 warn、空窗照常', async () => {
+    // a) 只有推送失败的历史记录（同标题）→ 不入窗 → 新帖照推
+    const readRecent = vi.fn(async () => [
+      {
+        topic: topic('old1', { title: 'identical vps title' }),
+        matchedKeywords: [],
+        matchedBy: 'literal',
+        semanticReason: null,
+        notifiedAt: null,
+        notifyError: 'telegram send failed'
+      }
+    ])
+    const h1 = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['vps'] },
+      hitsStore: { append: vi.fn(async () => {}), readRecent }
+    })
+    await h1.engine.pollOnce()
+    h1.fetchLatest.mockImplementation(async () => [topic('2', { title: 'identical vps title' }), topic('1')])
+    await h1.engine.pollOnce()
+    expect(h1.sendHit).toHaveBeenCalledTimes(1) // 失败记录不进窗：不吞
+
+    // b) readRecent 抛错：fail-safe 空窗开始，只 log warn，轮次健康不受影响
+    // （h2 与 h1 共享 tmpdir 的 seen/state：换 topic id 9/10 避开已入集的 1/2）
+    const h2 = build({
+      impl: async () => [topic('9')],
+      config: { includeKeywords: ['vps'] },
+      hitsStore: {
+        append: vi.fn(async () => {}),
+        readRecent: vi.fn(async () => {
+          throw new Error('EACCES')
+        })
+      }
+    })
+    await h2.engine.pollOnce()
+    h2.fetchLatest.mockImplementation(async () => [topic('10', { title: 'fresh vps topic' }), topic('9')])
+    await h2.engine.pollOnce()
+    expect(h2.sendHit).toHaveBeenCalledTimes(1)
+    expect(h2.engine.getStatus().health).toBe('ok')
+    expect(
+      h2.logger.getRecent().some((e) => e.level === 'warn' && e.msg.includes('similarity window rebuild failed'))
+    ).toBe(true)
+  })
+})
+
+describe('第 2 页自适应（R5-P2a / DEC-8 修正口径）', () => {
+  /** 生成 n 条未命中新帖（id 自 2 起递增，标题不含关键词 → 字面未命中入 seen） */
+  const freshTopics = (n: number, startId = 2): Topic[] =>
+    Array.from({ length: n }, (_, i) => topic(String(startId + i), { title: `新帖标题 ${startId + i}` }))
+  /** fetchLatest 最新一次调用收到的 opts.pages（显式传 mock：sources 覆盖场景 h.fetchLatest 不是被调用的那个） */
+  const lastPages = (fetch: ReturnType<typeof vi.fn>): number =>
+    fetch.mock.calls[fetch.mock.calls.length - 1]![0].pages
+
+  it('边界（下）：上一轮有效新帖 阈值-1（39）→ 本轮 pages:1、page2Fetches 不涨', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce() // 基线（有效新帖 0）
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(PAGE2_TRIGGER_EFFECTIVE_NEW - 1), topic('1')])
+    await h.engine.pollOnce() // 39 条全部进入匹配管线（未命中入 seen）
+    h.fetchLatest.mockImplementation(async () => [topic('1')])
+    await h.engine.pollOnce()
+    expect(lastPages(h.fetchLatest)).toBe(1)
+    expect(h.engine.getStatus().sources[0]!.page2Fetches).toBe(0)
+  })
+
+  it('边界（上）：上一轮有效新帖 40 → 本轮 pages:2、page2Fetches=1；无新帖轮之后回落 pages:1', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(40), topic('1')])
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(40), topic('1')]) // 全部已 seen
+    await h.engine.pollOnce()
+    expect(lastPages(h.fetchLatest)).toBe(2) // 40 ≥ 40 → 请求 2 页
+    expect(h.engine.getStatus().sources[0]!.page2Fetches).toBe(1)
+    // 本轮 0 有效新帖 → 下一轮回落
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(40), topic('1')])
+    await h.engine.pollOnce()
+    expect(lastPages(h.fetchLatest)).toBe(1)
+    expect(h.engine.getStatus().sources[0]!.page2Fetches).toBe(1) // 不随 pages:1 轮增长
+  })
+
+  it('有效新帖口径 = 进入匹配管线的帖子数：旧帖/置顶/排除词/被滤帖不计入', async () => {
+    // 用 creationOrderedIds 来源构造：1 条阈值下旧帖 + 1 条置顶 + 1 条排除词 + 38 条进管线 = 38 < 40
+    const fetchLatest = vi.fn(async () => [topic('100')])
+    const h = build({ sources: [{ id: 'nodeseek', name: 'NodeSeek', creationOrderedIds: true, fetchLatest }] })
+    await h.engine.pollOnce() // 基线：阈值 100
+    fetchLatest.mockImplementation(async () => [
+      ...freshTopics(38, 101), // 101..138：进匹配管线（字面未命中入 seen）
+      topic('50', { title: '旧帖被顶起' }), // id ≤ 阈值：吞（不计入）
+      topic('139', { title: '置顶新帖', pinned: true }), // 置顶：不计入
+      topic('140', { title: '带广告的新帖' }), // 排除词否决（默认 ['广告']）：不计入
+      topic('100')
+    ])
+    await h.engine.pollOnce()
+    fetchLatest.mockImplementation(async () => [topic('100')])
+    await h.engine.pollOnce()
+    expect(lastPages(fetchLatest)).toBe(1) // 38 < 40
+    expect(h.engine.getStatus().sources[0]!.page2Fetches).toBe(0)
+
+    // 下一轮恰好 40 条有效新帖（151..190）→ 再下轮触发 2 页（边界取等）
+    fetchLatest.mockImplementation(async () => [...freshTopics(40, 151), topic('100')])
+    await h.engine.pollOnce()
+    fetchLatest.mockImplementation(async () => [topic('100')])
+    await h.engine.pollOnce()
+    expect(lastPages(fetchLatest)).toBe(2)
+    expect(h.engine.getStatus().sources[0]!.page2Fetches).toBe(1)
+  })
+
+  it('退避态抑制：触发条件成立但上一轮失败（backoff/challenged）→ 恢复后的第一轮 pages:1', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(40), topic('1')])
+    await h.engine.pollOnce() // 40 有效新帖
+    h.fetchLatest.mockRejectedValueOnce(new Error('net down')) // 失败 → backoff + 冷却
+    await h.engine.pollOnce()
+    expect(h.engine.getStatus().health).toBe('backoff')
+    advanceMs(computeBackoffMs(1, 60_000)) // 越过冷却
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(40), topic('1')])
+    await h.engine.pollOnce() // 恢复轮：health 仍 backoff（fetch 时点）→ 不请求第 2 页
+    expect(lastPages(h.fetchLatest)).toBe(1)
+    expect(h.engine.getStatus().sources[0]!.page2Fetches).toBe(0)
+    // 恢复轮成功（40 条仍 unseen 重评？——已 seen，0 有效）→ 下轮仍 1 页
+    h.fetchLatest.mockImplementation(async () => [...freshTopics(40), topic('1')])
+    await h.engine.pollOnce()
+    expect(lastPages(h.fetchLatest)).toBe(1)
+    expect(h.engine.getStatus().health).toBe('ok')
   })
 })

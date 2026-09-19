@@ -160,6 +160,47 @@ describe('generate', () => {
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
   })
 
+  it('规则命中行（R5-P2a）：LLM 素材带 matchedRule（?? null 归一）；降级模板显示「规则命中：label」', async () => {
+    const ruleHit: HitRecord = {
+      topic: makeTopic('3', '9.9元/月 小鸡'),
+      matchedKeywords: [],
+      matchedBy: 'rule',
+      semanticReason: null,
+      matchedRule: '白菜月付',
+      notifiedAt: '2026-09-19T10:00:01+08:00',
+      notifyError: null
+    }
+    // 旧 jsonl 行形态：无 matchedRule 字段（消费方须容忍缺失）
+    const stripMatchedRule = (h: HitRecord): HitRecord => {
+      const copy = { ...h }
+      delete (copy as Partial<HitRecord>).matchedRule
+      return copy
+    }
+    const literalHit: HitRecord = { ...makeHit('2', '羊毛 B'), matchedRule: null }
+
+    // a) LLM 路径：payload.matchedRule 三态归一（label / 缺字段→null / 显式 null）
+    const h1 = makeHarness({ hitsForDay: [ruleHit, stripMatchedRule(makeHit('1', '羊毛 A')), literalHit] })
+    await h1.svc.generate(at(22, 30))
+    const req = h1.chat.mock.calls[0]![0] as { system: string; user: string }
+    const payload = JSON.parse(req.user) as {
+      hits: Array<{ matchedBy: string; matchedRule: string | null }>
+    }
+    expect(payload.hits[0]).toMatchObject({ matchedBy: 'rule', matchedRule: '白菜月付' })
+    expect(payload.hits[1]).toMatchObject({ matchedBy: 'literal', matchedRule: null })
+    expect(payload.hits[2]).toMatchObject({ matchedBy: 'literal', matchedRule: null })
+
+    // b) 降级模板：规则命中带 label；matchedBy='rule' 但缺 matchedRule 的旧记录兜底「规则命中」；literal 不变
+    const noLabelRule = stripMatchedRule({ ...ruleHit, topic: makeTopic('5', '3元/月 小鸡') })
+    const h2 = makeHarness({
+      hitsForDay: [ruleHit, noLabelRule, literalHit],
+      chatReply: () => new Error('AI down')
+    })
+    const md = await h2.svc.generate(at(22, 30))
+    expect(md).toMatch(/9\.9元\/月 小鸡（规则命中：白菜月付）$/m)
+    expect(md).toMatch(/3元\/月 小鸡（规则命中）$/m)
+    expect(md).toMatch(/羊毛 B（字面命中）$/m)
+  })
+
   it('LLM 抛错：降级固定模板仍成功落盘，log warn，推送照发（锐评「」附行尾，无锐评不加）', async () => {
     const h = makeHarness({
       hitsForDay: [

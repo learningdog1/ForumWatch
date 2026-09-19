@@ -64,6 +64,13 @@ export class DesktopRuntime {
   readonly engine: MonitorEngine
   readonly aiProvider: AiProvider
   readonly reportService: DailyReportService
+  /**
+   * 语义评估器（R5-P2c 起暴露）：match:test 测试台 handler 复用同一实例
+   * （provider 热更新读 store）。原本是构造局部量，仅为测试台依赖升为字段。
+   */
+  readonly semanticEvaluator: SemanticEvaluator
+  /** 命中存储（R5-P2c 起暴露）：match:test 从近 2 天命中重建"近期已推"标题 */
+  readonly hitsStore: HitsStore
   private readonly siteClient: HttpClient
   private readonly tgClient: HttpClient
   private readonly aiClient: HttpClient
@@ -176,6 +183,9 @@ export class DesktopRuntime {
     const evaluator = new SemanticEvaluator({ provider: this.aiProvider })
     const commentaryGenerator = new CommentGenerator({ provider: this.aiProvider })
     const hitsStore = new HitsStore(join(this.userDataDir, HITS_DIR_NAME))
+    // R5-P2c：测试台 handler（ipc.ts match:test）复用这两个实例，升为只读字段
+    this.semanticEvaluator = evaluator
+    this.hitsStore = hitsStore
     this.reportService = new DailyReportService({
       provider: this.aiProvider,
       hits: hitsStore,
@@ -207,6 +217,10 @@ export class DesktopRuntime {
 
     engine = new MonitorEngine({
       getSources,
+      // R5-P2a：per-source 过滤访问器（config.sources[].filters，热更新读 store）；
+      // 未配置的 source 返回 undefined = 不过滤
+      getSourceFilters: (sourceId) =>
+        this.store.get().sources.find((s) => s.id === sourceId)?.filters,
       seen: this.seen,
       state: engineState,
       notifier,

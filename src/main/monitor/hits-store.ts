@@ -106,6 +106,27 @@ export class HitsStore {
   }
 
   /**
+   * 读最近 N 个本地自然日（today 起向前数，含 today）的全部命中，合并后按
+   * 时间顺序旧→新（各日桶内部本就旧→新，跨日按日期升序拼接）。
+   * R5-P2a 相似降噪窗口的启动重建数据源：48h 窗口跨本地日最多涉 3 个日桶，
+   * 调用方 `readRecent(3)` 即可完整覆盖。
+   * 单日读失败按空处理（查询面不抛，与 readDay 同款）；days <= 0 → []。
+   * 返回**全部**记录（含推送失败/静音的 notifiedAt=null 行）——是否只要成功
+   * 推送由调用方（engine）决定，本方法不做业务过滤。
+   */
+  async readRecent(days: number, now: Date = new Date()): Promise<HitRecord[]> {
+    if (!Number.isInteger(days) || days <= 0) return []
+    const out: HitRecord[] = []
+    // 从最旧的一天开始拼接（days-1 天前 → 今天），保证整体旧→新
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(now)
+      d.setDate(d.getDate() - i)
+      out.push(...(await this.readDay(formatLocalDate(d))))
+    }
+    return out
+  }
+
+  /**
    * 已有数据的天列表，新→旧（'YYYY-MM-DD' 字典序 = 时间序，倒排即可）。
    * 目录不存在 → `[]`；目录里不匹配 `YYYY-MM-DD.jsonl` 的文件被忽略。
    */

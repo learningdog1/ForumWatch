@@ -103,12 +103,40 @@ export class HtmlSourceAdapter implements SourceAdapter {
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL
   }
 
-  async fetchLatest(): Promise<Topic[]> {
+  /**
+   * 抓取最新帖子列表（R5-P2a / DEC-8：可选 `opts.pages` 第 2 页补抓）。
+   * - opts 缺省 / pages < 2：仅第 1 页（既有行为不变）。
+   * - pages >= 2：额外抓第 2 页，两页合并按 topic id 去重保序（第 1 页原序在前，
+   *   第 2 页中与第 1 页重复的条目丢弃——覆盖"服务端忽略页参数返回同页内容"的
+   *   形态，天然无害）。
+   * - **第 2 页抓取失败（含 ChallengeError）不判失败**：整轮按第 1 页成功处理
+   *   （log warn）——第 1 页失败才是失败（现状语义）。
+   */
+  async fetchLatest(opts?: { pages?: number }): Promise<Topic[]> {
+    const topics = await this.fetchPage(1)
+    if ((opts?.pages ?? 1) < 2) return topics
+    let page2: Topic[]
+    try {
+      page2 = await this.fetchPage(2)
+    } catch (err) {
+      // 第 2 页是补抓：失败只降级回单页，不污染整轮健康判定（console 先例见
+      // hits-store.readDay——本模块零注入 logger）
+      const detail = err instanceof Error ? err.message : String(err)
+      console.warn(`[nodeseek] page 2 fetch failed, continuing with page 1 only: ${detail}`)
+      return topics
+    }
+    return mergePagesDedupById(topics, page2)
+  }
+
+  /** 单页抓取：请求 → 挑战检测 → 解析 → 0 条护栏（抛错语义全部在此） */
+  private async fetchPage(page: number): Promise<Topic[]> {
     // 勘误（2026-09-19 实测）：?sort=createTime 参数被服务端忽略——首页真实排序
     // 是「最后回复时间」，旧帖被回复顶回首页属于正常行为。URL 参数保留无害；
     // 「新帖 vs 回复顶起旧帖」的区分由 engine 侧 maxSeenTopicId 阈值过滤承担
     // （W3，见 types.ts 的 creationOrderedIds 能力声明与 engine.ts）。
-    const url = `${this.baseUrl}/?sort=createTime`
+    // 第 2 页页参数形态沿用 docs/decisions.md 实测记录（`&page-2`），基于现有
+    // URL 构造追加。
+    const url = this.pageUrl(page)
     // fetchHtml reject（网络错误 / 超时 abort）原样上抛，不吞不改
     const res = await this.fetchHtml(url, {
       method: 'GET',
@@ -129,4 +157,26 @@ export class HtmlSourceAdapter implements SourceAdapter {
     }
     return topics
   }
+
+  /** 页 URL：第 1 页现状不变；第 2 页追加页参数（decisions.md 实测记录形态） */
+  private pageUrl(page: number): string {
+    return page <= 1
+      ? `${this.baseUrl}/?sort=createTime`
+      : `${this.baseUrl}/?sort=createTime&page-${page}`
+  }
+}
+
+/**
+ * 两页合并：按 topic id 去重保序——第 1 页原序在前，第 2 页中 id 未出现过的
+ * 条目按原序追加（id 与 engine 的全局去重键同口径，是页面内条目的唯一身份）。
+ */
+function mergePagesDedupById(page1: Topic[], page2: Topic[]): Topic[] {
+  const seenIds = new Set(page1.map((t) => t.id))
+  const merged = [...page1]
+  for (const t of page2) {
+    if (seenIds.has(t.id)) continue
+    seenIds.add(t.id)
+    merged.push(t)
+  }
+  return merged
 }

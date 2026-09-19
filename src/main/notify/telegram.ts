@@ -48,16 +48,25 @@ export function escapeHtml(s: string): string {
  * @param commentary AI 锐评（第三轮，可选）：**非空字符串**时在「🎯 命中」行之后插一行
  *   `💬 锐评: {commentary}`（转义后）；null / undefined / 空串时整行省略——两参调用
  *   的输出与升级前逐字节一致（引擎侧未生成锐评时直接不传即可）。
+ * @param matchedRule 命中的价格规则 label（第五轮，可选）：**非空字符串**（= matchedBy
+ *   'rule'——规则命中恒有 label，rules.ts 的 RuleMatch.label 已归一为 label ?? id）
+ *   时「🎯 命中」行改为 `🎯 命中规则: {matchedRule}`（转义后）；null / undefined /
+ *   空串（= literal/semantic 命中）时保持 `🎯 命中: {keywords}` 原样。
  */
 export function formatHitMessage(
   topic: Topic,
   matchedKeywords: string[],
-  commentary?: string | null
+  commentary?: string | null,
+  matchedRule?: string | null
 ): string {
+  const hitLine =
+    typeof matchedRule === 'string' && matchedRule.length > 0
+      ? `🎯 命中规则: ${escapeHtml(matchedRule)}`
+      : `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`
   const lines = [
     `🔔 <b>${escapeHtml(topic.title)}</b>`,
     `📁 ${escapeHtml(topic.category)} · 👤 ${escapeHtml(topic.author)}`,
-    `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`
+    hitLine
   ]
   if (typeof commentary === 'string' && commentary.length > 0) {
     lines.push(`💬 锐评: ${escapeHtml(commentary)}`)
@@ -104,16 +113,18 @@ export class TelegramNotifier {
   }
 
   /**
-   * 命中推送（HTML parse_mode）。第三参 commentary（AI 锐评）可选：不传 / null / 空串
-   * 时消息与两参版本逐字节一致，既有调用方（engine）无需改动即可升到本签名。
+   * 命中推送（HTML parse_mode）。第三参 commentary（AI 锐评）与第四参 matchedRule
+   * （价格规则 label，第五轮）可选：不传 / null / 空串时消息与少参版本逐字节一致，
+   * 既有调用方（engine）无需改动即可升到本签名。
    */
   async sendHit(
     topic: Topic,
     matchedKeywords: string[],
-    commentary?: string | null
+    commentary?: string | null,
+    matchedRule?: string | null
   ): Promise<void> {
     await this.enqueue(() =>
-      this.deliver(formatHitMessage(topic, matchedKeywords, commentary), 'HTML')
+      this.deliver(formatHitMessage(topic, matchedKeywords, commentary, matchedRule), 'HTML')
     )
   }
 
