@@ -21,13 +21,18 @@ README 是快速上手；本文是每一项行为的具体语义：界面元素�
 - **左侧栏**：品牌、三个页签（📊 监控台 / 📅 今日回顾 / ⚙️ 设置）、底部迷你运行状态（与托盘 tooltip 同口径）。设置页有未保存修改时，页签上会出现未保存圆点；此时切走页签会先弹提示条（放弃修改并切换 / 留在设置）。
 - **监控台**（Dashboard）：
   - **状态卡**：运行状态徽标（运行中 / 已暂停 / Cloudflare 拦截 / 退避重试中）+ 四格指标（上次轮询、下次轮询、连续失败、累计命中）+ 最近错误。已暂停时"下次轮询"显示 `—`（不再排程）。
-  - **来源状态块**：每个已启用来源一行——健康点、来源名、健康文案（退避中显示 mm:ss 倒计时）、最近成功时间。v0.2 仅 NodeSeek 一行。
+  - **来源状态块**：每个已启用来源一行——健康点、来源名、健康文案（退避中显示 mm:ss 倒计时）、最近成功时间。来源类型有 NodeSeek / V2EX / RSS 三种（RSS 来源显示 label 或 feed 域名）。
   - **AI 状态块**：生效模式徽标（字面 / 语义 / 字面+语义）、今日调用 `N/300` 与锐评 `N/100` 两行计数、降级提示（AI 未配置 / 今日配额用尽）、最近 AI 错误（评估成功后自动清空）。
   - **操作行**：⏸ 暂停监控 / ▶ 恢复监控（同一按钮随状态切换）、🔄 立即轮询（暂停状态下禁用）、✈ 发送测试通知。
   - **最近命中**：最近 200 条命中记录（进程内存环形，重启后清空；`totalHits` 计数才跨重启累计，全天命中另落盘 `hits/`）。每条带来源徽标与命中方式徽标（**字面** / **语义**），语义命中会显示 AI 的一句话判定理由。
   - **运行日志**：最近 500 条日志（info/warn/error 三级，同样为内存环形）。
 - **今日回顾**（Reports）：AI 日报页。左侧日期栏列出有日报的日期（新→旧，取最近 14 个），点击切换查看；顶部显示当天命中数摘要。今天还没有日报时空态提供「立即生成」按钮（详见[下文](#ai-语义监控与每日总结)）。
-- **设置**（Settings）分八个卡片：关键词、Telegram 推送、AI 模型、监控模式、每日总结、轮询、网络（代理）、行为。底部「保存设置」。要点：
+- **设置**（Settings）分九个卡片（顺序即页面顺序）：**来源**（置顶）、关键词、Telegram 推送、AI 模型、监控模式、每日总结、轮询、网络（代理）、行为。底部「保存设置」。要点：
+  - **来源**卡（多论坛监控入口）：
+    - **已配置来源**列表：类型徽标（NodeSeek / V2EX / RSS）+ 名称（rss 显示 label 或域名）+ 地址 + 启停开关 + 删除按钮。默认 NodeSeek 来源不可删除；其余来源也不可删到 0（列表删空保存时会被重置回默认）。启停与增删都是先进 draft、点「保存设置」生效；停用的来源不抓取、也不进外链白名单。
+    - **预设来源**：V2EX（官方 API，无需地址）、Linux.do（`https://linux.do/latest.rss`）、LowEndTalk（`https://lowendtalk.com/feed`）三个一键添加按钮，已添加的按 id 置灰。预设说明如实标注：Linux.do / LowEndTalk 的 RSS 在部分网络会被 Cloudflare 拦截（届时来源状态显示"Cloudflare 拦截"并自动退避，建议配合代理）；V2EX 未认证限速约 120 次/小时（默认 60s 轮询在限内）。
+    - **自定义 RSS**：填任意 RSS 2.0 / Atom 地址（前端校验 http(s)，非法红字提示）+ 可选显示名（留空用域名）。来源 id 由域名自动生成（如 `lowendtalk-com`），重复添加同一域名会加 `-2/-3` 后缀区分。
+    - 按来源的分类 / 作者过滤（filters）将在后续版本开放，卡片尾部有提示行。
   - 关键词与兴趣描述均为标签输入：输入后回车添加，点 × 删除。
   - **AI 模型**卡：Base URL / API Key / 模型名三项 + DeepSeek / Kimi / GLM 三个一键预设 + 「测试连接」（按**已保存**配置发一条最小对话，表单 dirty 时会提示先保存再测试）+ 「推送锐评」开关（命中推送附加 AI 一句点评）。
   - **监控模式**卡：字面匹配 / 语义匹配 / 字面 + 语义三选一（单选卡片），下接兴趣描述输入（建议上限 20 条，超了橙字提示不硬拦）。
@@ -61,7 +66,7 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 
 ### 来源状态（per-source）
 
-`EngineStatus.sources` 里每个来源独立维护 `health / lastSuccessAt / lastError / consecutiveFailures / cooldownUntil`，各自走同一条退避曲线。聚合字段是全局汇总，监控台的**来源状态块**展示每来源明细（退避中显示剩余倒计时）。调度器下一轮时刻 = max(配置间隔, 最差来源剩余退避)——v0.2 单来源等价旧行为，多来源后一个来源长时间退避会拉长全局轮询周期。
+`EngineStatus.sources` 里每个来源独立维护 `health / lastSuccessAt / lastError / consecutiveFailures / cooldownUntil`，各自走同一条退避曲线。聚合字段是全局汇总，监控台的**来源状态块**展示每来源明细（退避中显示剩余倒计时）。调度器下一轮时刻 = max(配置间隔, 最差来源剩余退避)——一个来源长时间退避会拉长全局轮询周期（其余来源跟着变慢，但不中断）。
 
 ### AI 运行态（AiRuntimeStatus）
 
@@ -88,12 +93,13 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 | `excludeKeywords` | `[]` | 排除词，一票否决。清洗规则同上。**语义模式下仍先于 AI 生效** |
 | `pollIntervalSec` | `60` | 轮询间隔（秒）。非法值回退 60；小于 15 钳到 15 |
 | `proxyUrl` | `''` | 代理地址。必须以 `http://` `https://` `socks5://` 开头（忽略大小写），否则置空（直连） |
-| `proxyScope` | `'telegram-only'` | 代理作用域：`telegram-only`（仅 Telegram；**AI 请求直连**）/ `all`（含 NodeSeek 抓取与 AI 请求）。非法值回退 `telegram-only` |
+| `proxyScope` | `'telegram-only'` | 代理作用域：`telegram-only`（仅 Telegram；**来源抓取与 AI 请求直连**）/ `all`（含来源抓取与 AI 请求）。非法值回退 `telegram-only` |
 | `telegram.botToken` | `''` | @BotFather 发放，trim |
 | `telegram.chatId` | `''` | 个人或群组 id，trim |
 | `notifyEnabled` | `true` | 推送总开关。关闭后命中仍会记录到「最近命中」与 `hits/`，但不推送 |
 | `launchAtLogin` | `false` | 开机自启。mac 上未签名应用可能被系统拒绝 |
-| `sources` | `[{id:'nodeseek', type:'nodeseek', enabled:true}]` | 论坛来源列表（v2 仅 nodeseek；关键词全局共享，per-source 覆盖留给未来版本）。非数组/空回默认单项；id 规范成 slug、type 恒 `nodeseek`、enabled 布尔化、按 id 去重 |
+| `sources` | `[{id:'nodeseek', type:'nodeseek', enabled:true}]` | 论坛来源列表（v3 起为按 type 判别的联合；关键词全局共享，per-source 过滤见下一行 filters）。`type` 三种：`nodeseek`（SSR 页面抓取）/ `v2ex`（官方 API）/ `rss`（额外必带合法 http(s) 的 `url`、可选 `label` 展示名）。清洗：非数组/空回默认单项；未知 type 整项丢弃；rss 的 url 非法（非 http(s) / 解析失败 / 无 host）整项丢弃；label trim 后为空视为无；id 规范成 slug（缺 id 时 rss 从 url 域名派生建议 id）、enabled 布尔化、按 id 去重保留首个；全部项非法回默认单项，绝不落空列表 |
+| `sources[].filters` | （可选，缺省无） | per-source 过滤契约：`includeCategories`（分类白名单，空/缺失=不限；匹配分类显示名或 slug，大小写不敏感）、`excludeCategories`（分类黑名单，命中任一否决；与 include 同时给出时 exclude 优先）、`blockedAuthors`（作者黑名单，命中任一一票否决）；均为字面字符串匹配。三列表各自 trim、去空、大小写不敏感去重、每列表上限 100 条；清洗后全空不落键。**当前版本只存储与清洗该字段，引擎过滤尚未生效**（后续版本接入） |
 | `ai.provider.baseUrl` | `''` | OpenAI 兼容服务地址，如 `https://api.deepseek.com/v1`。trim、去尾斜杠、必须 `http(s)://` 开头否则置空；请求时拼 `/chat/completions` |
 | `ai.provider.apiKey` | `''` | 服务商 API Key，trim。仅存本机 `config.json`（600 权限） |
 | `ai.provider.model` | `''` | 模型名（如 `deepseek-chat`），trim |
@@ -120,8 +126,8 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 
 | 文件 | 作用 | 说明 |
 | --- | --- | --- |
-| `config.json` | 配置 | 权限 600（含 bot token 与 AI apiKey，勿外传）。盘上形状为 `{"schemaVersion":2,"config":{...}}`，字段在 `config` 对象内；旧版 v1 信封由加载时迁移函数升到 v2。损坏时自动备份为 `config.json.corrupt-<时间戳>` 并回退默认配置，应用不崩溃 |
-| `seen.json` | 已见帖子 ID 集 | 去重键 = `${来源id}:${帖子id}`（旧版裸 id 启动时自动加 `nodeseek:` 前缀）；容量 1000 条环形淘汰，且超过 7 天未遇到的 ID 会被清理 |
+| `config.json` | 配置 | 权限 600（含 bot token 与 AI apiKey，勿外传）。盘上形状为 `{"schemaVersion":3,"config":{...}}`，字段在 `config` 对象内；旧版 v1 / v2 信封由加载时迁移函数链式升到 v3（迁移只变换不校验，合法性由默认值合并 + sanitize 兜底）。损坏（读不出 / 非法 JSON / 未知 schemaVersion）时自动备份为 `config.json.corrupt-<时间戳>` 并回退默认配置，应用不崩溃。注意升级是单向的：**旧版应用读到 v3 文件同样走损坏备份路径**（回默认配置） |
+| `seen.json` | 已见帖子 ID 集 | 去重键 = `${来源id}:${帖子id}`（旧版裸 id 启动时自动加 `nodeseek:` 前缀）；容量 `1000 + 500 × (来源数 − 1)` 条环形淘汰（单源 1000；容量在启动时定死，增删来源下次重启生效），且超过 7 天未遇到的 ID 会被清理 |
 | `state.json` | 引擎状态 | v2 形状 `{schemaVersion:2, sources:{"nodeseek":{baselineDone,totalHits}}}`——基线与累计命中**按来源拆分**（防风暴语义）。旧版 v1 加载时自动迁移 |
 | `hits/YYYY-MM-DD.jsonl` | 当日命中 | 每条命中追加一行 JSON（按**本地时区**日期分桶）。AI 每日总结的数据源；「今日回顾」与内存「最近命中」互不影响 |
 | `reports/YYYY-MM-DD.md` | AI 日报 | 每日总结生成的 markdown（同样本地日期命名）。手动「立即生成」会覆盖当天文件 |
@@ -203,7 +209,7 @@ npm run engine:headless -- --duration 600 --interval 30    # 跑 10 分钟，30 
 | 参数 | 说明 |
 | --- | --- |
 | `--config <dir>` | 数据目录（内含 `config.json` / `seen.json` / `state.json` / `hits/` / `reports/` / `logs/`），默认 `./data/headless`。首次运行生成默认配置（chmod 600）并提示填写 |
-| `--once` | 跑一轮后退出，打印 `fetched / fresh / hits / notified / failed / muted-or-unconfigured` 统计。**退出码：仅抓取失败（退避/挑战）为 1**；Telegram 未配置或推送失败均为 0 |
+| `--once` | 跑一轮后退出，打印 `fetched / fresh / hits / notified / failed / muted-or-unconfigured` 统计；多来源下 `fetched` / `fresh` 为**全来源聚合求和**（单来源时与旧口径一致），去重键与 engine 同口径 `${来源id}:${帖子id}`。**退出码：仅抓取失败（退避/挑战）为 1**；Telegram 未配置或推送失败均为 0 |
 | `--duration <sec>` | 运行指定秒数后优雅退出（默认直到 Ctrl-C / SIGTERM） |
 | `--interval <sec>` | 临时覆盖轮询间隔（钳到 ≥15s），**不写回配置** |
 
@@ -211,7 +217,7 @@ npm run engine:headless -- --duration 600 --interval 30    # 跑 10 分钟，30 
 
 AI 能力（语义监控、每日总结）在 headless 下与桌面版同款接线，读同一份 `config.json` 的 `ai` 段——在 headless 数据目录手工编辑配置即可启用（注意改配置需重启进程）。
 
-限制：headless 的配置是**启动时快照**，不做热更新（桌面版经 IPC 热更新）；改配置文件后需重启进程。手动编辑 `config.json` 时注意字段在外层 `config` 对象内（见上文盘上形状）。
+限制：headless 的配置是**启动时快照**，不做热更新（桌面版经 IPC 热更新）；改配置文件后需重启进程。手动编辑 `config.json` 时注意字段在外层 `config` 对象内（见上文盘上形状），且信封 `schemaVersion` 必须为 `3`——写成其他值会被当作损坏配置（备份后回默认）。headless 添加来源也是改这份文件的 `config.sources`（形状见[配置项参考](#配置项参考)），或直接复制桌面版配置过来用。
 
 ## 故障排查矩阵
 
@@ -220,13 +226,15 @@ AI 能力（语义监控、每日总结）在 headless 下与桌面版同款接�
 | 收不到任何通知 | 设置 → 发送测试消息 | 测试失败：代理不通 / token 无效 / chatId 错 / 没给 bot 发过消息 |
 | 测试消息能收、但没推送 | 监控台状态 + 最近命中 | 关键词为空或没命中；被 Cloudflare 拦截（等自动恢复）；推送总开关被静音；置顶帖 |
 | 状态"Cloudflare 拦截" | 监控台 | 自动退避重试会自愈；频繁出现调大间隔，或代理作用域切 `all` 换出口 |
+| 新加的 RSS 源恒显示"Cloudflare 拦截" | 来源状态块（按来源看是哪一个） | linux.do / LowEndTalk 等 RSS 在部分网络被 CF 常态拦截——网络依赖，不是配置错误；把代理作用域切 `all` 换出口试试，或停用该来源。单来源被拦不影响其他来源继续抓取 |
+| V2EX 来源频繁退避 / 日志见 `v2ex rate limit (HTTP 429)` | 状态卡"最近错误" + 日志 | V2EX 未认证 API 限速约 120 次/小时，默认 60s 轮询（60/h）在限内；调小过轮询间隔的话请调大（≥60s），退避曲线会自行恢复 |
 | 状态"退避重试中" | 状态卡"最近错误" | 网络故障居多；恢复后自动复位 |
 | 日志有 `notify failed` | `logs/log-YYYY-MM-DD.txt` | Telegram 侧错误详情（429 / 网络错误），失败消息不重发，等下一个命中帖 |
 | 语义模式不命中 | 监控台 AI 状态块 | ①兴趣描述为空（语义档永不命中）；②`degraded='unconfigured'`——Provider 没配齐，实际在跑字面；③`quota-exhausted`——今日 300 次用完已降级；④AI 报错看 `lastAiError`；⑤帖子字面被排除词否决（语义也救不回） |
 | 日报没生成 | 「今日回顾」页 + 设置 | ①开关没开 / 时刻没到；②生成时刻应用没在运行（**不回溯**，错过当天不补历史）；③当时监控处于暂停（desired!=='running' 不生成）；④当天自动尝试已失败 3 次。以上均可在「今日回顾」点「立即生成」手动出当天日报（覆盖重生成） |
 | AI 状态块有报错 / 测试连接失败 | `lastAiError` + 设置 → 测试连接 | Base URL / API Key / 模型名有误（注意 Key 是**已保存**配置）；服务商限流或余额不足；`proxyScope='telegram-only'` 时 AI 走直连，直连不通的环境把作用域切 `all`。AI 报错不影响字面监控与轮询 |
 | 想重新做首启基线 | 退出应用 → 删除 `seen.json` 与 `state.json` → 启动 | 下次启动整页只记不推。⚠️ 只删 `seen.json` 不删 `state.json` 的话，`baselineDone` 仍为真，整页会被当成"新帖"处理，可能推送一批旧帖 |
-| 推送里出现老帖（被回复顶起的旧帖） | 监控台日志 + `state.json` | 已由 id 阈值过滤（`maxSeenTopicId`）拦截；若仍出现，检查 `state.json` 该来源的 `maxSeenTopicId` 是否缺失/为 null（如手工清过 state），下一轮成功抓取会自动初始化阈值吞掉整页旧帖，再下一轮起过滤生效 |
+| 推送里出现老帖（被回复顶起的旧帖） | 监控台日志 + `state.json` | 已由 id 阈值过滤（`maxSeenTopicId`，按来源分字段）拦截——仅对 id 随创建递增的来源生效（NodeSeek / V2EX；RSS 来源不做该过滤，靠 seen 去重兜底）；若仍出现，检查 `state.json` 该来源的 `maxSeenTopicId` 是否缺失/为 null（如手工清过 state），下一轮成功抓取会自动初始化阈值吞掉整页旧帖，再下一轮起过滤生效 |
 | 锐评没出现 | 设置 → 推送锐评 + 监控台 AI 状态块 | ①开关被关（`ai.commentary.enabled`）；②AI Provider 未配置；③当日 100 子限额或 300 总额度用尽（状态块看 `锐评 N/100` 与 `今日调用 N/300`，次日恢复）；④该帖生成失败（网络/超时/限流，失败不重打）。锐评缺席不影响推送本身 |
 | mac 上托盘图标消失 | — | 系统唤醒后的已知 Electron 问题，本应用在唤醒事件里会自动重设图标；仍异常可退出重开 |
 | mac 开机不自启 | 系统设置 → 登录项 | 未签名应用被系统拒绝；当前版本请手动启动 |
