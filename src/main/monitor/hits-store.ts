@@ -18,9 +18,15 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HitRecord } from '../../shared/types'
+import type { HitQueryOptions, HitQueryResult } from '../../shared/ipc'
+
+export type { HitQueryOptions, HitQueryResult }
 
 /** userData 下的命中存储目录名；装配方负责 `join(userData, HITS_DIR_NAME)` 后传入构造函数 */
 export const HITS_DIR_NAME = 'hits'
+
+/** query 的单页大小上限（超出钳位；防一次性吐全量历史） */
+export const HITS_QUERY_LIMIT_MAX = 200
 
 /** 日桶文件名形状：`YYYY-MM-DD.jsonl`（listDays 只认这个形状，其余文件一概忽略） */
 const DAY_FILE_RE = /^\d{4}-\d{2}-\d{2}\.jsonl$/
@@ -42,7 +48,8 @@ export function formatLocalDate(now: Date = new Date()): string {
  *
  * 生命周期：进程启动 `new HitsStore(join(userData, 'hits'))` 一个实例长期持有；
  * engine 每命中一次 `await append(hit)`（可注入 now 供测试）；
- * 日报/UI 查询走 `readDay(dateLocal)` / `listDays()`。
+ * 日报/UI 查询走 `readDay(dateLocal)` / `listDays()` / `readRecent(days)` /
+ * `query(opts)`（R7-W2 历史命中浏览器：跨日合并 + 过滤 + 分页，新→旧）。
  */
 export class HitsStore {
   private readonly dir: string
@@ -142,6 +149,64 @@ export class HitsStore {
       .map((name) => name.slice(0, -'.jsonl'.length))
       .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
   }
+
+  /**
+   * 历史命中查询（R7-W2 历史命中浏览器的数据面）：
+   * 跨日文件合并读（fromDate..toDate **含两端**，本地日期字符串）+ 内存过滤
+   * + 分页。约定：
+   * - 排序恒**新→旧**：日按日期倒序（listDays 已新→旧，只取区间内的天），
+   *   同日内按记录序倒序（readDay 返回旧→新写入序，倒序遍历）。
+   * - 过滤：sourceId 精确相等；matchedBy 包含（undefined / 空数组 = 不过滤）；
+   *   text 对 title + matchedKeywords + matchedRule 的大小写不敏感子串
+   *   （trim 后为空 = 不过滤；matchedRule 为旧记录可选字段，缺失按无）。
+   * - total = 过滤后总数（与分页无关）；items = `[offset, offset+limit)` 切片。
+   * - limit 钳位 [0, 200]（HITS_QUERY_LIMIT_MAX）；offset 钳位 >= 0；
+   *   非整数/NaN 分别按 0 处理。
+   * - 坏行复用 readDay 的跳过语义；文件不存在（当天无命中）自然跳过——
+   *   走 listDays 只读真实存在的日桶，fromDate > toDate = 空区间。
+   * 查询面不抛（readDay 单日失败按空处理）。
+   */
+  async query(opts: HitQueryOptions): Promise<HitQueryResult> {
+    const rawLimit = Number.isFinite(opts.limit) ? Math.floor(opts.limit) : 0
+    const limit = Math.min(Math.max(rawLimit, 0), HITS_QUERY_LIMIT_MAX)
+    const rawOffset = Number.isFinite(opts.offset) ? Math.floor(opts.offset) : 0
+    const offset = Math.max(rawOffset, 0)
+    const sourceId =
+      typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : null
+    const matchedBy =
+      Array.isArray(opts.matchedBy) && opts.matchedBy.length > 0
+        ? new Set<string>(opts.matchedBy)
+        : null
+    const text =
+      typeof opts.text === 'string' && opts.text.trim() !== '' ? opts.text.trim().toLowerCase() : ''
+
+    const filtered: HitRecord[] = []
+    for (const day of this.listDays()) {
+      // 零填充 'YYYY-MM-DD' 的字典序 = 时间序（listDays 保证形状，区间比较安全）
+      if (day < opts.fromDate || day > opts.toDate) continue
+      const dayHits = await this.readDay(day)
+      // 同日内倒序遍历：readDay 是旧→新（写入序），新→旧 = 逆序
+      for (let i = dayHits.length - 1; i >= 0; i--) {
+        const hit = dayHits[i]
+        if (sourceId !== null && hit.topic.sourceId !== sourceId) continue
+        if (matchedBy !== null && !matchedBy.has(hit.matchedBy)) continue
+        if (text !== '' && !hitMatchesText(hit, text)) continue
+        filtered.push(hit)
+      }
+    }
+    return { total: filtered.length, items: filtered.slice(offset, offset + limit) }
+  }
+}
+
+/** text 过滤：title / matchedKeywords 任一 / matchedRule（可选字段，缺失按无）的大小写不敏感子串 */
+function hitMatchesText(hit: HitRecord, lowerText: string): boolean {
+  if (hit.topic.title.toLowerCase().includes(lowerText)) return true
+  for (const kw of hit.matchedKeywords) {
+    if (kw.toLowerCase().includes(lowerText)) return true
+  }
+  const rule = hit.matchedRule ?? null
+  if (rule !== null && rule.toLowerCase().includes(lowerText)) return true
+  return false
 }
 
 /** 宽松形状校验：是对象、有 topic、topic.id 是字符串即认（其余字段原样信任） */
