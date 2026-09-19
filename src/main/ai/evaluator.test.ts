@@ -2,7 +2,9 @@
  * SemanticEvaluator 单测：provider.chat 全 mock，零网络。
  * 覆盖：成功裁决映射 / 部分缺 key 跳过 / hit:false 也在 Map / 空 interests
  * 不调 chat 全 false / 空 topics 不调 / >12 抛 / 垃圾 JSON 抛 bad-json /
- * 平衡块提取（前后包垃圾文本）。
+ * 平衡块提取（前后包垃圾文本）/ W3：results 形状兼容、verdicts 优先、任意
+ * 键名兜底扫描、纯字符串数组不误吞（bad-json 且消息含顶层键名）、
+ * system prompt 钉死 verdicts 键名。
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { Topic } from '../../shared/types'
@@ -143,6 +145,66 @@ describe('SemanticEvaluator.evaluate', () => {
       name: 'AiProviderError',
       kind: 'bad-json'
     })
+  })
+
+  // ---- W3：results 形状解析兼容（线上 bug：模型用 "results" 键名回包）--------
+
+  it('results 形状：键名 results 的合法裁决数组可全量解析', async () => {
+    const h = makeHarness(
+      () =>
+        '{"results":[' +
+        '{"key":"nodeseek:933617","hit":false},' +
+        '{"key":"nodeseek:933618","hit":true,"reason":"与自建主机相关"}]}'
+    )
+    const out = await h.evaluator.evaluate([topic('933617'), topic('933618')], ['自建主机'])
+    expect(out.size).toBe(2)
+    expect(out.get('nodeseek:933617')).toEqual({ hit: false, reason: null })
+    expect(out.get('nodeseek:933618')).toEqual({ hit: true, reason: '与自建主机相关' })
+  })
+
+  it('verdicts 与 results 并存：优先取 verdicts', async () => {
+    const h = makeHarness(
+      () =>
+        '{"verdicts":[{"key":"nodeseek:1","hit":true,"reason":"来自 verdicts"}],' +
+        '"results":[{"key":"nodeseek:1","hit":false}]}'
+    )
+    const out = await h.evaluator.evaluate([topic('1')], ['x'])
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, reason: '来自 verdicts' })
+  })
+
+  it('兜底扫描：任意键名（judgements）的合法数组可解析，且跳过回显的 interests 字符串数组', async () => {
+    const h = makeHarness(
+      () =>
+        '{"interests":["自建主机","NAS"],"judgements":[{"key":"nodeseek:1","hit":true,"reason":"r"}]}'
+    )
+    const out = await h.evaluator.evaluate([topic('1')], ['x'])
+    expect(out.get('nodeseek:1')).toEqual({ hit: true, reason: 'r' })
+  })
+
+  it('数组存在但全无合法元素（纯字符串数组 / 空数组）→ bad-json，错误消息含顶层键名', async () => {
+    const h = makeHarness(() => '{"interests":["自建主机","NAS"],"note":"done"}')
+    let caught: unknown
+    await h.evaluator.evaluate([topic('1')], ['x']).catch((e: unknown) => {
+      caught = e
+    })
+    expect(caught).toBeInstanceOf(AiProviderError)
+    expect((caught as AiProviderError).kind).toBe('bad-json')
+    expect((caught as Error).message).toMatch(/top-level keys: interests,note/)
+
+    // 空数组同样不可用：避免"解析成功但零裁决"的静默未决
+    const h2 = makeHarness(() => '{"verdicts":[]}')
+    await expect(h2.evaluator.evaluate([topic('1')], ['x'])).rejects.toMatchObject({
+      kind: 'bad-json'
+    })
+  })
+
+  it('system prompt 钉死输出契约：含 "verdicts" 键名与完整 JSON 示例', async () => {
+    const h = makeHarness(() => '{"verdicts":[{"key":"nodeseek:1","hit":true}]}')
+    await h.evaluator.evaluate([topic('1')], ['x'])
+    const req = h.chat.mock.calls[0]![0] as { system: string }
+    expect(req.system).toContain('verdicts')
+    expect(req.system).toContain('{"verdicts":')
+    expect(req.system).toContain('只输出 JSON')
   })
 
   it('平衡块提取：有效 JSON 前后包垃圾文本（含代码围栏）仍能解析', async () => {

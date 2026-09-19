@@ -835,6 +835,7 @@ describe('语义评估管线（D4）', () => {
       matchMode: 'both',
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
+      commentary: { enabled: false },
       ...overrides
     }
   }
@@ -1148,6 +1149,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
       matchMode: 'both',
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
+      commentary: { enabled: false },
       ...overrides
     }
   }

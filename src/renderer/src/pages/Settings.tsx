@@ -164,7 +164,9 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
           },
           matchMode: draft.matchMode,
           interests: draft.interests,
-          dailyReport: { enabled: draft.dailyEnabled, timeHHMM: draft.dailyTime }
+          dailyReport: { enabled: draft.dailyEnabled, timeHHMM: draft.dailyTime },
+          // 锐评开关本页暂无控件（UI 留给后续轮次）：透传已保存值，防止保存时被重置
+          commentary: { enabled: saved.ai.commentary.enabled }
         }
       }
       const r = await window.api.saveConfig(cfg)

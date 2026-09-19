@@ -59,7 +59,8 @@ const SOURCE_ID_ILLEGAL_RE = /[^\w-]/g
  * - `ai.provider.baseUrl`：trim、去尾斜杠、必须 `http(s)://` 开头否则 ''；
  *   `apiKey` / `model` trim；`matchMode` 枚举非法回 'literal'；`interests` 每条 trim
  *   去空、单条 ≤500 字符截断、最多 20 条；`dailyReport.timeHHMM` 必须 HH:MM（时 0-23
- *   分 0-59）否则回 '22:00'，`enabled` 强制布尔。
+ *   分 0-59）否则回 '22:00'，`enabled` 强制布尔；`commentary.enabled` 缺失/非法 →
+ *   true（**唯一默认开的布尔**，方向与其余布尔相反，见 sanitizeAi）。
  */
 export function sanitizeConfig(cfg: AppConfig): AppConfig {
   const src = (typeof cfg === 'object' && cfg !== null ? cfg : {}) as Partial<AppConfig>
@@ -263,6 +264,14 @@ function sanitizeAi(ai: AiConfig | undefined): AiConfig {
     dailyReport: {
       enabled: ai?.dailyReport?.enabled === true,
       timeHHMM: sanitizeTimeHHMM(ai?.dailyReport?.timeHHMM)
+    },
+    // AI 锐评开关——全文件**唯一默认开的布尔**：必须写 `!== false`（缺失/非法 → true），
+    // 与本文件其余布尔（dailyReport.enabled / notifyEnabled / launchAtLogin /
+    // sources[].enabled 均为 `=== true`，缺省 false）方向相反。
+    // 原因：锐评是第三轮新增字段，全体旧配置文件（v1 迁移件与早期 v2）都没有它，
+    // 若"风格统一"改成 `=== true`，会把所有老用户的锐评静默关掉。改向前先想清楚。
+    commentary: {
+      enabled: ai?.commentary?.enabled !== false
     }
   }
 }

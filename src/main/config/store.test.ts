@@ -179,6 +179,27 @@ describe('sanitizeConfig', () => {
     expect(out.ai.dailyReport).toEqual({ enabled: true, timeHHMM: '08:30' })
   })
 
+  it('ai.commentary：唯一默认开的布尔——缺失（旧 v2 配置）→ true，显式 false 保留，非法值 → true', () => {
+    // 第三轮之前的 v2 配置：ai 段没有 commentary 字段
+    const legacyAi = {
+      provider: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk', model: 'm' },
+      matchMode: 'both',
+      interests: [],
+      dailyReport: { enabled: false, timeHHMM: '22:00' }
+    }
+    const enabledOf = (c: unknown) =>
+      sanitizeConfig(cfg({ ai: { ...legacyAi, commentary: c } as unknown as AppConfig['ai'] }))
+        .ai.commentary.enabled
+    expect(enabledOf(undefined)).toBe(true) // 旧 v2 配置缺失字段 → 默认开
+    expect(enabledOf(null)).toBe(true) // commentary 段整体为 null
+    expect(enabledOf({})).toBe(true) // 段在但缺 enabled
+    expect(enabledOf('false')).toBe(true) // 字符串等非法值 → true（不是 === true 的缺省 false）
+    expect(enabledOf(0)).toBe(true)
+    expect(enabledOf(true)).toBe(true) // 显式 true 保留
+    expect(enabledOf({ enabled: true })).toBe(true)
+    expect(enabledOf({ enabled: false })).toBe(false) // 唯一能关掉的方式：显式布尔 false
+  })
+
   it('sources：非数组/空数组 → 默认单项 nodeseek', () => {
     expect(sanitizeConfig(cfg({ sources: [] })).sources).toEqual([
       { id: 'nodeseek', type: 'nodeseek', enabled: true }
@@ -419,6 +440,30 @@ describe('ConfigStore', () => {
     expect(loaded.pollIntervalSec).toBe(30)
     expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
     expect(loaded.ai).toEqual(DEFAULT_APP_CONFIG.ai)
+  })
+
+  it('旧 v2 盘上 config（ai 段无 commentary）：load 后锐评默认开，其余 ai 字段保留', async () => {
+    // 第三轮之前的 v2 信封：ai 有 provider/matchMode/interests/dailyReport，无 commentary
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        config: {
+          pollIntervalSec: 45,
+          ai: {
+            provider: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk', model: 'm' },
+            matchMode: 'semantic',
+            interests: ['自建主机'],
+            dailyReport: { enabled: false, timeHHMM: '22:00' }
+          }
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.ai.commentary).toEqual({ enabled: true }) // 新增字段缺失 → 默认开
+    expect(loaded.ai.matchMode).toBe('semantic')
+    expect(loaded.ai.provider.model).toBe('m')
   })
 
   it('盘上信封 schemaVersion 未知（3）：按损坏备份并回默认', async () => {

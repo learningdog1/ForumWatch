@@ -13,6 +13,11 @@
  *   **只有 AI 明确给了裁决的帖子在 Map 里**：hit=false 也是已裁决（engine 据此入
  *   seen）；Map 里没有的键 = 未决（engine 不入 seen，下轮重评）。
  * - 响应缺 key / hit 非布尔 → 跳过该项（视为未决），不炸整批。
+ * - **裁决数组定位（W3 线上修复）**：实测有模型无视提示词用 `{"results":[...]}`
+ *   回包，旧代码只认 `verdicts` → bad-json → 整批未决每轮重评（烧配额+刷错误
+ *   日志）。现按兼容顺序定位：显式键 `verdicts` → 显式键 `results` → 兜底扫描
+ *   顶层所有数组值取首个含合法元素的；候选必须至少含 1 个合法元素（对象且
+ *   key 为 string 且 hit 为 boolean），防误吞模型回显的 interests 字符串数组。
  *
  * 零 electron 依赖；provider 由外部注入（单测全 mock）。
  */
@@ -39,10 +44,19 @@ export interface SemanticEvaluatorDeps {
   now?: () => number
 }
 
-/** D4 协议：system 提示词（中文，宁可漏报不要误报，只输出 JSON） */
+/**
+ * D4 协议：system 提示词（中文，宁可漏报不要误报，只输出 JSON）。
+ * W3 收紧：给出精确输出示例并钉死键名 `verdicts`——线上实测模型会自作主张
+ * 换键名（"results"），示例是对此最直接的免疫。
+ */
 const SYSTEM_PROMPT =
   '你是论坛帖子筛选器。仅当帖子标题与任一兴趣**明确相关**才判 hit=true；' +
-  '宁可漏报不要误报。只输出 JSON，不要任何其他文本。'
+  '宁可漏报不要误报。只输出 JSON，不要任何其他文本（不要 markdown 代码围栏、' +
+  '不要解释）。输出的顶层键名必须是 "verdicts"，其值为数组；数组每个元素形如 ' +
+  '{"key":"<原样返回输入里的 key>","hit":true 或 false,"reason":"一句话理由"}。' +
+  '完整输出示例：' +
+  '{"verdicts":[{"key":"nodeseek:1","hit":true,"reason":"与自建主机相关"},' +
+  '{"key":"nodeseek:2","hit":false}]}。'
 
 export class SemanticEvaluator {
   private readonly provider: Pick<AiProvider, 'chat'>
@@ -92,15 +106,12 @@ export class SemanticEvaluator {
     const out = new Map<string, SemanticVerdict>()
     const knownKeys = new Set(topics.map(verdictKey))
     for (const item of verdicts) {
-      if (item === null || typeof item !== 'object') continue
-      const key = (item as { key?: unknown }).key
-      const hit = (item as { hit?: unknown }).hit
-      if (typeof key !== 'string' || typeof hit !== 'boolean') continue // 缺 key / hit 非布尔：跳过
-      if (!knownKeys.has(key)) continue // 模型幻觉出的未知键：跳过
+      if (!isValidVerdictItem(item)) continue // 缺 key / hit 非布尔：跳过
+      if (!knownKeys.has(item.key)) continue // 模型幻觉出的未知键：跳过
       const rawReason = (item as { reason?: unknown }).reason
-      out.set(key, {
-        hit,
-        reason: hit && typeof rawReason === 'string' ? rawReason : null
+      out.set(item.key, {
+        hit: item.hit,
+        reason: item.hit && typeof rawReason === 'string' ? rawReason : null
       })
     }
     return out
@@ -118,8 +129,8 @@ interface VerdictResponseShape {
 
 /**
  * 解析模型输出：先直接 JSON.parse；失败则提取首个平衡 `{...}` 块（字符串里的
- * 花括号不计深度）再 parse；都不行抛 bad-json。顶层非对象或 verdicts 非数组
- * 同样抛 bad-json。
+ * 花括号不计深度）再 parse；都不行抛 bad-json。顶层非对象或定位不到可用裁决
+ * 数组同样抛 bad-json（错误消息列出实际顶层键名，便于排查模型换了什么键名）。
  */
 function parseVerdictResponse(content: string): VerdictResponseShape {
   let data: unknown = tryParse(content)
@@ -133,13 +144,50 @@ function parseVerdictResponse(content: string): VerdictResponseShape {
       'bad-json'
     )
   }
-  if (typeof data !== 'object' || data === null || !Array.isArray((data as { verdicts?: unknown }).verdicts)) {
+  const verdicts = extractVerdictArray(data)
+  if (verdicts === null) {
     throw new AiProviderError(
-      `semantic evaluation response missing verdicts array: ${excerpt(content)}`,
+      `semantic evaluation response missing verdicts array, top-level keys: ${describeTopLevel(data)}; content: ${excerpt(content)}`,
       'bad-json'
     )
   }
-  return data as VerdictResponseShape
+  return { verdicts }
+}
+
+/**
+ * 按兼容顺序定位裁决数组（W3 线上修复）：显式键 `verdicts` → 显式键 `results`
+ * → 兜底扫描顶层所有数组值。任何候选都必须**至少含 1 个合法元素**才可用——
+ * 空数组与纯字符串数组（模型原样回显的 interests）都跳过继续找；这同时保证
+ * 选中 verdicts/results 时不会是"解析成功但零裁决"的静默未决。都无 → null。
+ */
+function extractVerdictArray(data: unknown): unknown[] | null {
+  if (typeof data !== 'object' || data === null) return null
+  const obj = data as Record<string, unknown>
+  if (isValidVerdictArray(obj.verdicts)) return obj.verdicts
+  if (isValidVerdictArray(obj.results)) return obj.results
+  for (const value of Object.values(obj)) {
+    if (isValidVerdictArray(value)) return value
+  }
+  return null
+}
+
+/** 候选数组可用性：是数组且至少含 1 个合法元素 */
+function isValidVerdictArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.some(isValidVerdictItem)
+}
+
+/** 单个裁决元素合法性：对象且 key 为 string 且 hit 为 boolean */
+function isValidVerdictItem(item: unknown): item is { key: string; hit: boolean } {
+  if (typeof item !== 'object' || item === null) return false
+  const { key, hit } = item as { key?: unknown; hit?: unknown }
+  return typeof key === 'string' && typeof hit === 'boolean'
+}
+
+/** 错误消息里的顶层键名清单（非对象标类型，空对象标 (empty object)） */
+function describeTopLevel(data: unknown): string {
+  if (typeof data !== 'object' || data === null) return `(non-object ${typeof data})`
+  const keys = Object.keys(data).join(',')
+  return keys === '' ? '(empty object)' : keys
 }
 
 function tryParse(text: string): unknown | undefined {

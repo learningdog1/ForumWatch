@@ -42,14 +42,28 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-/** 命中推送文案（HTML）；标题/分类/作者/关键词均为用户内容，一律过 escapeHtml */
-export function formatHitMessage(topic: Topic, matchedKeywords: string[]): string {
-  return [
+/**
+ * 命中推送文案（HTML）；标题/分类/作者/关键词/锐评均为用户（或 LLM）内容，一律过 escapeHtml。
+ *
+ * @param commentary AI 锐评（第三轮，可选）：**非空字符串**时在「🎯 命中」行之后插一行
+ *   `💬 锐评: {commentary}`（转义后）；null / undefined / 空串时整行省略——两参调用
+ *   的输出与升级前逐字节一致（引擎侧未生成锐评时直接不传即可）。
+ */
+export function formatHitMessage(
+  topic: Topic,
+  matchedKeywords: string[],
+  commentary?: string | null
+): string {
+  const lines = [
     `🔔 <b>${escapeHtml(topic.title)}</b>`,
     `📁 ${escapeHtml(topic.category)} · 👤 ${escapeHtml(topic.author)}`,
-    `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`,
-    `🔗 <a href="${topic.url}">打开帖子</a>`
-  ].join('\n')
+    `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`
+  ]
+  if (typeof commentary === 'string' && commentary.length > 0) {
+    lines.push(`💬 锐评: ${escapeHtml(commentary)}`)
+  }
+  lines.push(`🔗 <a href="${topic.url}">打开帖子</a>`)
+  return lines.join('\n')
 }
 
 const MAX_ATTEMPTS = 3
@@ -89,8 +103,18 @@ export class TelegramNotifier {
       deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   }
 
-  async sendHit(topic: Topic, matchedKeywords: string[]): Promise<void> {
-    await this.enqueue(() => this.deliver(formatHitMessage(topic, matchedKeywords), 'HTML'))
+  /**
+   * 命中推送（HTML parse_mode）。第三参 commentary（AI 锐评）可选：不传 / null / 空串
+   * 时消息与两参版本逐字节一致，既有调用方（engine）无需改动即可升到本签名。
+   */
+  async sendHit(
+    topic: Topic,
+    matchedKeywords: string[],
+    commentary?: string | null
+  ): Promise<void> {
+    await this.enqueue(() =>
+      this.deliver(formatHitMessage(topic, matchedKeywords, commentary), 'HTML')
+    )
   }
 
   async sendTest(): Promise<void> {

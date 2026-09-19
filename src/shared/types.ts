@@ -7,6 +7,11 @@
  * - Topic/来源解耦：Topic.sourceId 标记来源；去重键由 engine 组装为 `${sourceId}:${topic.id}`。
  * - EngineStatus 增加 per-source 状态与 AI 运行态。
  * - HitRecord 增加 matchedBy（literal/semantic）与 AI 判定理由。
+ *
+ * 第三轮变更（2026-09-19，AI 锐评）：
+ * - AiConfig 增加 commentary（锐评开关，**默认开**——sanitize 侧唯一默认开的布尔）。
+ * - HitRecord 增加可选 commentary：旧 hits/*.jsonl 行没有此字段，类型必须容忍缺失；
+ *   新写入的记录一律给 string|null（生成失败/未启用时为 null），不再留 undefined。
  */
 
 /** 论坛来源类型（v2 仅 nodeseek，联合类型留给未来论坛） */
@@ -42,6 +47,14 @@ export interface AiConfig {
     /** 'HH:MM' 本地时区 */
     timeHHMM: string
   }
+  /**
+   * AI 锐评（第三轮）：命中帖推送前让 LLM 附一句点评。
+   * 配置里恒存在（默认/ sanitize 保证）；enabled 是全配置**唯一默认开**的布尔
+   * （见 store.ts sanitizeAi 的书写约定），UI 侧直接读 cfg.ai.commentary.enabled。
+   */
+  commentary: {
+    enabled: boolean
+  }
 }
 
 /** 一条论坛帖子（从来源帖子列表解析出的字段） */
@@ -73,6 +86,12 @@ export interface HitRecord {
   matchedBy: 'literal' | 'semantic'
   /** AI 的一句话判定理由（matchedBy='semantic' 时给出，可能为 null） */
   semanticReason: string | null
+  /**
+   * AI 锐评正文（第三轮）。**可选**：旧 hits/*.jsonl 行没有此字段，消费方必须容忍
+   * undefined（等价于"无锐评"）；新写入的记录一律给 string|null——生成失败/未启用/
+   * Provider 未配置时为 null，成功时为锐评文本。
+   */
+  commentary?: string | null
   /** 推送时间 ISO；推送失败时为 null */
   notifiedAt: string | null
   /** 推送失败原因（notifiedAt 为 null 时给出；静音时为 null） */
@@ -122,7 +141,8 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     provider: { baseUrl: '', apiKey: '', model: '' },
     matchMode: 'literal',
     interests: [],
-    dailyReport: { enabled: false, timeHHMM: '22:00' }
+    dailyReport: { enabled: false, timeHHMM: '22:00' },
+    commentary: { enabled: true }
   }
 }
 

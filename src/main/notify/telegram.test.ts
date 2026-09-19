@@ -98,6 +98,30 @@ describe('formatHitMessage', () => {
     // 标题里的原始 <script> 不得出现
     expect(msg).not.toContain('<script>')
   })
+
+  it('带锐评：💬 行插在「🎯 命中」行之后、链接行之前，内容过 escapeHtml（含 <>&）', () => {
+    const msg = formatHitMessage(topic, ['冰箱'], '这价格 <敢> 再低点 & 我就冲')
+    const expected = [
+      `🔔 <b>${escapeHtml(topic.title)}</b>`,
+      `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
+      `🎯 命中: 冰箱`,
+      `💬 锐评: 这价格 &lt;敢&gt; 再低点 &amp; 我就冲`,
+      `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
+    ].join('\n')
+    expect(msg).toBe(expected)
+    // 锐评里的原始 <敢> 不得出现（LLM 输出同样按不可信内容转义）
+    expect(msg).not.toContain('<敢>')
+    expect(msg).not.toContain(' & ')
+  })
+
+  it('回归：不传 / undefined / null / 空串锐评时，消息与两参版本逐字节一致（仍是四行）', () => {
+    const baseline = formatHitMessage(topic, ['冰箱', '便宜&实惠'])
+    expect(baseline.split('\n')).toHaveLength(4) // 现状：四行、无 💬 行
+    expect(baseline).not.toContain('锐评')
+    expect(formatHitMessage(topic, ['冰箱', '便宜&实惠'], undefined)).toBe(baseline)
+    expect(formatHitMessage(topic, ['冰箱', '便宜&实惠'], null)).toBe(baseline)
+    expect(formatHitMessage(topic, ['冰箱', '便宜&实惠'], '')).toBe(baseline)
+  })
 })
 
 describe('TelegramNotifier', () => {
@@ -120,6 +144,22 @@ describe('TelegramNotifier', () => {
     expect(body.text).toBe(formatHitMessage(topic, ['冰箱']))
     expect(body.parse_mode).toBe('HTML')
     expect(body.link_preview_options).toEqual({ is_disabled: false })
+    expect(h.sleeps).toEqual([]) // 首条不等待
+  })
+
+  it('sendHit 第三参透传：锐评进 body.text，与 formatHitMessage 三参版本一致', async () => {
+    const h = makeHarness(() => okRes)
+    const commentary = '便宜 <但> 要谨慎 & 快冲'
+    await h.notifier.sendHit(topic, ['冰箱'], commentary)
+
+    expect(h.calls.length).toBe(1)
+    const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as {
+      text: string
+      parse_mode: string
+    }
+    expect(body.text).toBe(formatHitMessage(topic, ['冰箱'], commentary))
+    expect(body.text).toContain('💬 锐评: 便宜 &lt;但&gt; 要谨慎 &amp; 快冲')
+    expect(body.parse_mode).toBe('HTML')
     expect(h.sleeps).toEqual([]) // 首条不等待
   })
 
