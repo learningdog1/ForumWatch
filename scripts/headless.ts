@@ -8,15 +8,16 @@
  *   npm run engine:headless -- --config ./data/headless         # 常驻直到 Ctrl-C
  *   npm run engine:headless -- --duration 600 --interval 30     # 跑 10 分钟，30s 一轮
  *
- * 目录结构 `<dir>/{config.json, seen.json, state.json, hits/, reports/, logs/}`；
- * 首次运行生成默认 config.json（chmod 600 由 ConfigStore 保证）并提示填写关键词与
- * telegram。环境变量 `NSM_BOT_TOKEN` / `NSM_CHAT_ID` 可快速注入 telegram 凭据
- * （只进内存不落盘）。
+ * 目录结构 `<dir>/{config.json, seen.json, state.json, hits/, pipeline/, reports/,
+ * logs/, feedback.json}`；首次运行生成默认 config.json（chmod 600 由 ConfigStore
+ * 保证）并提示填写关键词与 telegram。环境变量 `NSM_BOT_TOKEN` / `NSM_CHAT_ID`
+ * 可快速注入 telegram 凭据（只进内存不落盘）。
  *
  * AI 能力（D4/D5 + 第三轮锐评，与桌面装配方同款接线）：第三 aiClient
  * （defaultTimeoutMs 30s，proxyScope='all' 时走代理）→ AiProvider /
- * SemanticEvaluator / CommentGenerator / HitsStore / DailyReportService
- * （reportsDir=<dir>/reports）；engine deps 注入 evaluator +
+ * SemanticEvaluator（R7-W4 起构造注入 FileFeedbackStore 的 recentForPrompt，
+ * DEC-5 反馈进 system prompt）/ CommentGenerator / HitsStore /
+ * DailyReportService（reportsDir=<dir>/reports）；engine deps 注入 evaluator +
  * commentaryGenerator + hitsStore。常驻模式起日报自循环定时器（sleep ∈
  * [60s, 30min]，复用 nextCheckAt）；`--once` 模式跳过日报（单轮冒烟不产文件、
  * 不推送）。
@@ -31,10 +32,12 @@ import { HttpClient, redactProxyUrl } from '../src/main/net/http'
 import type { FetchLike } from '../src/main/net/http-types'
 import { AiProvider } from '../src/main/ai/provider'
 import { SemanticEvaluator } from '../src/main/ai/evaluator'
+import { FileFeedbackStore } from '../src/main/ai/feedback'
 import { CommentGenerator } from '../src/main/ai/commentary'
 import { DailyReportService } from '../src/main/ai/daily-report'
 import { FileSeenStore, seenCapacityForSources } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
+import { DispositionStore, PIPELINE_DIR_NAME } from '../src/main/monitor/dispositions'
 import { HitsStore, HITS_DIR_NAME } from '../src/main/monitor/hits-store'
 import { PollScheduler } from '../src/main/monitor/poller'
 import { HtmlSourceAdapter } from '../src/main/monitor/sources/html'
@@ -336,7 +339,13 @@ async function main(): Promise<number | null> {
     post: (url, init) => aiClient.post(url, init),
     getConfig: () => effective.ai.provider
   })
-  const evaluator = new SemanticEvaluator({ provider: aiProvider })
+  // R7-W4（DEC-5，与 runtime.ts 同款）：<dir>/feedback.json + evaluator 构造注入
+  // getFeedbackExamples（每次评估现读；headless 无 IPC，反馈文件可手工编辑）
+  const feedbackStore = new FileFeedbackStore({ dataDir: dir })
+  const evaluator = new SemanticEvaluator({
+    provider: aiProvider,
+    getFeedbackExamples: () => feedbackStore.recentForPrompt()
+  })
   // 锐评生成器与 evaluator 共用同一 provider 实例；provider 未配置时由
   // engine 的闸拦下（装配层无需判断，与 evaluator 同款无条件注入风格）
   const commentaryGenerator = new CommentGenerator({ provider: aiProvider })
@@ -357,6 +366,8 @@ async function main(): Promise<number | null> {
     seenCapacityForSources(effective.sources.length)
   )
   seen.load()
+  // 处置流水（R7-W1，与 runtime.ts 同款）：<dir>/pipeline/<date>.jsonl + 内存环
+  const dispositions = new DispositionStore({ dataDir: join(dir, PIPELINE_DIR_NAME) })
   const engineState = new FileEngineState(join(dir, 'state.json'))
   engineState.load()
 
@@ -391,6 +402,7 @@ async function main(): Promise<number | null> {
     semanticEvaluator: evaluator,
     commentaryGenerator,
     hitsStore,
+    dispositions,
     onStatus: printStatus,
     ...(args.once ? { onHit: (h: HitRecord) => onceHits.push(h) } : {})
   })

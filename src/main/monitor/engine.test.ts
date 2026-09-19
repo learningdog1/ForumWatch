@@ -14,6 +14,8 @@ import {
   PAGE2_TRIGGER_EFFECTIVE_NEW,
   SIMILARITY_WINDOW_MS
 } from './engine'
+import { DispositionStore } from './dispositions'
+import type { DispositionOutcome } from '../../shared/ipc'
 import { computeBackoffMs, PollScheduler } from './poller'
 import { FileSeenStore } from './dedup'
 import { FileEngineState } from './state'
@@ -83,6 +85,8 @@ interface Harness {
   onStatus: Mock
   /** getSources 返回的活数组：splice/push 即可模拟配置热更新 */
   sources: SourceAdapter[]
+  /** 处置流水（R7-W1）：build({dispositions: ...}) 注入时的 store 或 mock */
+  dispositions?: DispositionStore | { record: Mock; prune?: Mock }
 }
 
 function build(
@@ -105,6 +109,11 @@ function build(
     commentaryGenerator?: Pick<CommentGenerator, 'generate' | 'prune'>
     /** per-source 过滤访问器（R5-P2a；缺省不注入 = 不过滤，行为与升级前一致） */
     getSourceFilters?: (sourceId: string) => SourceFilters | undefined
+    /**
+     * 处置流水（R7-W1；缺省不注入 = 零行为）。true = 注入真实内存态
+     * DispositionStore（测 store 去重/迁移的集成面）；mock 对象 = 精确断言调用。
+     */
+    dispositions?: true | { record: Mock; prune?: Mock }
   } = {}
 ): Harness {
   const config: AppConfig = {
@@ -132,6 +141,13 @@ function build(
   const fetchLatest = vi.fn(opts.impl ?? (async () => [] as Topic[]))
   const sources: SourceAdapter[] =
     opts.sources ?? [{ id: 'nodeseek', name: 'NodeSeek', fetchLatest }]
+  // R7-W1：处置流水注入物（true = 真实内存态 store；harness 返回同一实例）
+  const dispositions =
+    opts.dispositions === undefined
+      ? undefined
+      : opts.dispositions === true
+        ? new DispositionStore()
+        : opts.dispositions
 
   let engine!: MonitorEngine
   const scheduler = new PollScheduler({
@@ -167,7 +183,9 @@ function build(
     // 第三轮：锐评生成器可选注入（不注入 = 恒 null，与旧装配行为一致）
     ...(opts.commentaryGenerator !== undefined
       ? { commentaryGenerator: opts.commentaryGenerator }
-      : {})
+      : {}),
+    // R7-W1：处置流水可选注入（不注入 = 零行为）
+    ...(dispositions !== undefined ? { dispositions } : {})
   })
 
   return {
@@ -184,7 +202,8 @@ function build(
     ticks,
     onHit,
     onStatus,
-    sources
+    sources,
+    ...(dispositions !== undefined ? { dispositions } : {})
   }
 }
 
@@ -3267,5 +3286,394 @@ describe('per-channel 推送明细（R6-W4：report 回调 → HitRecord.notifyD
     expect(hits.at(-1)!.notifiedAt).toBeNull()
     expect(hits.at(-1)!.notifyError).toContain('telegram send failed')
     expect(hits.at(-1)!.notifyDetail).toBeUndefined()
+  })
+})
+
+describe('处置流水插桩（R7-W1：dispositions record/prune 的分支出口映射）', () => {
+  /** mock 模式：record 调用流摘要 (key, outcome, detail?) */
+  function recorded(h: Harness): { key: string; outcome: DispositionOutcome; detail?: string }[] {
+    const mock = h.dispositions as { record: Mock }
+    return mock.record.mock.calls.map((c: unknown[]) => ({
+      key: `${String(c[0])}:${String(c[1])}`,
+      outcome: c[3] as DispositionOutcome,
+      detail: c[4] as string | undefined
+    }))
+  }
+
+  it('基线轮不产生任何处置记录（整页入 seen 不走 unseen 链）', async () => {
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1', { title: '羊毛' }), topic('2')],
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    expect(record).not.toHaveBeenCalled()
+  })
+
+  it('注入 dispositions 不改控制流：繁忙轮的引擎可观测结果与未注入基线（正常轮套件）逐项一致', async () => {
+    // 未注入 = 零行为由全部既有套件保证（它们都不注入）；这里注入后跑同一繁忙场景，
+    // 断言引擎侧结果仍是升级前的规范值（推送 1 次/置顶与排除词只入集/totalHits=1）
+    const record = vi.fn()
+    const h = build({ impl: async () => [topic('1')], dispositions: { record } })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [
+      topic('5', { title: '最新羊毛' }),
+      topic('4', { title: '羊毛置顶', pinned: true }),
+      topic('3', { title: '羊毛广告' }),
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0][0].topic.id).toBe('5')
+    expect(h.seen.has('nodeseek:3')).toBe(true)
+    expect(h.seen.has('nodeseek:4')).toBe(true)
+    expect(h.seen.has('nodeseek:5')).toBe(true)
+    expect(h.engine.getStatus().totalHits).toBe(1)
+    expect(h.engine.getStatus().health).toBe('ok')
+    // 观测面本身：置顶/排除词/未中/推送四类出口各一条（处理顺序 = 页面逆序旧→新）
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'miss', detail: undefined },
+      { key: 'nodeseek:3', outcome: 'excluded', detail: '命中排除词「广告」' },
+      { key: 'nodeseek:4', outcome: 'pinned', detail: undefined },
+      { key: 'nodeseek:5', outcome: 'pushed', detail: undefined }
+    ])
+  })
+
+  it('拦截四闸 + miss：filtered / old-below-threshold / pinned / excluded / miss 各一条', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100')] as Topic[])
+    const record = vi.fn()
+    const h = build({
+      sources: [{ id: 'nodeseek', name: 'NodeSeek', fetchLatest, creationOrderedIds: true }],
+      dispositions: { record },
+      getSourceFilters: () => ({ blockedAuthors: ['spam'] })
+    })
+    await h.engine.pollOnce() // 基线：阈值 = 100
+    // 注意：sources 自带 fetchLatest 时改写本地 mock（h.fetchLatest 是 harness 另造的、未被引用）
+    fetchLatest.mockImplementation(async () => [
+      topic('104', { title: '羊毛外链', author: 'spam' }), // 作者黑名单 → filtered
+      topic('103', { title: '普通水帖' }), // 无命中 → miss
+      topic('102', { title: '羊毛广告' }), // 排除词 → excluded
+      topic('101', { title: '羊毛置顶', pinned: true }), // 置顶 → pinned
+      topic('99', { title: '老帖被顶起' }), // id 99 ≤ 100 → old-below-threshold
+      topic('100')
+    ])
+    await h.engine.pollOnce()
+
+    // 处理顺序 = 页面逆序（旧→新）：99 → 101 → 102 → 103 → 104
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:99', outcome: 'old-below-threshold', detail: 'id 99 ≤ 阈值 100' },
+      { key: 'nodeseek:101', outcome: 'pinned', detail: undefined },
+      { key: 'nodeseek:102', outcome: 'excluded', detail: '命中排除词「广告」' },
+      { key: 'nodeseek:103', outcome: 'miss', detail: undefined },
+      {
+        key: 'nodeseek:104',
+        outcome: 'filtered',
+        detail: '分类「闲聊」/ 作者「spam」'
+      }
+    ])
+  })
+
+  it('pushed：literal 命中推送成功（终态，无中间态覆盖）', async () => {
+    const record = vi.fn()
+    const h = build({ impl: async () => [topic('1')], dispositions: { record } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([{ key: 'nodeseek:2', outcome: 'pushed', detail: undefined }])
+  })
+
+  it('muted：notifyEnabled=false 的命中按静音收口', async () => {
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notifyEnabled: false },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([{ key: 'nodeseek:2', outcome: 'muted', detail: undefined }])
+  })
+
+  it('push-failed → 重试同失败不重复记录（真实 store 去重）→ 成功迁移 pushed', async () => {
+    const h = build({ impl: async () => [topic('1')], dispositions: true })
+    const store = h.dispositions as DispositionStore
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+
+    h.sendHit.mockRejectedValue(new Error('tg down'))
+    await h.engine.pollOnce() // 失败 1
+    expect(store.recent()).toHaveLength(1)
+    expect(store.recent()[0]).toMatchObject({ topicId: '2', outcome: 'push-failed' })
+    expect(store.recent()[0].detail).toContain('tg down')
+
+    await h.engine.pollOnce() // 失败 2：同 outcome → store 去重，不追加
+    expect(store.recent()).toHaveLength(1)
+
+    h.sendHit.mockResolvedValue(undefined)
+    await h.engine.pollOnce() // 重试成功：迁移 pushed
+    expect(store.recent().map((r) => r.outcome)).toEqual(['push-failed', 'pushed'])
+  })
+
+  it('quiet-hours 挂起轨迹：deferred(detail) → deferred-skip → flush 成功 pushed', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0))
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: quietOn() },
+      dispositions: true
+    })
+    const store = h.dispositions as DispositionStore
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 窗内 → 挂起
+    await h.engine.pollOnce() // 仍窗内：unseen 链整帖跳过
+    expect(store.recent().map((r) => [r.outcome, r.detail])).toEqual([
+      ['deferred', 'quiet-hours'],
+      ['deferred-skip', undefined]
+    ])
+
+    advanceMs((8 * 60 + 31) * 60_000) // 08:01 窗外 → flush
+    await h.engine.pollOnce()
+    expect(store.recent().map((r) => r.outcome)).toEqual(['deferred', 'deferred-skip', 'pushed'])
+  })
+
+  it('digest 挂起：deferred detail=digest', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 12, 0, 0, 0))
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: digestCfg(15) },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([{ key: 'nodeseek:2', outcome: 'deferred', detail: 'digest' }])
+  })
+
+  it('flush 3 次失败 → push-failed 终态（detail 带次数与错误）', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0))
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: quietOn() },
+      dispositions: true
+    })
+    const store = h.dispositions as DispositionStore
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    h.sendHit.mockRejectedValue(new Error('tg down'))
+    advanceMs((8 * 60 + 31) * 60_000) // 窗外：之后每轮 flush 都 due
+    await h.engine.pollOnce() // 尝试 1（中间态不记录；同轮 unseen 链对在队帖记 deferred-skip）
+    await h.engine.pollOnce() // 尝试 2
+    expect(store.recent().map((r) => r.outcome)).toEqual(['deferred', 'deferred-skip'])
+    await h.engine.pollOnce() // 尝试 3 → 终态
+    expect(store.recent().map((r) => r.outcome)).toEqual(['deferred', 'deferred-skip', 'push-failed'])
+    expect(store.recent()[2].detail).toContain('tg down')
+  })
+
+  it('挂起 24h 超时 → push-failed（detail: deferred timeout）', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0))
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: quietOn() },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    advanceMs(24 * 3600 * 1000 + 60_000) // 次日 23:31：仍窗内（flush 不 due），已超 24h
+    await h.engine.pollOnce() // 同轮 unseen 链先记 deferred-skip，轮末超时收口
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'deferred', detail: 'quiet-hours' },
+      { key: 'nodeseek:2', outcome: 'deferred-skip', detail: undefined },
+      { key: 'nodeseek:2', outcome: 'push-failed', detail: 'deferred timeout' }
+    ])
+  })
+
+  it('挂起期间热更新静音 → flush 按静音收口（deferred → muted 迁移）', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0))
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: quietOn() },
+      dispositions: true
+    })
+    const store = h.dispositions as DispositionStore
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    h.config.notifyEnabled = false // 热更新：静音（flush 恒 due）
+    await h.engine.pollOnce()
+    expect(store.recent().map((r) => r.outcome)).toEqual(['deferred', 'muted'])
+  })
+
+  it('语义三态：verdict 判否 → semantic-miss（detail 带 AI 理由）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: '与兴趣无关的闲聊帖' }]])
+    )
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiSemanticConfig() },
+      evaluator: { evaluate },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'semantic-miss', detail: 'AI 判定不相关：与兴趣无关的闲聊帖' }
+    ])
+  })
+
+  it('语义空兴趣（F3 短路）：semantic-miss，detail 说明永不命中', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiSemanticConfig({ interests: [] }) },
+      evaluator: { evaluate },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(evaluate).not.toHaveBeenCalled()
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'semantic-miss', detail: '兴趣描述为空：语义档永不命中' }
+    ])
+  })
+
+  it('语义低置信：hit=true 但 score < 阈值 → semantic-below-threshold（detail 带数值）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 0.5, reason: '沾边' }]])
+    )
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiSemanticConfig({ semanticThreshold: 0.7 }) },
+      evaluator: { evaluate },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'semantic-below-threshold', detail: '置信度 0.5 < 阈值 0.7' }
+    ])
+  })
+
+  it('语义未决 → 下轮重评迁移 semantic-miss（真实 store）；评估抛错同样记 pending', async () => {
+    const evaluate = vi.fn(async (_topics: Topic[], _interests: string[]) =>
+      // 轮 1 无 verdict（未决）；轮 2 判否
+      evaluate.mock.calls.length === 1
+        ? new Map<string, SemanticVerdict>()
+        : new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiSemanticConfig() },
+      evaluator: { evaluate },
+      dispositions: true
+    })
+    const store = h.dispositions as DispositionStore
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce() // 未决
+    expect(store.recent().map((r) => [r.outcome, r.detail])).toEqual([
+      ['semantic-pending', undefined]
+    ])
+    await h.engine.pollOnce() // 重评判否 → 迁移
+    expect(store.recent().map((r) => r.outcome)).toEqual(['semantic-pending', 'semantic-miss'])
+  })
+
+  it('语义评估抛错：该批记 semantic-pending（detail 说明下轮重试）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]): Promise<Map<string, SemanticVerdict>> => {
+        throw new Error('AI provider network error')
+      }
+    )
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiSemanticConfig() },
+      evaluator: { evaluate },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'semantic-pending', detail: 'AI 评估失败，下轮重试' }
+    ])
+  })
+
+  it('语义命中推送成功 → pushed（批处理完成点落终态）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, score: 1, reason: '相关' }]])
+    )
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiSemanticConfig() },
+      evaluator: { evaluate },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([{ key: 'nodeseek:2', outcome: 'pushed', detail: undefined }])
+  })
+
+  it('similar-swallowed：与 48h 已推窗口相似被吞', async () => {
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['vps'] },
+      dispositions: { record }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: 'yearly 88 vps deal today' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce() // 推送成功入窗
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: 'yearly 88 vps deal today' }), // 同标题
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    expect(recorded(h)).toEqual([
+      { key: 'nodeseek:2', outcome: 'pushed', detail: undefined },
+      { key: 'nodeseek:3', outcome: 'similar-swallowed', detail: '与 48h 内已推送的帖子相似' }
+    ])
+  })
+
+  it('prune 接线：每轮 pollOnce 以 (roundTopicKeys, observedSources) 调用（对齐 pruneRetryMaps）', async () => {
+    const record = vi.fn()
+    const prune = vi.fn()
+    const h = build({ impl: async () => [topic('1')], dispositions: { record, prune } })
+    await h.engine.pollOnce() // 基线轮（成功观测）
+    const [keep1, observed1] = prune.mock.calls[0] as [Set<string>, Set<string>]
+    expect(keep1.has('nodeseek:1')).toBe(true)
+    expect([...observed1]).toEqual(['nodeseek'])
+
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(prune).toHaveBeenCalledTimes(2)
+    const [keep2] = prune.mock.calls[1] as [Set<string>, Set<string>]
+    expect(keep2.has('nodeseek:1')).toBe(true)
+    expect(keep2.has('nodeseek:2')).toBe(true)
   })
 })

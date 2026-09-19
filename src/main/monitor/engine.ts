@@ -98,6 +98,12 @@
  * max(配置间隔, ceil(最差 source 剩余退避/1000))——D3 已知限制：某 source 退避中、
  * 其他健康时全局间隔被抬高；所有 source 健康时回到配置值。
  *
+ * 处置流水（R7-W1"为什么没推送"观测面，可选 deps.dispositions——不注入 = 零行为）：
+ * unseen 处理链每个分支出口与挂起 flush 收口都向 store 上报一条 Disposition
+ * （出口→outcome 映射见 noteDisposition 各调用点）；去重语义（同帖同 outcome 不
+ * 重记、迁移才记）与 pipeline/ JSONL 持久化在 dispositions.ts。store 的键清理与
+ * pruneRetryMaps 同调用点、同 observedSources 守卫（见 pollOnce）。
+ *
  * 状态模型（ADR 7）：desired（用户意图，唯一可写）× health（内核观测，自动流转）正交。
  * pause 只改 desired 并 stop 排程器，health 不动；getStatus 返回实时快照。
  *
@@ -119,6 +125,7 @@ import { applySourceFilters } from './filters'
 import { isExcluded, matchTopic } from './matcher'
 import { evaluateRules } from './rules'
 import { isSimilarToAny, normalizeTitle } from './similarity'
+import type { DispositionOutcome } from './dispositions'
 import { computeBackoffMs, type PollScheduler } from './poller'
 import type { FileSeenStore } from './dedup'
 import { formatLocalDate } from './hits-store'
@@ -379,6 +386,23 @@ export interface EngineDeps {
     append(hit: HitRecord, now?: Date): Promise<void>
     readRecent?(days: number, now?: Date): Promise<HitRecord[]>
   }
+  /**
+   * 处置流水（R7-W1"为什么没推送"观测面；可选——不注入 = 零行为，引擎逻辑
+   * 逐字节不变）。record 在 unseen 处理链每个分支出口与挂起 flush 收口处调用
+   * （去重/迁移判定由 DispositionStore 负责，engine 只上报）；prune 与
+   * pruneRetryMaps 同调用点、同 roundTopicKeys/observedSources 守卫——帖子滚出
+   * 首页后清掉其 lastOutcome 键，防重启后同 id 新帖首条处置被误判重复。
+   */
+  dispositions?: {
+    record(
+      sourceId: string,
+      topicId: string,
+      title: string,
+      outcome: DispositionOutcome,
+      detail?: string
+    ): void
+    prune?(keepKeys: Set<string>, observedSources: Set<string>): void
+  }
   /** 状态变化回调（desired/health/nextPollAt 等每次变化后发出实时快照） */
   onStatus?: (s: EngineStatus) => void
   /** 命中回调（推送尝试 settle 后发出；含推送失败与静音两种非成功态） */
@@ -605,6 +629,9 @@ export class MonitorEngine {
       }
     }
     this.pruneRetryMaps(roundTopicKeys, observedSources)
+    // 处置流水键清理（R7-W1）：与 pruneRetryMaps 同调用点、同守卫——已滚出首页
+    // 的帖子其 lastOutcome 不会再变化，清掉防重启后同 id 新帖首条处置被误判重复
+    this.deps.dispositions?.prune?.(roundTopicKeys, observedSources)
     // 挂起队列 24h 超时收口（R6-W1q）：时间维度的有界内存保证，不依赖
     // roundTopicKeys/observedSources——超时就是超时，与帖子是否还在首页无关。
     this.pruneDeferredHits()
@@ -804,13 +831,21 @@ export class MonitorEngine {
       // 挂起帖若重新走匹配，免打扰结束的那轮会绕过队列直接即时推送——与 flush
       // 双发。prevUnseenKeys 豁免集对挂起键同样生效（它们在本轮 unseen 集里），
       // 但队列成员资格本身就是更强的豁免，双保险。
-      if (this.deferredHits.has(key)) continue
+      if (this.deferredHits.has(key)) {
+        this.noteDisposition(topic, 'deferred-skip')
+        continue
+      }
       // per-source 过滤（R5-P2a 第 2 步，先于 id 阈值——ultrabrain 裁定管线顺序）：
       // 分类白/黑名单（显示名或 slug 双口径）与作者黑名单。被滤帖入 seen 不推送
       // 不评估（与旧帖阈值同款语义）。
       if (sourceFilters !== undefined && !applySourceFilters(topic, sourceFilters)) {
         this.deps.seen.add(key)
         swallowedByFilters++
+        this.noteDisposition(
+          topic,
+          'filtered',
+          `分类「${topic.category || '—'}」/ 作者「${topic.author || '—'}」`
+        )
         continue
       }
       // W3 旧帖过滤（第 3 步）：首页按最后回复排序，被回复顶回首页
@@ -823,17 +858,25 @@ export class MonitorEngine {
         if (numericId !== null && numericId <= threshold && !rt.prevUnseenKeys.has(key)) {
           this.deps.seen.add(key)
           swallowedOld++
+          this.noteDisposition(topic, 'old-below-threshold', `id ${numericId} ≤ 阈值 ${threshold}`)
           continue
         }
       }
       if (topic.pinned) {
         // 置顶是旧帖（第 4 步）：入去重集但绝不推送
         this.deps.seen.add(key)
+        this.noteDisposition(topic, 'pinned')
         continue
       }
       // 排除词字面一票否决（第 5 步，D4：永远先于 AI；语义模式下同样否决）
       if (isExcluded(topic, cfg.excludeKeywords)) {
         this.deps.seen.add(key)
+        const excludedWord = findExcludedWord(topic, cfg.excludeKeywords)
+        this.noteDisposition(
+          topic,
+          'excluded',
+          excludedWord !== undefined ? `命中排除词「${excludedWord}」` : undefined
+        )
         continue
       }
       // 过了全部四道闸（per-source / id 阈值 / 置顶 / 排除词）：进入匹配管线，
@@ -876,6 +919,7 @@ export class MonitorEngine {
         continue
       }
       // 字面档未命中（或语义不可用降级字面后未命中）：与未命中同待遇入 seen
+      this.noteDisposition(topic, 'miss')
       this.deps.seen.add(key)
     }
 
@@ -953,7 +997,10 @@ export class MonitorEngine {
     if (evaluator === undefined) return
     if (cfg.ai.interests.length === 0) {
       // F3：空兴趣 = 语义档永不命中（镜像字面档防风暴规则）——不入 AI 批
-      for (const topic of topics) this.deps.seen.add(seenKeyFor(sourceId, topic.id))
+      for (const topic of topics) {
+        this.deps.seen.add(seenKeyFor(sourceId, topic.id))
+        this.noteDisposition(topic, 'semantic-miss', '兴趣描述为空：语义档永不命中')
+      }
       return
     }
     for (let i = 0; i < topics.length; i += MAX_SEMANTIC_BATCH) {
@@ -967,7 +1014,12 @@ export class MonitorEngine {
               'semantic matching degraded to literal-only for the rest of the day'
           )
         }
-        break // 剩余批保持未决：下一轮按降级后的 literal-only 语义处理
+        // 剩余批（含当前批，未 evaluate）保持未决：下一轮按降级后的 literal-only
+        // 语义处理（R7-W1：这些帖子的处置是"语义未决"，下轮迁移为终态）
+        for (const topic of topics.slice(i)) {
+          this.noteDisposition(topic, 'semantic-pending', '当日 AI 配额耗尽，下轮降级处理')
+        }
+        break
       }
       this.aiCallsToday++
       try {
@@ -975,7 +1027,11 @@ export class MonitorEngine {
         this.aiLastError = null // 评估成功：清掉历史错误（恢复观测）
         for (const topic of batch) {
           const verdict = verdicts.get(seenKeyFor(sourceId, topic.id))
-          if (verdict === undefined) continue // 未决：不入 seen，下轮重评
+          if (verdict === undefined) {
+            // 未决：不入 seen，下轮重评
+            this.noteDisposition(topic, 'semantic-pending')
+            continue
+          }
           if (verdict.hit && verdict.score >= cfg.ai.semanticThreshold) {
             await this.processHit(topic, [], cfg, 'semantic', verdict.reason)
           } else {
@@ -987,12 +1043,26 @@ export class MonitorEngine {
                 `semantic hit below confidence threshold ` +
                   `(${verdict.score} < ${cfg.ai.semanticThreshold}): "${topic.title}"`
               )
+              this.noteDisposition(
+                topic,
+                'semantic-below-threshold',
+                `置信度 ${verdict.score} < 阈值 ${cfg.ai.semanticThreshold}`
+              )
+            } else {
+              this.noteDisposition(
+                topic,
+                'semantic-miss',
+                verdict.reason !== null ? `AI 判定不相关：${verdict.reason}` : 'AI 判定不相关'
+              )
             }
             this.deps.seen.add(seenKeyFor(sourceId, topic.id))
           }
         }
       } catch (err) {
         this.aiLastError = describeError(err)
+        for (const topic of batch) {
+          this.noteDisposition(topic, 'semantic-pending', 'AI 评估失败，下轮重试')
+        }
         this.deps.logger.warn(
           `semantic evaluation failed (${batch.length} topics undecided, ` +
             `will retry next poll): ${this.aiLastError}`
@@ -1261,6 +1331,7 @@ export class MonitorEngine {
         const hit = deferredHitRecord(entry, null, null)
         this.recordHit(hit)
         this.deps.logger.info(`deferred hit muted at flush: "${entry.payload.topic.title}"`)
+        this.noteDisposition(entry.payload.topic, 'muted', '挂起期间推送被关闭（静音收口）')
         this.deps.onHit?.(hit)
         continue
       }
@@ -1278,6 +1349,7 @@ export class MonitorEngine {
           at: this.now()
         })
         this.deps.logger.info(`deferred hit pushed: "${entry.payload.topic.title}"`)
+        this.noteDisposition(entry.payload.topic, 'pushed')
         this.deps.onHit?.(hit)
       } catch (err) {
         entry.attempts++
@@ -1293,6 +1365,7 @@ export class MonitorEngine {
             `deferred hit flush failed ${entry.attempts} times, giving up ` +
               `(notifyError recorded): "${entry.payload.topic.title}": ${msg}`
           )
+          this.noteDisposition(entry.payload.topic, 'push-failed', `flush ${entry.attempts} 次失败：${msg}`)
           this.deps.onHit?.(hit)
         } else {
           this.deps.logger.warn(
@@ -1324,6 +1397,7 @@ export class MonitorEngine {
       this.deps.logger.warn(
         `deferred hit timed out after 24h (notifyError recorded): "${entry.payload.topic.title}"`
       )
+      this.noteDisposition(entry.payload.topic, 'push-failed', 'deferred timeout')
       this.deps.onHit?.(hit)
     }
   }
@@ -1377,6 +1451,7 @@ export class MonitorEngine {
       this.semanticVerdicts.delete(swallowedKey)
       this.similarSwallowedCount++
       this.deps.logger.info(`similar topic swallowed: ${topic.title}`)
+      this.noteDisposition(topic, 'similar-swallowed', '与 48h 内已推送的帖子相似')
       return
     }
     const commentary = await this.maybeGenerateCommentary(topic, cfg)
@@ -1428,6 +1503,7 @@ export class MonitorEngine {
           attempts: 0
         })
         this.deps.logger.info(`hit deferred (${deferAction.reason}): "${topic.title}"`)
+        this.noteDisposition(topic, 'deferred', deferAction.reason)
         return
       }
       try {
@@ -1454,7 +1530,10 @@ export class MonitorEngine {
 
     if (notifyError !== null) {
       // 真实推送失败：不入去重集（下轮重试）；不入相似窗口（第 10 步——窗口语义
-      // 是"用户已收到"）；同失败态只 emit/log 一次
+      // 是"用户已收到"）；同失败态只 emit/log 一次。处置流水在 prevError 去重
+      // 之前上报——重试轮同 outcome 的刷屏由 DispositionStore 的键去重拦下
+      // （R7-W1），失败原因变化时 detail 也会更新到流水里。
+      this.noteDisposition(topic, 'push-failed', notifyError)
       const prevError = this.pendingNotifyErrors.get(key)
       if (prevError !== notifyError) {
         this.pendingNotifyErrors.set(key, notifyError)
@@ -1504,6 +1583,9 @@ export class MonitorEngine {
       notifyError: null,
       ...(Object.keys(collector.detail).length > 0 ? { notifyDetail: collector.detail } : {})
     }
+    // 处置终态（R7-W1）：成功推送 / 静音。重试在途的帖子此前是 push-failed，
+    // 这里覆盖为终态（store 按 outcome 迁移追加一条）。
+    this.noteDisposition(topic, notifiedAt !== null ? 'pushed' : 'muted')
     this.recordHit(hit)
     if (notifiedAt !== null) {
       if (matchedBy === 'semantic') {
@@ -1618,6 +1700,26 @@ export class MonitorEngine {
     }
   }
 
+  /**
+   * 处置流水出口（R7-W1）：unseen 链分支出口 / flush 收口的统一上报点。
+   * 未注入 deps.dispositions 时零行为。detail 裁剪到 120 字符防长 AI 理由刷屏。
+   */
+  private noteDisposition(
+    topic: Topic,
+    outcome: DispositionOutcome,
+    detail?: string
+  ): void {
+    const sink = this.deps.dispositions
+    if (sink === undefined) return
+    sink.record(
+      topic.sourceId,
+      topic.id,
+      topic.title,
+      outcome,
+      detail !== undefined && detail !== '' ? clipDetail(detail) : undefined
+    )
+  }
+
   /** 计入 totalHits（聚合 + 该 source 的待持久化 delta）并压入内存环形（超容量淘汰最老） */
   private recordHit(hit: HitRecord): void {
     this.status.totalHits++
@@ -1661,4 +1763,26 @@ export class MonitorEngine {
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** 处置流水 detail 上限（R7-W1）：超长 AI 理由/错误消息截断，防 jsonl 单行失控 */
+const DISPOSITION_DETAIL_MAX = 120
+
+function clipDetail(s: string): string {
+  return s.length <= DISPOSITION_DETAIL_MAX ? s : `${s.slice(0, DISPOSITION_DETAIL_MAX - 1)}…`
+}
+
+/**
+ * 排除词命中词查找（R7-W1，仅处置流水 detail 用）：返回首个在标题中命中的
+ * 排除词（trim/小写/子串，与 matcher.isExcluded 同口径）。判定本身仍是
+ * isExcluded——本函数只在 isExcluded 已判 true 后取词，两处口径漂移最多丢
+ * detail，不影响行为。
+ */
+function findExcludedWord(topic: Topic, excludeKeywords: string[]): string | undefined {
+  const title = topic.title.toLowerCase()
+  for (const raw of excludeKeywords) {
+    const kw = raw.trim().toLowerCase()
+    if (kw.length > 0 && title.includes(kw)) return kw
+  }
+  return undefined
 }

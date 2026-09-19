@@ -8,11 +8,14 @@
  *   nodeseek/v2ex 按 id 惰性单例，rss 按项实例、url/label 变更时重建）/
  *   多通道推送装配（R6-W4：buildNotifiers → CompositeNotifier，包稳定壳
  *   NotifierShell 供 engine/日报/ipc 持有，通道集合变化时热替换）→ AiProvider /
- *   SemanticEvaluator / CommentGenerator / DailyReportService（reportsDir=
- *   <userData>/reports）→ FileSeenStore / FileEngineState / HitsStore（<userData>/
- *   hits）→ PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑
- *   engine.noteScheduled，不绑则 nextPollAt 恒 null）→ MonitorEngine（deps 注入
- *   evaluator + commentaryGenerator + hitsStore）。
+ *   SemanticEvaluator（R7-W4 起构造注入 FileFeedbackStore 的 recentForPrompt，
+ *   DEC-5 反馈进 system prompt）/ CommentGenerator / DailyReportService
+ *   （reportsDir= <userData>/reports）→ FileSeenStore / FileEngineState /
+ *   HitsStore（<userData>/hits）/ DispositionStore（<userData>/pipeline，
+ *   R7-W1 处置流水）/ FileFeedbackStore（<userData>/feedback.json，R7-W4）→
+ *   PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑 engine.noteScheduled，
+ *   不绑则 nextPollAt 恒 null）→ MonitorEngine（deps 注入 evaluator +
+ *   commentaryGenerator + hitsStore + dispositions）。
  *
  * 配置热更新：engine 每轮 pollOnce 调 getConfig()（→ store.get()），IPC saveConfig
  * 落盘后 store 内存值即换新；网络副作用由 applyConfigSideEffects 同步（三个
@@ -37,10 +40,12 @@ import { createLogger, type Logger } from '../logger'
 import { HttpClient, redactProxyUrl } from '../net/http'
 import { AiProvider } from '../ai/provider'
 import { SemanticEvaluator } from '../ai/evaluator'
+import { FileFeedbackStore } from '../ai/feedback'
 import { CommentGenerator } from '../ai/commentary'
 import { DailyReportService } from '../ai/daily-report'
 import { FileSeenStore, seenCapacityForSources } from '../monitor/dedup'
 import { MonitorEngine } from '../monitor/engine'
+import { DispositionStore, PIPELINE_DIR_NAME } from '../monitor/dispositions'
 import { HitsStore, HITS_DIR_NAME } from '../monitor/hits-store'
 import { PollScheduler } from '../monitor/poller'
 import { FileEngineState } from '../monitor/state'
@@ -76,8 +81,16 @@ export class DesktopRuntime {
    * （provider 热更新读 store）。原本是构造局部量，仅为测试台依赖升为字段。
    */
   readonly semanticEvaluator: SemanticEvaluator
+  /**
+   * AI 反馈存储（R7-W4，DEC-5）：<userData>/feedback.json（正/负例各环形 100）。
+   * ipc hitFeedback 写入；SemanticEvaluator 经 getFeedbackExamples 现读注入
+   * system prompt 尾部。engine 不持有它——反馈只进 evaluator。
+   */
+  readonly feedbackStore: FileFeedbackStore
   /** 命中存储（R5-P2c 起暴露）：match:test 从近 2 天命中重建"近期已推"标题 */
   readonly hitsStore: HitsStore
+  /** 处置流水存储（R7-W1）：engine 各分支出口上报 + ipc 查询（recent/readDay） */
+  readonly dispositions: DispositionStore
   private readonly siteClient: HttpClient
   private readonly tgClient: HttpClient
   private readonly aiClient: HttpClient
@@ -202,7 +215,13 @@ export class DesktopRuntime {
       post: (url, init) => this.aiClient.post(url, init),
       getConfig: () => this.store.get().ai.provider
     })
-    const evaluator = new SemanticEvaluator({ provider: this.aiProvider })
+    // R7-W4（DEC-5）反馈闭环：FileFeedbackStore（<userData>/feedback.json）+
+    // evaluator 构造注入 getFeedbackExamples（每次评估现读，投票后下一次即生效）
+    this.feedbackStore = new FileFeedbackStore({ dataDir: this.userDataDir })
+    const evaluator = new SemanticEvaluator({
+      provider: this.aiProvider,
+      getFeedbackExamples: () => this.feedbackStore.recentForPrompt()
+    })
     const commentaryGenerator = new CommentGenerator({ provider: this.aiProvider })
     const hitsStore = new HitsStore(join(this.userDataDir, HITS_DIR_NAME))
     // R5-P2c：测试台 handler（ipc.ts match:test）复用这两个实例，升为只读字段
@@ -226,6 +245,10 @@ export class DesktopRuntime {
       seenCapacityForSources(initial.sources.length)
     )
     this.seen.load()
+    // 处置流水（R7-W1）：pipeline/<date>.jsonl 持久化 + 内存环；构造时做 7 天保留清理
+    this.dispositions = new DispositionStore({
+      dataDir: join(this.userDataDir, PIPELINE_DIR_NAME)
+    })
     const engineState = new FileEngineState(join(this.userDataDir, 'state.json'))
     engineState.load()
 
@@ -253,6 +276,7 @@ export class DesktopRuntime {
       semanticEvaluator: evaluator,
       commentaryGenerator,
       hitsStore,
+      dispositions: this.dispositions,
       onStatus: (s) => this.emitStatus(s),
       onHit: (h) => this.emitHit(h)
     })
