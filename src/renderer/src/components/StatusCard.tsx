@@ -83,7 +83,7 @@ function AiBlock(props: { ai: AiRuntimeStatus }) {
           className="ai-calls num"
           title="今日锐评调用 / 每日子上限（超出当日静默降级为无锐评推送，不算降级态）"
         >
-          锐评 {ai.commentaryToday ?? 0}/100
+          锐评 {ai.commentaryToday ?? 0}/{ai.commentaryLimit ?? 100}
         </span>
       </div>
       {ai.degraded === 'unconfigured' && (

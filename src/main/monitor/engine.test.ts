@@ -169,6 +169,14 @@ function build(
   }
 }
 
+/** 观测引擎私有重试 Map 的尺寸（两 Map 无对外 API，测试专用观测面） */
+function retryMapSize(
+  engine: MonitorEngine,
+  name: 'semanticVerdicts' | 'pendingNotifyErrors'
+): number {
+  return (engine as unknown as Record<string, Map<string, unknown>>)[name]!.size
+}
+
 describe('首启基线（防通知风暴）', () => {
   it('首轮：全部入 seen、绝不推送、baselineDone 持久化、状态 ok', async () => {
     const h = build({ impl: async () => [topic('1', { title: '羊毛线索' }), topic('2'), topic('3')] })
@@ -1166,14 +1174,6 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
     }
   }
 
-  /** 观测引擎私有重试 Map 的尺寸（两 Map 无对外 API，测试专用观测面） */
-  function retryMapSize(
-    engine: MonitorEngine,
-    name: 'semanticVerdicts' | 'pendingNotifyErrors'
-  ): number {
-    return (engine as unknown as Record<string, Map<string, unknown>>)[name]!.size
-  }
-
   it('语义命中×推送失败：reason 进缓存；下轮不进 AI 批直接重试；成功后缓存清除，再下轮不复活', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
@@ -1399,6 +1399,45 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     expect(h.seen.has('nodeseek:150')).toBe(false) // 仍未决
   })
 
+  it('F5：豁免集跨失败轮存活——推送失败 → 抓取失败（冷却）→ 恢复后 id ≤ 阈值仍走重试路径', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce() // 基线：阈值 100
+
+    // 第 N 轮：新帖 150 命中但推送真实失败 → 不入 seen；轮末阈值推进 150；
+    // 帖同时进 pendingNotifyErrors 与豁免集 prevUnseenKeys
+    fetchLatest.mockImplementation(async () => [topic('150', { title: '羊毛' }), topic('100')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:150')).toBe(false)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(150)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(1)
+
+    // 第 N+1 轮：fetchLatest 抛错 → 进冷却。source 本轮无观测 → 轮末清理不动
+    // 豁免集与 pendingNotifyErrors（prevUnseenKeys 的替换发生在 pollSource 成功
+    // 路径里，失败轮原样保留）
+    fetchLatest.mockRejectedValueOnce(new Error('net down'))
+    await h.engine.pollOnce()
+    expect(h.engine.getStatus().health).toBe('backoff')
+    expect(h.seen.has('nodeseek:150')).toBe(false)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(1)
+
+    await h.engine.pollOnce() // 冷却中的轮次：跳过该 source（仍无观测）
+    expect(fetchLatest).toHaveBeenCalledTimes(3)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(1)
+
+    // 第 N+2 轮：恢复，150 仍 unseen 且 150 ≤ 阈值 150——豁免集跨失败轮仍在 →
+    // 走重试路径（processHit/sendHit 再次被调），不被阈值静默吞进 seen
+    advanceMs(computeBackoffMs(1, 60_000))
+    fetchLatest.mockImplementation(async () => [topic('150', { title: '羊毛' }), topic('100')])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2) // 重试路径，而非静默入 seen
+    expect(h.sendHit.mock.calls[1]![0].id).toBe('150')
+    expect(h.seen.has('nodeseek:150')).toBe(true) // 重试成功后才入集
+    expect(h.engine.getStatus().health).toBe('ok')
+  })
+
   it('存量升级初始化轮：baselineDone=true 且阈值 null → 整页 unseen 入 seen、不推送不评估、阈值写入、log info、健康 ok', async () => {
     const fetchLatest = vi.fn(async () => [topic('937071', { title: '羊毛' }), topic('937070')])
     const h = build({
@@ -1431,6 +1470,83 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
     expect(h.sendHit.mock.calls[0]![0].id).toBe('937072')
     expect(h.seen.has('nodeseek:900000')).toBe(true)
+  })
+
+  it('F3：升级初始化轮阈值写失败（state.setFor 抛错）→ error 可观测、轮次行为不变、下轮重做初始化', async () => {
+    const fetchLatest = vi.fn(async () => [topic('937071', { title: '羊毛' }), topic('937070')])
+    const h = build({
+      sources: [idOrderedSource(fetchLatest)],
+      preSeed: (_seen, state) => {
+        state.setFor('nodeseek', { baselineDone: true }) // 旧版升级：state 里没有阈值
+      }
+    })
+    const setForSpy = vi
+      .spyOn(h.state, 'setFor')
+      .mockImplementation(() => { throw new Error('EACCES: permission denied') })
+    await h.engine.pollOnce()
+
+    // 轮次行为不变：静默初始化轮仍正常收尾（不推送不评估、整页入集、健康 ok）
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.onHit).not.toHaveBeenCalled()
+    expect(h.seen.has('nodeseek:937071')).toBe(true)
+    expect(h.seen.has('nodeseek:937070')).toBe(true)
+    expect(h.engine.getStatus().health).toBe('ok')
+    // 可观测：后果明确的 error（下轮重做）+ 通用持久化 error；原 info 日志保持
+    const logs = h.logger.getRecent()
+    expect(
+      logs.some(
+        (e) =>
+          e.level === 'error' &&
+          e.msg.includes('id threshold persist failed — upgrade init will repeat next round')
+      )
+    ).toBe(true)
+    expect(
+      logs.some((e) => e.level === 'error' && e.msg.includes('persist engine state failed'))
+    ).toBe(true)
+    expect(
+      logs.some((e) => e.level === 'info' && e.msg.includes('id threshold initialized at 937071'))
+    ).toBe(true)
+    // 写失败 → 内存阈值仍 null（setFor 落盘前抛，内存不变）→ 下一轮初始化重做
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBeNull()
+
+    setForSpy.mockRestore()
+    await h.engine.pollOnce() // 同页：初始化重做，阈值这次落盘
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(937071)
+    expect(h.sendHit).not.toHaveBeenCalled() // 帖已入 seen，重做轮也不推送
+  })
+
+  it('F3：基线轮阈值写失败（state.setFor 抛错）→ error 可观测、控制流不变、下轮重做基线', async () => {
+    const fetchLatest = vi.fn(async () => [topic('50', { title: '羊毛' }), topic('40')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    const setForSpy = vi
+      .spyOn(h.state, 'setFor')
+      .mockImplementation(() => { throw new Error('EACCES: permission denied') })
+    await h.engine.pollOnce() // 基线轮：写入失败
+
+    // 控制流不变：仍正常收尾（整页入集不推送、健康 ok）
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.seen.has('nodeseek:50')).toBe(true)
+    expect(h.seen.has('nodeseek:40')).toBe(true)
+    expect(h.engine.getStatus().health).toBe('ok')
+    expect(
+      h.logger
+        .getRecent()
+        .some(
+          (e) =>
+            e.level === 'error' &&
+            e.msg.includes('id threshold persist failed — upgrade init will repeat next round')
+        )
+    ).toBe(true)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'info' && e.msg.includes('baseline captured'))
+    ).toBe(true)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(false) // 内存未变：下轮重做基线
+
+    setForSpy.mockRestore()
+    await h.engine.pollOnce() // 同页重做基线：含关键词的 50 也不推送（基线语义）
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(50)
   })
 
   it('首装基线轮同轮初始化阈值：baselineDone 与整页 max id 同 patch 原子写', async () => {
@@ -1555,7 +1671,7 @@ describe('AI 锐评集成（第三轮）', () => {
   /** mock 锐评生成器（结构满足 Pick<CommentGenerator, 'generate' | 'prune'>） */
   function commentMock(text: string | null = '一句锐评') {
     const generate = vi.fn(async (_t: Topic) => text)
-    const prune = vi.fn((_keep: ReadonlySet<string>) => {})
+    const prune = vi.fn((_keep: ReadonlySet<string>, _observed?: ReadonlySet<string>) => {})
     return { generate, prune }
   }
 
@@ -1807,6 +1923,97 @@ describe('AI 锐评集成（第三轮）', () => {
     await h.engine.pollOnce() // 2 滚出首页：保留集只剩 {1}
     expect(gen.prune).toHaveBeenCalledTimes(3)
     expect(gen.prune.mock.calls[2]![0]).toEqual(new Set(['nodeseek:1']))
+  })
+
+  it('F1：prune 第二参 = observedSources——成功观测轮含该 source，失败/冷却轮为空集', async () => {
+    const gen = commentMock()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 成功观测轮
+    expect(gen.prune).toHaveBeenCalledTimes(1)
+    expect(gen.prune.mock.calls[0]![1]).toEqual(new Set(['nodeseek']))
+
+    h.fetchLatest.mockRejectedValueOnce(new Error('net down'))
+    await h.engine.pollOnce() // 抓取失败轮：未观测
+    expect(gen.prune).toHaveBeenCalledTimes(2)
+    expect(gen.prune.mock.calls[1]![1]).toEqual(new Set())
+
+    await h.engine.pollOnce() // 冷却跳过轮：仍未观测
+    expect(gen.prune).toHaveBeenCalledTimes(3)
+    expect(gen.prune.mock.calls[2]![1]).toEqual(new Set())
+  })
+
+  it('F1：冷却/失败轮（source 未观测）commentary 缓存不被清——恢复轮重试不打 LLM', async () => {
+    const chat = vi.fn(async (_req: ChatRequest) => '原句锐评')
+    const gen = new CommentGenerator({ provider: { chat } })
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线
+
+    // 命中轮：推送失败 → nodeseek:2 缓存落位（chat 1 次），帖不入 seen
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+
+    // 失败轮：fetchLatest 抛错 → source 未观测 → observedSources 守卫保住缓存
+    h.fetchLatest.mockRejectedValueOnce(new Error('net down'))
+    await h.engine.pollOnce()
+    expect(h.engine.getStatus().health).toBe('backoff')
+
+    await h.engine.pollOnce() // 冷却中的轮次：跳过该 source（仍未观测）
+    expect(h.fetchLatest).toHaveBeenCalledTimes(3) // 基线 + 命中轮 + 失败轮
+
+    // 越过冷却恢复：同帖重试 → 缓存跨故障窗口存活，不再打 LLM
+    advanceMs(computeBackoffMs(1, 60_000))
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2) // processHit/sendHit 重试路径再次被调
+    expect(h.sendHit.mock.calls[1]![2]).toBe('原句锐评') // 命中的是缓存里的原句
+    expect(chat).toHaveBeenCalledTimes(1) // 关键断言：LLM 未被重打
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+  })
+
+  it('F1：正常观测轮滚出首页的键被清——该帖再回首页时重新打 LLM', async () => {
+    const chat = vi.fn(async (_req: ChatRequest) => '原句锐评')
+    const gen = new CommentGenerator({ provider: { chat } })
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线
+
+    // 命中轮：推送失败 → 缓存落位（chat 1 次），帖不入 seen（待重试）
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(chat).toHaveBeenCalledTimes(1)
+
+    // 正常轮：2 滚出首页（source 已观测）→ 缓存键被 prune 清掉
+    h.fetchLatest.mockImplementation(async () => [topic('1')])
+    await h.engine.pollOnce()
+
+    // 2 再回首页：仍待重试（未入 seen）→ 重走命中管线 → 缓存已清 → 重新打 LLM
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(chat).toHaveBeenCalledTimes(2)
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.sendHit.mock.calls[1]![2]).toBe('原句锐评')
+  })
+
+  it('F4：ai.commentaryLimit 随状态下发（锐评上限单一事实源，渲染层不硬编码）', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce()
+    expect(h.engine.getStatus().ai.commentaryLimit).toBe(DAILY_COMMENTARY_LIMIT)
+    expect(h.engine.getStatus().ai.commentaryLimit).toBe(100)
   })
 
   it('deps 未注入 commentaryGenerator：行为与升级前一致（恒 null、sendHit 第三参 null、零计数）', async () => {

@@ -1,10 +1,11 @@
 /**
  * CommentGenerator 单测：provider.chat 全 mock，零网络。
  * 覆盖：成功返回与请求形状（8s 超时 / 120 tokens / 无 jsonMode / system 契约 /
- * user 三字段 JSON）/ 后处理（trim、去配对引号、80 字截断、空串归 null）/
- * chat 抛错 → null 且不抛 / 成功缓存与失败负缓存（二次调用不打 LLM）/
- * 同 key 并发去重（一次 chat）/ prune 保留集语义（成功缓存与负缓存都吃 prune）/
- * clear（含在途回填打断）。
+ * user 三字段 JSON）/ 后处理（trim、去配对引号、80 字截断（含代理对安全，F2）、
+ * 空串归 null）/ chat 抛错 → null 且不抛 / 成功缓存与失败负缓存（二次调用不打
+ * LLM）/ 同 key 并发去重（一次 chat）/ prune 保留集语义（成功缓存与负缓存都吃
+ * prune；observedSources 守卫：未观测 source 的键保留，F1）/ clear（含在途
+ * 回填打断）。
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { Topic } from '../../shared/types'
@@ -90,6 +91,28 @@ describe('CommentGenerator.generate', () => {
     const h = makeHarness(() => '锐'.repeat(100))
     const out = await h.generator.generate(topic('1'))
     expect(out).toBe('锐'.repeat(80))
+  })
+
+  it('后处理截断代理对安全（F2）：79 普通字符 + emoji 切半 → 退一位丢孤立高代理', async () => {
+    // 😀 = U+1F600（高代理 + 低代理两个 UTF-16 单元）；'锐'.repeat(79) + 😀 = 81
+    // 单元，第 80 单元恰是高代理——旧 slice(0,80) 会产出孤立高代理
+    const raw = '锐'.repeat(79) + '\u{1F600}'
+    expect(raw.length).toBe(81)
+    const h = makeHarness(() => raw)
+    const out = await h.generator.generate(topic('1'))
+    expect(out).not.toBeNull()
+    expect(Array.from(out as string).length).toBeLessThanOrEqual(80) // 码点口径不超限
+    const lastCp = (out as string).codePointAt((out as string).length - 1)!
+    expect(lastCp < 0xd800 || lastCp > 0xdfff).toBe(true) // 末字符不是孤立代理
+    expect(out).toBe('锐'.repeat(79)) // 被切半的 emoji 整个丢弃
+  })
+
+  it('后处理截断代理对安全：边界内完整的 emoji 不受影响', async () => {
+    // 78 普通字符 + 代理对 = 恰 80 单位：不触发截断，emoji 完整保留
+    const raw = '锐'.repeat(78) + '\u{1F600}'
+    expect(raw.length).toBe(80)
+    const h = makeHarness(() => raw)
+    await expect(h.generator.generate(topic('1'))).resolves.toBe(raw)
   })
 
   it('后处理空串：纯空白 / 只剩引号对 → null', async () => {
@@ -196,6 +219,47 @@ describe('CommentGenerator.generate', () => {
     fail = false
     await expect(generator.generate(topic('1'))).resolves.toBe('复活锐评')
     expect(chat).toHaveBeenCalledTimes(2)
+  })
+
+  it('prune 带 observedSources（F1）：未观测 source 的键保留，已观测 source 滚出首页的键照删', async () => {
+    const h = makeHarness((i) => `锐评${i}`)
+    await h.generator.generate(topic('1')) // → 锐评0（nodeseek:1）
+    await h.generator.generate(topic('2', 'other')) // → 锐评1（other:2）
+    expect(h.chat).toHaveBeenCalledTimes(2)
+
+    // 本轮页面只剩 other:3；nodeseek 未观测（冷却/失败轮）→ nodeseek:1 不在
+    // keepKeys 但其 source 未观测 → 保留；other 已观测 → other:2 滚出首页被删
+    h.generator.prune(new Set(['other:3']), new Set(['other']))
+    await expect(h.generator.generate(topic('1'))).resolves.toBe('锐评0') // 缓存命中
+    expect(h.chat).toHaveBeenCalledTimes(2)
+    await expect(h.generator.generate(topic('2', 'other'))).resolves.toBe('锐评2') // 被清 → 重打
+    expect(h.chat).toHaveBeenCalledTimes(3)
+  })
+
+  it('prune 带 observedSources：失败负缓存同样受守卫（未观测 source 的负缓存保留）', async () => {
+    let fail = true
+    const chat = vi.fn(() =>
+      fail ? Promise.reject(new Error('network down')) : Promise.resolve('复活锐评')
+    )
+    const generator = new CommentGenerator({ provider: { chat } })
+    await expect(generator.generate(topic('1'))).resolves.toBeNull() // 负缓存落位
+    // 失败轮（nodeseek 未观测）：keepKeys 为空也不清负缓存
+    generator.prune(new Set(), new Set(['other']))
+    fail = false
+    await expect(generator.generate(topic('1'))).resolves.toBeNull() // 负缓存仍命中：不打 LLM
+    expect(chat).toHaveBeenCalledTimes(1)
+    // 该 source 恢复观测后的轮末才清负缓存
+    generator.prune(new Set(), new Set(['nodeseek']))
+    await expect(generator.generate(topic('1'))).resolves.toBe('复活锐评')
+    expect(chat).toHaveBeenCalledTimes(2)
+  })
+
+  it('prune 不带 observedSources：行为同旧版（keepKeys 外全删，兼容旧调用方）', async () => {
+    const h = makeHarness((i) => `锐评${i}`)
+    await h.generator.generate(topic('1'))
+    h.generator.prune(new Set())
+    await expect(h.generator.generate(topic('1'))).resolves.toBe('锐评1') // 被清 → 重打
+    expect(h.chat).toHaveBeenCalledTimes(2)
   })
 
   it('clear：清空成功缓存，同 topic 再调用重新打 chat', async () => {

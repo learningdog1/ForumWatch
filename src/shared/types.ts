@@ -177,6 +177,12 @@ export interface AiRuntimeStatus {
    * 自然日滚动与同一总桶（dailyLimit 300）：锐评每次调用同时计入两者。
    */
   commentaryToday?: number
+  /**
+   * 每日锐评调用上限（当前 100，常量不进配置；F4 单一事实源）。**可选**：由
+   * engine 的 deriveAiStatus 随状态下发，渲染层读它而非硬编码；缺字段时消费方
+   * 回退默认 100（旧状态快照读者不破）。
+   */
+  commentaryLimit?: number
   /** 每日调用上限（常量 300，v2 不进配置） */
   dailyLimit: number
   lastAiError: string | null

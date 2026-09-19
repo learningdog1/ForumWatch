@@ -33,8 +33,8 @@
  *   剩 200 容量，两用途无需调序（literal 命中先于语义批烧配额是有意的先到先得）。
  *   推送失败重试轮 generate 会被再次调用，但 CommentGenerator 内部缓存（含
  *   失败负缓存）保证不再打 LLM；轮末与 pruneRetryMaps 同调用点、同一
- *   roundTopicKeys 键集调 prune 清理其缓存。deps 未注入生成器 = 恒无锐评，
- *   行为与升级前完全一致。
+ *   roundTopicKeys 键集与 observedSources 守卫调 prune 清理其缓存（F1）。
+ *   deps 未注入生成器 = 恒无锐评，行为与升级前完全一致。
  *
  * per-source 运行态（SourceRuntime，内存）：health / lastSuccessAt / lastError /
  * consecutiveFailures / cooldownUntilMs——同一退避曲线 computeBackoffMs（含
@@ -210,6 +210,8 @@ export interface EngineDeps {
    * AI 锐评生成器（第三轮；可选——不注入 = 恒无锐评，行为与升级前完全一致）。
    * engine 只依赖 generate/prune 接口（CommentGenerator 结构类型）；generate
    * 的"绝不抛 / 成败皆缓存 / 在途去重"契约由模块自身保证，engine 不 try/catch。
+   * prune 收 (roundTopicKeys, observedSources) 两参：与 pruneRetryMaps 同款
+   * observedSources 守卫（冷却/失败轮不清缓存，F1）。
    */
   commentaryGenerator?: Pick<CommentGenerator, 'generate' | 'prune'>
   /**
@@ -371,16 +373,19 @@ export class MonitorEngine {
     const activeIds: string[] = []
     /** 本轮实际抓到的全部 topic 的 seen 键（F5 轮末清理的保留集） */
     const roundTopicKeys = new Set<string>()
-    /** 本轮实际执行了 pollSource 的 source（冷却跳过的不算——没有观测） */
+    /**
+     * 本轮成功抓取了页面的 source（F1）：冷却跳过或抓取失败的 source 都不算
+     * 观测——没有页面数据就没有"滚出首页"的证据，轮末清理不得动其键。
+     */
     const observedSources = new Set<string>()
     for (const adapter of adapters) {
       const rt = this.ensureRuntime(adapter.id)
       if (!activeIds.includes(adapter.id)) activeIds.push(adapter.id)
       // 退避冷却中：本轮跳过该 source（sleep，不动 failures/health）
       if (rt.cooldownUntilMs !== null && this.now() < rt.cooldownUntilMs) continue
-      observedSources.add(adapter.id)
       try {
         await this.pollSource(adapter, rt, cfg, roundTopicKeys)
+        observedSources.add(adapter.id)
         this.succeedSource(rt)
       } catch (err) {
         this.failSource(adapter.id, rt, err, cfg.pollIntervalSec)
@@ -388,9 +393,10 @@ export class MonitorEngine {
     }
     this.pruneRetryMaps(roundTopicKeys, observedSources)
     // 锐评缓存清理（第三轮）：与 pruneRetryMaps 同一调用点、同一 roundTopicKeys
-    // 键集（键注册在 pollSource 的提前 return 之前，基线/升级初始化轮同样覆盖）；
+    // 键集与 observedSources 守卫（键注册在 pollSource 的提前 return 之前，基线/
+    // 升级初始化轮同样覆盖；冷却跳过的 source 未观测 → 其键保留，F1）；
     // deps 未注入生成器时跳过（可选链）
-    this.deps.commentaryGenerator?.prune(roundTopicKeys)
+    this.deps.commentaryGenerator?.prune(roundTopicKeys, observedSources)
     this.finishRound(cfg.pollIntervalSec, activeIds)
   }
 
@@ -433,6 +439,8 @@ export class MonitorEngine {
       callsToday: this.aiCallsToday,
       commentaryToday: this.commentaryToday,
       dailyLimit: DAILY_AI_CALL_LIMIT,
+      // 锐评子上限随状态下发（F4）：渲染层单一事实源，不硬编码 100
+      commentaryLimit: DAILY_COMMENTARY_LIMIT,
       lastAiError: this.aiLastError
     }
     if (!this.aiConfigured) {
@@ -488,12 +496,16 @@ export class MonitorEngine {
     if (!sourceState.baselineDone) {
       for (const t of topics) this.deps.seen.add(seenKeyFor(adapter.id, t.id))
       await this.flushSeenOrFail()
-      this.persistState(adapter.id, {
+      const initThreshold = idFilter && pageMaxId !== null
+      const persisted = this.persistState(adapter.id, {
         baselineDone: true,
-        ...(idFilter && pageMaxId !== null
-          ? { maxSeenTopicId: Math.max(threshold ?? 0, pageMaxId) }
-          : {})
+        ...(initThreshold ? { maxSeenTopicId: Math.max(threshold ?? 0, pageMaxId) } : {})
       })
+      // F3：阈值写入失败可观测——写不进去则下一轮基线/阈值初始化重来一轮；
+      // 不改变控制流（仍正常收尾返回）
+      if (initThreshold && !persisted) {
+        this.deps.logger.error('id threshold persist failed — upgrade init will repeat next round')
+      }
       this.deps.logger.info(
         `source ${adapter.id}: baseline captured (${topics.length} topics)` +
           (idFilter && pageMaxId !== null ? `, id threshold initialized at ${pageMaxId}` : '')
@@ -514,7 +526,11 @@ export class MonitorEngine {
       ).length
       for (const t of topics) this.deps.seen.add(seenKeyFor(adapter.id, t.id))
       await this.flushSeenOrFail()
-      this.persistState(adapter.id, { maxSeenTopicId: pageMaxId })
+      // F3：阈值写入失败可观测——写不进去则下一轮 threshold 仍 null，静默初始化
+      // 轮整个重来（帖子已入 seen，重来做的是阈值部分）；控制流不变（正常收尾）
+      if (!this.persistState(adapter.id, { maxSeenTopicId: pageMaxId })) {
+        this.deps.logger.error('id threshold persist failed — upgrade init will repeat next round')
+      }
       this.deps.logger.info(
         `source ${adapter.id}: id threshold initialized at ${pageMaxId}, ` +
           `${unseenCount} topics swallowed (upgrade init)`
@@ -866,8 +882,9 @@ export class MonitorEngine {
   /**
    * 轮末清理重试缓存（F5）：pendingNotifyErrors / semanticVerdicts 只保留本轮
    * 仍出现在页面上的帖子的键——帖子滚出首页后重试已无意义，删掉防 Map 常驻。
-   * 只裁本轮**实际抓取过**的 source（observedSources）：冷却中被跳过的 source
-   * 本轮没有观测，其键保留到下一轮，避免冷却窗口内误删仍在首页的帖子状态。
+   * 只裁本轮**成功抓取过页面**的 source（observedSources，F1 同款）：冷却中
+   * 被跳过或抓取失败的 source 本轮没有观测，其键保留到下一轮，避免冷却/故障
+   * 窗口内误删仍在首页的帖子状态。
    */
   private pruneRetryMaps(roundTopicKeys: Set<string>, observedSources: Set<string>): void {
     if (this.pendingNotifyErrors.size > 0) {
@@ -1025,14 +1042,20 @@ export class MonitorEngine {
     }
   }
 
-  /** 持久化某 source 的引擎状态；落盘失败只记日志不改变本轮健康判定（下一轮再试） */
-  private persistState(sourceId: string, patch: Partial<SourceEngineState>): void {
+  /**
+   * 持久化某 source 的引擎状态；落盘失败只记日志不抛、不改本轮健康判定（下一轮
+   * 再试）。@returns 是否落盘成功（F3：调用方可据此对"失败会改变下轮行为"的
+   * 写入——基线/升级初始化轮的 id 阈值——补一条更具体的 error 可观测）。
+   */
+  private persistState(sourceId: string, patch: Partial<SourceEngineState>): boolean {
     try {
       this.deps.state.setFor(sourceId, patch)
+      return true
     } catch (err) {
       this.deps.logger.error(
         `persist engine state failed (source ${sourceId}): ${describeError(err)}`
       )
+      return false
     }
   }
 

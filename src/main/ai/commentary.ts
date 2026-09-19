@@ -11,12 +11,14 @@
  * - 并发去重：同 key 在途 Promise 复用，防重试路径并发双打。
  * - prune/clear：与 engine 的 pruneRetryMaps 同语义——轮末只保留本轮仍出现
  *   在页面上的帖子的键（`${sourceId}:${id}`，与 seen 键同构）；滚出首页后
- *   缓存已无意义，删掉防 Map 常驻。在途表一并清理：被清掉的在途 promise
+ *   缓存已无意义，删掉防 Map 常驻。传入 observedSources 时与 pruneRetryMaps
+ *   同款守卫：本轮未观测（冷却跳过/抓取失败）的 source 的键一律保留，避免
+ *   冷却窗口内误删仍在首页的帖子的缓存。在途表一并清理：被清掉的在途 promise
  *   完成后不回填缓存（调用方仍拿到本次结果，缓存态以清理动作为准）。
  * - 注入边界（D6 先例）：user 只送 JSON.stringify 的标题/分类/作者三字段
  *   摘要，不送原文 HTML；回复纯文本，不用 jsonMode。
- * - 后处理：trim → 去首尾配对引号（模型爱加引号）→ 超 80 字符截断 →
- *   空串归 null。
+ * - 后处理：trim → 去首尾配对引号（模型爱加引号）→ 超 80 字符截断（代理对
+ *   安全，F2）→ 空串归 null。
  *
  * 零 electron 依赖；provider 由外部注入（单测全 mock）。
  */
@@ -86,14 +88,29 @@ export class CommentGenerator {
     return p
   }
 
-  /** 轮末清理：只保留 keepKeys 中的键（与 engine 的 pruneRetryMaps 同语义） */
-  prune(keepKeys: ReadonlySet<string>): void {
+  /**
+   * 轮末清理：只保留 keepKeys 中的键（与 engine 的 pruneRetryMaps 同语义）。
+   * observedSources（可选）：本轮实际观测过的 source id 集——传入时额外保留
+   * 「键的 sourceId（首个 `:` 前缀）不在观测集」的键（冷却跳过/抓取失败的
+   * source 本轮没有观测，其键保留到下一轮，防冷却窗口内误删）；不传时行为
+   * 同旧版（keepKeys 外全删）。
+   */
+  prune(keepKeys: ReadonlySet<string>, observedSources?: ReadonlySet<string>): void {
     for (const key of [...this.cache.keys()]) {
-      if (!keepKeys.has(key)) this.cache.delete(key)
+      if (!keepKeys.has(key) && this.shouldPrune(key, observedSources)) {
+        this.cache.delete(key)
+      }
     }
     for (const key of [...this.inflight.keys()]) {
-      if (!keepKeys.has(key)) this.inflight.delete(key)
+      if (!keepKeys.has(key) && this.shouldPrune(key, observedSources)) {
+        this.inflight.delete(key)
+      }
     }
+  }
+
+  /** prune 的单键判据：observedSources 未给出时恒删；给出时只删其观测过的 source 的键 */
+  private shouldPrune(key: string, observedSources: ReadonlySet<string> | undefined): boolean {
+    return observedSources === undefined || observedSources.has(sourceIdOfKey(key))
   }
 
   /** 测试/重置用：清空结果缓存与在途表（在途调用仍会完成但不回填缓存） */
@@ -128,11 +145,25 @@ function commentaryKey(t: Topic): string {
   return `${t.sourceId}:${t.id}`
 }
 
-/** 后处理：trim → 去首尾配对引号 → 超 80 字符截断 → 空串归 null */
+/** 键 → sourceId 部分（首个冒号前；与 engine 的 sourceIdOfKey 同款提取，prune 守卫用） */
+const sourceIdOfKey = (key: string): string => key.slice(0, key.indexOf(':'))
+
+/** 后处理：trim → 去首尾配对引号 → 超 80 字符截断（代理对安全）→ 空串归 null */
 function normalizeComment(raw: string): string | null {
   let text = stripEnclosingQuotes(raw.trim())
-  if (text.length > COMMENTARY_MAX_CHARS) text = text.slice(0, COMMENTARY_MAX_CHARS)
+  if (text.length > COMMENTARY_MAX_CHARS) text = truncateUtf16Safe(text, COMMENTARY_MAX_CHARS)
   return text === '' ? null : text
+}
+
+/**
+ * UTF-16 截断（代理对安全，F2）：slice 后末字符若是高代理（0xD800–0xDBFF，
+ * emoji/增补平面字符被切半的后半未跟着到达），退一位丢弃孤立高代理——
+ * 孤立代理会让下游（TG 消息编码 / JSON.stringify 转义）产生乱码。
+ */
+function truncateUtf16Safe(text: string, maxChars: number): string {
+  const sliced = text.slice(0, maxChars)
+  const last = sliced.charCodeAt(sliced.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? sliced.slice(0, -1) : sliced
 }
 
 /** 循环剥掉首尾成对的引号（含引号内侧空白再 trim）；只剥配对，不动内部引号 */
