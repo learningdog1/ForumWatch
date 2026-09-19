@@ -3,7 +3,13 @@ import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_APP_CONFIG, type AppConfig, type SourceConfig } from '../../shared/types'
+import {
+  DEFAULT_APP_CONFIG,
+  type AppConfig,
+  type ChannelConfig,
+  type SourceConfig,
+  type TelegramChannelConfig
+} from '../../shared/types'
 import { ConfigStore, sanitizeConfig } from './store'
 
 let dir: string
@@ -21,6 +27,11 @@ afterEach(async () => {
 /** 构造一份完整配置（覆盖默认值） */
 function cfg(overrides: Partial<AppConfig> = {}): AppConfig {
   return { ...structuredClone(DEFAULT_APP_CONFIG), ...overrides }
+}
+
+/** 断言用：把 channels[0] 窄化为 telegram 通道（测试夹具首项恒为 telegram 型） */
+function tg0(channels: ChannelConfig[]): TelegramChannelConfig {
+  return channels[0] as TelegramChannelConfig
 }
 
 describe('sanitizeConfig', () => {
@@ -76,9 +87,257 @@ describe('sanitizeConfig', () => {
     ).toBe('telegram-only')
   })
 
-  it('telegram 凭据 trim', () => {
-    const out = sanitizeConfig(cfg({ telegram: { botToken: ' 123:abc ', chatId: ' -100200 \n' } }))
-    expect(out.telegram).toEqual({ botToken: '123:abc', chatId: '-100200' })
+  it('channels：telegram 凭据 trim、enabled 布尔化、id slug 化去重（R6-W1）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        channels: [
+          { id: ' telegram ', type: 'telegram', enabled: 1 as unknown as boolean, botToken: ' 123:abc ', chatId: ' -100200 \n' },
+          { id: 'telegram', type: 'telegram', enabled: false, botToken: 'x', chatId: 'y' } // slug 后重复 → telegram-2
+        ]
+      })
+    )
+    expect(out.channels).toEqual([
+      { id: 'telegram', type: 'telegram', enabled: false, botToken: '123:abc', chatId: '-100200' },
+      { id: 'telegram-2', type: 'telegram', enabled: false, botToken: 'x', chatId: 'y' }
+    ])
+  })
+
+  it('channels：非数组 → 默认单项；全弃 → 回默认 telegram 项（列表恒至少一项）', () => {
+    expect(sanitizeConfig(cfg({ channels: undefined as unknown as [] })).channels).toEqual(
+      DEFAULT_APP_CONFIG.channels
+    )
+    expect(sanitizeConfig(cfg({ channels: 'garbage' as unknown as [] })).channels).toEqual(
+      DEFAULT_APP_CONFIG.channels
+    )
+    // 全部项非法：非对象 / 未知 type / 非对象项
+    expect(
+      sanitizeConfig(
+        cfg({ channels: [null, 'junk', { type: 'sms', enabled: true } as never] as unknown as [] })
+      ).channels
+    ).toEqual(DEFAULT_APP_CONFIG.channels)
+  })
+
+  it('channels：缺 id 按类型派生（telegram/bark/ntfy/webhook），冲突追加 -2', () => {
+    const out = sanitizeConfig(
+      cfg({
+        channels: [
+          { type: 'telegram', enabled: true, botToken: 'a', chatId: 'b' }, // 缺 id → 'telegram'
+          { type: 'ntfy', enabled: true, topic: 't1' }, // → 'ntfy'
+          { type: 'ntfy', enabled: true, topic: 't2' }, // → 'ntfy-2'
+          { id: '  ', type: 'webhook', enabled: true, url: 'https://example.com/hook' } // id 空白 → 'webhook'
+        ] as unknown as AppConfig['channels']
+      })
+    )
+    expect(out.channels.map((c) => c.id)).toEqual(['telegram', 'ntfy', 'ntfy-2', 'webhook'])
+  })
+
+  it('channels：bark/ntfy serverUrl 非 http(s) 弃字段（缺省=官方默认）；ntfy topic 空 → 整项弃', () => {
+    const out = sanitizeConfig(
+      cfg({
+        channels: [
+          { id: 'b1', type: 'bark', enabled: true, deviceKey: ' k ', serverUrl: ' https://bark.example.com ' },
+          { id: 'b2', type: 'bark', enabled: true, deviceKey: 'k', serverUrl: 'ftp://nope' }, // 弃字段
+          { id: 'n1', type: 'ntfy', enabled: true, topic: ' my-topic ', serverUrl: 'http://ntfy.local' },
+          { id: 'n2', type: 'ntfy', enabled: true, topic: '   ' } // topic 空 → 整项弃
+        ] as unknown as AppConfig['channels']
+      })
+    )
+    expect(out.channels).toEqual([
+      { id: 'b1', type: 'bark', enabled: true, deviceKey: 'k', serverUrl: 'https://bark.example.com' },
+      { id: 'b2', type: 'bark', enabled: true, deviceKey: 'k' }, // serverUrl 不落键
+      { id: 'n1', type: 'ntfy', enabled: true, topic: 'my-topic', serverUrl: 'http://ntfy.local' }
+    ])
+    expect('serverUrl' in out.channels[1]!).toBe(false)
+  })
+
+  it('channels：webhook url 必须合法 http(s) URL 否则整项弃；secret trim 空不落键', () => {
+    const badUrls: unknown[] = [undefined, 'not a url', 'ftp://example.com', 'http://', '   ', 42]
+    for (const url of badUrls) {
+      const out = sanitizeConfig(
+        cfg({
+          channels: [
+            { id: 'bad', type: 'webhook', enabled: true, url: url as string },
+            // 垫底合法项：确认"整项丢弃"不是"全列表回默认"
+            { id: 'tg', type: 'telegram', enabled: true, botToken: 'T', chatId: 'C' }
+          ] as unknown as AppConfig['channels']
+        })
+      )
+      expect(out.channels).toEqual([
+        { id: 'tg', type: 'telegram', enabled: true, botToken: 'T', chatId: 'C' }
+      ])
+    }
+    const out = sanitizeConfig(
+      cfg({
+        channels: [
+          { id: 'w1', type: 'webhook', enabled: true, url: ' https://example.com/hook ', secret: ' s3cret ' },
+          { id: 'w2', type: 'webhook', enabled: true, url: 'https://example.com/h2', secret: '   ' }
+        ] as unknown as AppConfig['channels']
+      })
+    )
+    expect(out.channels).toEqual([
+      { id: 'w1', type: 'webhook', enabled: true, url: 'https://example.com/hook', secret: 's3cret' },
+      { id: 'w2', type: 'webhook', enabled: true, url: 'https://example.com/h2' }
+    ])
+    expect('secret' in out.channels[1]!).toBe(false)
+  })
+
+  it('channels：上限 8 条（超出截断）', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      id: `tg-${i}`,
+      type: 'telegram' as const,
+      enabled: true,
+      botToken: `t${i}`,
+      chatId: `c${i}`
+    }))
+    const out = sanitizeConfig(cfg({ channels: many }))
+    expect(out.channels).toHaveLength(8)
+    expect(out.channels[0]!.id).toBe('tg-0')
+    expect(out.channels[7]!.id).toBe('tg-7')
+  })
+
+  it('channels：sanitize 白名单剔残留旧顶层 telegram 键（写路径只写新形状，DEC-9）', () => {
+    // 手工构造带旧键的输入：sanitize 重建后 telegram 键消失
+    const input = cfg({} as Partial<AppConfig>) as AppConfig & { telegram?: unknown }
+    input.telegram = { botToken: 'legacy', chatId: 'legacy' }
+    const out = sanitizeConfig(input) as AppConfig & { telegram?: unknown }
+    expect('telegram' in out).toBe(false)
+    // 旧键不影响 channels 的清洗结果
+    expect(out.channels).toEqual(DEFAULT_APP_CONFIG.channels)
+  })
+
+  it('notify：mode 枚举、digestIntervalMin 钳 [1,120]、quietHours 布尔化 + HH:MM 回退（R6-W1）', () => {
+    expect(sanitizeConfig(cfg({ notify: undefined as unknown as AppConfig['notify'] })).notify).toEqual(
+      DEFAULT_APP_CONFIG.notify
+    )
+    expect(
+      sanitizeConfig(
+        cfg({ notify: { mode: 'digest' as const, digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '22:30', endHHMM: '07:15' } } })
+      ).notify
+    ).toEqual({ mode: 'digest', digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '22:30', endHHMM: '07:15' } })
+
+    const modeOf = (m: unknown) =>
+      sanitizeConfig(cfg({ notify: { ...cfg().notify, mode: m as never } })).notify.mode
+    expect(modeOf('instant')).toBe('instant')
+    expect(modeOf('batch')).toBe('instant')
+    expect(modeOf(undefined)).toBe('instant')
+
+    const intervalOf = (n: unknown) =>
+      sanitizeConfig(cfg({ notify: { ...cfg().notify, digestIntervalMin: n as number } })).notify
+        .digestIntervalMin
+    expect(intervalOf(0)).toBe(1) // 钳下限
+    expect(intervalOf(-5)).toBe(1)
+    expect(intervalOf(999)).toBe(120) // 钳上限
+    expect(intervalOf(15)).toBe(15)
+    expect(intervalOf(Number.NaN)).toBe(15) // 非法回默认
+    expect(intervalOf('30' as unknown as number)).toBe(15)
+
+    const hhmmOf = (patch: Record<string, unknown>) =>
+      sanitizeConfig(cfg({ notify: { ...cfg().notify, quietHours: { enabled: 1, ...patch } as never } }))
+        .notify.quietHours
+    expect(hhmmOf({ startHHMM: '24:00', endHHMM: '08:00' })).toEqual({
+      enabled: false, // enabled=1 → false（=== true 强制布尔）
+      startHHMM: '23:00', // 非法回默认
+      endHHMM: '08:00'
+    })
+    expect(hhmmOf({ startHHMM: '23:00', endHHMM: '9:30' }).endHHMM).toBe('08:00')
+    expect(hhmmOf({ startHHMM: '23:00', endHHMM: '08:00' })).toEqual({
+      enabled: false,
+      startHHMM: '23:00',
+      endHHMM: '08:00'
+    })
+  })
+
+  it('routing：非数组 → []；悬挂 sourceId/ruleId 剔字段、matchedBy 枚举过滤、when 全空整条弃、channelIds 过滤后空整条弃（DEC-7）', () => {
+    const base = cfg({
+      sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }],
+      priceRules: [{ id: 'cheap', enabled: true, cycle: 'any' }],
+      channels: [
+        { id: 'telegram', type: 'telegram', enabled: true, botToken: 'T', chatId: 'C' },
+        { id: 'tg2', type: 'telegram', enabled: true, botToken: 'T2', chatId: 'C2' }
+      ]
+    })
+    const out = sanitizeConfig(
+      cfg({
+        ...base,
+        routing: [
+          null as never, // 非对象：丢弃
+          'junk' as never, // 非对象：丢弃
+          { when: {}, channelIds: ['telegram'] } as never, // 缺 id：丢弃
+          // 悬挂 sourceId 剔字段；matchedBy 过滤非法值后非空保留
+          {
+            id: 'r1',
+            when: { sourceId: 'ghost', matchedBy: ['literal', 'bogus', 'rule'] },
+            channelIds: ['telegram', 'ghost-channel', 'telegram'] // 悬挂过滤 + 去重
+          },
+          // ruleId 悬挂剔字段；when 清洗后只剩 matchedBy → 保留
+          { id: 'r2', when: { ruleId: 'ghost-rule', matchedBy: ['semantic'] }, channelIds: ['tg2'] },
+          // when 清洗后全空 → 整条弃
+          { id: 'r3', when: { sourceId: 'ghost', ruleId: 'ghost', matchedBy: [] }, channelIds: ['telegram'] },
+          // channelIds 全悬挂 → 整条弃
+          { id: 'r4', when: { sourceId: 'nodeseek' }, channelIds: ['nope'] },
+          // 合法引用：sourceId/ruleId 都在
+          { id: 'r5', when: { sourceId: 'nodeseek', ruleId: 'cheap', matchedBy: ['literal'] }, channelIds: ['telegram'] },
+          { id: 'r5', when: { sourceId: 'nodeseek' }, channelIds: ['telegram'] } // 重复 id：丢弃
+        ] as unknown as AppConfig['routing']
+      })
+    )
+    expect(out.routing).toEqual([
+      { id: 'r1', when: { matchedBy: ['literal', 'rule'] }, channelIds: ['telegram'] },
+      { id: 'r2', when: { matchedBy: ['semantic'] }, channelIds: ['tg2'] },
+      {
+        id: 'r5',
+        when: { sourceId: 'nodeseek', matchedBy: ['literal'], ruleId: 'cheap' },
+        channelIds: ['telegram']
+      }
+    ])
+  })
+
+  it('routing：空列表合法（= 不路由）；上限 20 条', () => {
+    expect(sanitizeConfig(cfg({ routing: [] })).routing).toEqual([])
+    expect(sanitizeConfig(cfg({ routing: 'garbage' as unknown as [] })).routing).toEqual([])
+    const base = cfg({ channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'T', chatId: 'C' }] })
+    const rules = Array.from({ length: 25 }, (_, i) => ({
+      id: `route-${i}`,
+      when: { matchedBy: ['literal' as const] },
+      channelIds: ['telegram']
+    }))
+    const out = sanitizeConfig(cfg({ ...base, routing: rules }))
+    expect(out.routing).toHaveLength(20)
+    expect(out.routing[0]!.id).toBe('route-0')
+    expect(out.routing[19]!.id).toBe('route-19')
+  })
+
+  it('坑4 回归：save→load 往返不丢 channels/notify/routing（sanitize 白名单完整性）', () => {
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        channels: [
+          { id: 'tg-main', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' },
+          { id: 'my-bark', type: 'bark', enabled: false, deviceKey: 'k', serverUrl: 'https://bark.example.com' },
+          { id: 'ntfy-1', type: 'ntfy', enabled: true, topic: 'forumwatch' },
+          { id: 'hook', type: 'webhook', enabled: true, url: 'https://example.com/hook', secret: 's' }
+        ],
+        notify: { mode: 'digest', digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '23:30', endHHMM: '07:00' } },
+        routing: [
+          { id: 'route-1', when: { matchedBy: ['literal'] }, channelIds: ['tg-main'] }
+        ]
+      })
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.channels).toEqual([
+      { id: 'tg-main', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' },
+      { id: 'my-bark', type: 'bark', enabled: false, deviceKey: 'k', serverUrl: 'https://bark.example.com' },
+      { id: 'ntfy-1', type: 'ntfy', enabled: true, topic: 'forumwatch' },
+      { id: 'hook', type: 'webhook', enabled: true, url: 'https://example.com/hook', secret: 's' }
+    ])
+    expect(loaded.notify).toEqual({
+      mode: 'digest',
+      digestIntervalMin: 30,
+      quietHours: { enabled: true, startHHMM: '23:30', endHHMM: '07:00' }
+    })
+    expect(loaded.routing).toEqual([
+      { id: 'route-1', when: { matchedBy: ['literal'] }, channelIds: ['tg-main'] }
+    ])
   })
 
   it('返回新对象，不改入参', () => {
@@ -87,7 +346,9 @@ describe('sanitizeConfig', () => {
     const out = sanitizeConfig(input)
     expect(input).toEqual(snapshot) // 入参原样
     expect(out).not.toBe(input)
-    expect(out.telegram).not.toBe(input.telegram)
+    expect(out.channels).not.toBe(input.channels)
+    expect(out.notify).not.toBe(input.notify)
+    expect(out.routing).not.toBe(input.routing)
     expect(out.ai).not.toBe(input.ai)
     expect(out.sources).not.toBe(input.sources)
     expect(out.priceRules).not.toBe(input.priceRules)
@@ -634,7 +895,7 @@ describe('ConfigStore', () => {
     expect(a).toEqual(DEFAULT_APP_CONFIG)
     // 深拷贝：外部改动不污染后续读取
     a.includeKeywords.push('leak')
-    a.telegram.botToken = 'leak'
+    tg0(a.channels).botToken = 'leak'
     expect(store.get()).toEqual(DEFAULT_APP_CONFIG)
   })
 
@@ -648,17 +909,17 @@ describe('ConfigStore', () => {
     store.save(
       cfg({
         includeKeywords: ['vps'],
-        telegram: { botToken: 'secret-token', chatId: 'c1' }
+        channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'secret-token', chatId: 'c1' }]
       })
     )
     const a = store.get()
     a.includeKeywords.push('leak')
-    a.telegram.botToken = 'leak'
+    tg0(a.channels).botToken = 'leak'
     const b = store.get()
     expect(b.includeKeywords).toEqual(['vps'])
-    expect(b.telegram.botToken).toBe('secret-token')
+    expect(tg0(b.channels).botToken).toBe('secret-token')
     // save 的返回路径同样不受污染（update 内部走 get，一并验证）
-    expect(store.update({}).telegram.botToken).toBe('secret-token')
+    expect(tg0(store.update({}).channels).botToken).toBe('secret-token')
   })
 
   it('默认值 roundtrip：save 默认配置 → 重新 load 得回等价配置', () => {
@@ -675,7 +936,7 @@ describe('ConfigStore', () => {
       pollIntervalSec: 30,
       proxyUrl: 'http://127.0.0.1:7890',
       proxyScope: 'all',
-      telegram: { botToken: '111:abc', chatId: '-100200' },
+      channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' }],
       notifyEnabled: false,
       launchAtLogin: true
     })
@@ -683,11 +944,13 @@ describe('ConfigStore', () => {
     const loaded = new ConfigStore(configPath).load()
     expect(loaded).toEqual(sanitizeConfig(custom))
     expect(loaded.includeKeywords).toEqual(['vps', 'nas'])
-    expect(loaded.telegram.chatId).toBe('-100200')
+    expect(tg0(loaded.channels).chatId).toBe('-100200')
     // 盘上是带 schemaVersion 的信封
     const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
     expect(onDisk.schemaVersion).toBe(3)
-    expect(onDisk.config.telegram.botToken).toBe('111:abc')
+    expect(onDisk.config.channels[0].botToken).toBe('111:abc')
+    // 旧顶层 telegram 键已消失：写路径只写新形状（DEC-9）
+    expect('telegram' in onDisk.config).toBe(false)
   })
 
   it('v1 config 文件落盘后 load 出 v3：v1 字段保留 + sources/ai 补默认', async () => {
@@ -713,7 +976,10 @@ describe('ConfigStore', () => {
     // v1 字段全部保留
     expect(loaded.includeKeywords).toEqual(['vps'])
     expect(loaded.pollIntervalSec).toBe(45)
-    expect(loaded.telegram).toEqual({ botToken: '111:abc', chatId: '-100200' })
+    // R6-W1 读兼容：v1 的 telegram 凭据映射为 channels[0]
+    expect(loaded.channels).toEqual([
+      { id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' }
+    ])
     expect(loaded.notifyEnabled).toBe(false)
     expect(loaded.launchAtLogin).toBe(true)
     // v2 新增字段为默认值
@@ -755,26 +1021,32 @@ describe('ConfigStore', () => {
     expect(JSON.parse(await readFile(configPath, 'utf-8')).schemaVersion).toBe(3)
   })
 
-  it('update：浅合并顶层字段，telegram 子对象整体替换', () => {
+  it('update：浅合并顶层字段，channels 数组整体替换（R6-W1）', () => {
     const store = new ConfigStore(configPath)
     store.save(
       cfg({
         includeKeywords: ['vps'],
         pollIntervalSec: 120,
-        telegram: { botToken: 'old-token', chatId: 'old-chat' }
+        channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'old-token', chatId: 'old-chat' }]
       })
     )
 
-    const next = store.update({ telegram: { botToken: 'new-token', chatId: '' } })
-    // telegram 整体替换：chatId 被带上来的空值覆盖，不是残留 old-chat
-    expect(next.telegram).toEqual({ botToken: 'new-token', chatId: '' })
+    const next = store.update({
+      channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'new-token', chatId: '' }]
+    })
+    // channels 整体替换：chatId 被带上来的空值覆盖，不是残留 old-chat
+    expect(next.channels).toEqual([
+      { id: 'telegram', type: 'telegram', enabled: true, botToken: 'new-token', chatId: '' }
+    ])
     // 其他字段不受影响（浅合并）
     expect(next.includeKeywords).toEqual(['vps'])
     expect(next.pollIntervalSec).toBe(120)
 
     // 落盘生效
     const reloaded = new ConfigStore(configPath).load()
-    expect(reloaded.telegram).toEqual({ botToken: 'new-token', chatId: '' })
+    expect(reloaded.channels).toEqual([
+      { id: 'telegram', type: 'telegram', enabled: true, botToken: 'new-token', chatId: '' }
+    ])
     expect(reloaded.includeKeywords).toEqual(['vps'])
   })
 
@@ -827,7 +1099,7 @@ describe('ConfigStore', () => {
     )
     const loaded = new ConfigStore(configPath).load()
     expect(loaded.pollIntervalSec).toBe(45)
-    expect(loaded.telegram).toEqual({ botToken: '', chatId: '' })
+    expect(loaded.channels).toEqual(DEFAULT_APP_CONFIG.channels)
     expect(loaded.notifyEnabled).toBe(true)
     expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
     expect(loaded.ai).toEqual(DEFAULT_APP_CONFIG.ai)
@@ -917,6 +1189,89 @@ describe('ConfigStore', () => {
     ]) // 非法 url 的 rss 在 sanitize 阶段被丢弃
   })
 
+  // ---- R6-W1 盘上读兼容（DEC-9：读时映射旧 telegram，写时只写新形状） ------------
+
+  it('旧 v3 盘上 config（顶层 telegram、无 channels）：load 合成 channels[0]，其余字段保留', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 3,
+        config: {
+          pollIntervalSec: 45,
+          includeKeywords: ['vps'],
+          telegram: { botToken: ' 111:abc ', chatId: '-100200' },
+          notifyEnabled: true
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.pollIntervalSec).toBe(45)
+    expect(loaded.includeKeywords).toEqual(['vps'])
+    // 旧凭据（trim 后）映射为默认 telegram 通道的凭据
+    expect(loaded.channels).toEqual([
+      { id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' }
+    ])
+    // 第六轮新字段缺失 → 默认
+    expect(loaded.notify).toEqual(DEFAULT_APP_CONFIG.notify)
+    expect(loaded.routing).toEqual([])
+  })
+
+  it('旧 v3 无 telegram 无 channels：load 得默认空凭据 telegram 通道', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ schemaVersion: 3, config: { pollIntervalSec: 45 } }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.channels).toEqual(DEFAULT_APP_CONFIG.channels)
+  })
+
+  it('盘上已有 channels（新代码写入）+ 残留 telegram 键：channels 原样、telegram 被忽略', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 3,
+        config: {
+          channels: [{ id: 'tg-main', type: 'telegram', enabled: true, botToken: 'new', chatId: 'c1' }],
+          telegram: { botToken: 'stale-old', chatId: 'old' }
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.channels).toEqual([
+      { id: 'tg-main', type: 'telegram', enabled: true, botToken: 'new', chatId: 'c1' }
+    ])
+  })
+
+  it('信封往返后旧 telegram 键消失（load 旧盘 → save 只写新形状）', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 3,
+        config: {
+          pollIntervalSec: 45,
+          telegram: { botToken: '111:abc', chatId: '-100200' }
+        }
+      }),
+      'utf-8'
+    )
+    const store = new ConfigStore(configPath)
+    const loaded = store.load()
+    expect(tg0(loaded.channels).botToken).toBe('111:abc')
+    store.save(loaded)
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8')) as {
+      schemaVersion: number
+      config: Record<string, unknown>
+    }
+    expect(onDisk.schemaVersion).toBe(3)
+    expect('telegram' in onDisk.config).toBe(false) // 旧键消失：写路径只写新形状
+    expect(onDisk.config['channels']).toEqual([
+      { id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' }
+    ])
+  })
+
   it('盘上信封 schemaVersion 未知（4）：按损坏备份并回默认', async () => {
     await writeFile(
       configPath,
@@ -938,7 +1293,7 @@ describe('ConfigStore', () => {
 
   it.skipIf(process.platform === 'win32')('保存后文件权限 0o600（darwin/linux）', () => {
     const store = new ConfigStore(configPath)
-    store.save(cfg({ telegram: { botToken: 'secret', chatId: '1' } }))
+    store.save(cfg({ channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'secret', chatId: '1' }] }))
     const mode = statSync(configPath).mode & 0o777
     expect(mode).toBe(0o600)
   })

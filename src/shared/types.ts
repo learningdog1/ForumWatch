@@ -30,6 +30,17 @@
  * - HitRecord.matchedBy 扩为 literal|semantic|rule；新增可选 matchedRule
  *   （旧 hits/*.jsonl 行容忍缺失，对齐 commentary 的三态注释风格）。
  * - SourceStatus 增加可选 page2Fetches（DEC-8 第 2 页补抓观测面，旧快照缺失=0）。
+ *
+ * 第六轮变更（2026-09-19，R6-W1：推送通道化契约改造，DEC-9）：
+ * - AppConfig **移除 telegram 段**，新增 channels（ChannelConfig[] 判别联合：
+ *   telegram/bark/ntfy/webhook；本轮只有 telegram 有发送实现，bark/ntfy/webhook
+ *   是 W2 的契约占位）、notify（instant/digest 模式 + 免打扰时段；W1-queue 消费）
+ *   与 routing（RoutingRule[]；W3 消费）。三者均为**加法字段**，schemaVersion 仍 3
+ *   ——盘上兼容由 migrations.normalizeLegacyChannels 读侧映射（旧 telegram 凭据
+ *   → channels[0]），写路径只写新形状（sanitize 重建时旧 telegram 键自然消失）。
+ * - TelegramConfig 类型保留导出：仅 migrations/notify 读兼容与凭据访问器复用。
+ * - HitRecord 增加可选 notifyDetail（per-channel 推送明细，键=channelId；W3
+ *   router 落盘，本轮 engine 单 notifier 仍写 notifiedAt/notifyError 聚合口径）。
  */
 
 /** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
@@ -199,14 +210,110 @@ export interface HitRecord {
   notifiedAt: string | null
   /** 推送失败原因（notifiedAt 为 null 时给出；静音时为 null） */
   notifyError: string | null
+  /**
+   * per-channel 推送明细（第六轮 R6-W1 契约，W3 router 落盘）：键 = channelId，
+   * 值 = 该通道的推送结果。**可选**：旧 hits/*.jsonl 行没有此字段，消费方必须容忍
+   * undefined（等价"无明细"）；单 notifier 时代聚合口径仍是上方 notifiedAt /
+   * notifyError 两字段，本字段在 W3 多通道并发推送后由 router 写入。
+   */
+  notifyDetail?: Record<string, { ok: boolean; error?: string }>
 }
 
 /** 代理作用域：仅 Telegram 走代理，还是所有请求都走代理（AI 请求在 'all' 时走代理、'telegram-only' 时直连） */
 export type ProxyScope = 'all' | 'telegram-only'
 
+/**
+ * 旧版 telegram 凭据形状（R6-W1 前的 AppConfig.telegram）。
+ * **不再出现在 AppConfig 上**：仅为 migrations 的读兼容映射与 TelegramNotifier
+ * 的凭据访问器保留此形状（notify/telegram.ts 的 getConfig 返回值）。
+ */
 export interface TelegramConfig {
   botToken: string
   chatId: string
+}
+
+/** 推送通道类型（R6-W1：telegram 有实现；bark/ntfy/webhook 为 W2 契约占位） */
+export type ChannelType = 'telegram' | 'bark' | 'ntfy' | 'webhook'
+
+/** Telegram Bot 推送通道 */
+export interface TelegramChannelConfig {
+  /** 通道 id（slug 化、全列表去重；notifyDetail 明细键） */
+  id: string
+  type: 'telegram'
+  enabled: boolean
+  botToken: string
+  chatId: string
+}
+
+/** Bark 推送通道（iOS） */
+export interface BarkChannelConfig {
+  id: string
+  type: 'bark'
+  enabled: boolean
+  /** 自建服务器 base，默认官方 https://api.day.app（缺省=官方，由 W2 发送端兜底） */
+  serverUrl?: string
+  deviceKey: string
+}
+
+/** ntfy 推送通道 */
+export interface NtfyChannelConfig {
+  id: string
+  type: 'ntfy'
+  enabled: boolean
+  /** 默认 https://ntfy.sh（缺省=官方，由 W2 发送端兜底） */
+  serverUrl?: string
+  topic: string
+}
+
+/** Webhook 推送通道 */
+export interface WebhookChannelConfig {
+  id: string
+  type: 'webhook'
+  enabled: boolean
+  url: string
+  /** 随请求发送的自定义鉴权头值（头名固定 X-ForumWatch-Secret） */
+  secret?: string
+}
+
+/** 一个已配置的推送通道（判别联合：按 type 分派） */
+export type ChannelConfig =
+  | TelegramChannelConfig
+  | BarkChannelConfig
+  | NtfyChannelConfig
+  | WebhookChannelConfig
+
+/** 推送节流模式（R6-W1 契约；digest 由 W1-queue 消费，当前仅 instant 生效） */
+export interface NotifyConfig {
+  /** 'instant' 命中即推（现行行为）；'digest' 聚合摘要推 */
+  mode: 'instant' | 'digest'
+  /** digest 聚合间隔（分钟）；sanitize 钳 [1,120]，默认 15 */
+  digestIntervalMin: number
+  /** 免打扰时段（本地时区，跨午夜合法；W1-queue 消费，当前仅契约） */
+  quietHours: {
+    enabled: boolean
+    /** 'HH:MM' 起点 */
+    startHHMM: string
+    /** 'HH:MM' 终点 */
+    endHHMM: string
+  }
+}
+
+/** 路由规则的匹配条件（W3 router 消费；全部字段可选，空 when 的规则由 sanitize 整条弃） */
+export interface RoutingWhen {
+  /** 限定来源（须存在于 sources，悬挂由 sanitize 剔除字段） */
+  sourceId?: string
+  /** 限定命中方式（枚举过滤，空数组不落键） */
+  matchedBy?: ('literal' | 'semantic' | 'rule')[]
+  /** 限定价格规则（须存在于 priceRules，悬挂由 sanitize 剔除字段） */
+  ruleId?: string
+}
+
+/** 一条路由规则：when 命中的帖推给 channelIds 列出的通道（W3 router 消费） */
+export interface RoutingRule {
+  id: string
+  when: RoutingWhen
+  /** 目标通道 id 列表（须存在于 channels；过滤后空则整条弃） */
+  channelIds: string[]
 }
 
 export interface AppConfig {
@@ -219,7 +326,23 @@ export interface AppConfig {
   /** 代理 URL：'' 表示直连；支持 http:// https:// socks5:// socks5h:// */
   proxyUrl: string
   proxyScope: ProxyScope
-  telegram: TelegramConfig
+  /**
+   * 推送通道列表（第六轮 R6-W1，DEC-9；取代旧 telegram 段）。判别联合按 type
+   * 分派，sanitize 保证非空（全弃时回默认 telegram 项）、id slug 化去重、上限 8。
+   * 默认单项：id='telegram' 的空凭据 telegram 通道（= 未配置态，与旧默认等价）。
+   * 本轮只有 telegram 有发送实现；bark/ntfy/webhook 是 W2 的契约占位。
+   */
+  channels: ChannelConfig[]
+  /**
+   * 推送策略（第六轮契约：digest 模式 + 免打扰由 W1-queue 消费；当前引擎恒走
+   * instant 直推，该段仅落契约与 sanitize）。默认 instant / 15min / 免打扰关。
+   */
+  notify: NotifyConfig
+  /**
+   * 路由规则（第六轮契约，W3 router 消费）：when 命中的帖推给 channelIds。
+   * 默认 [] = 不路由（全部命中走默认通道组）；sanitize 剔除悬挂引用。
+   */
+  routing: RoutingRule[]
   /** 推送总开关（临时静音用） */
   notifyEnabled: boolean
   /** 开机自启（Electron app.setLoginItemSettings） */
@@ -255,7 +378,13 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   pollIntervalSec: 60,
   proxyUrl: '',
   proxyScope: 'telegram-only',
-  telegram: { botToken: '', chatId: '' },
+  channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: '', chatId: '' }],
+  notify: {
+    mode: 'instant',
+    digestIntervalMin: 15,
+    quietHours: { enabled: false, startHHMM: '23:00', endHHMM: '08:00' }
+  },
+  routing: [],
   notifyEnabled: true,
   launchAtLogin: false,
   sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }],
@@ -331,6 +460,12 @@ export interface EngineStatus {
   /** per-source 状态（v2 仅 'nodeseek' 一项） */
   sources: SourceStatus[]
   ai: AiRuntimeStatus
+  /**
+   * 挂起待推送条数（第六轮 R6-W4）：免打扰窗内 / digest 模式挂起队列
+   * （engine.deferredHits）的当前尺寸。**可选**：旧状态快照没有此字段，消费方
+   * 容忍缺失（等价 0）；engine 的 getStatus 每次快照恒下发当前值。
+   */
+  pendingNotifyCount?: number
 }
 
 export const INITIAL_ENGINE_STATUS: EngineStatus = {
@@ -343,6 +478,7 @@ export const INITIAL_ENGINE_STATUS: EngineStatus = {
   lastError: null,
   totalHits: 0,
   sources: [],
+  pendingNotifyCount: 0,
   ai: {
     configured: false,
     effectiveMode: 'literal',

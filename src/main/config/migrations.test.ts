@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_APP_CONFIG } from '../../shared/types'
-import { migrateConfigEnvelope, MIGRATOR_TARGET_VERSION } from './migrations'
+import { DEFAULT_APP_CONFIG, type ChannelConfig } from '../../shared/types'
+import {
+  migrateConfigEnvelope,
+  MIGRATOR_TARGET_VERSION,
+  normalizeLegacyChannels
+} from './migrations'
 
 /** 一份典型 v1 盘上配置（含 v1 时代的全部字段） */
 function v1Config(): Record<string, unknown> {
@@ -15,6 +19,15 @@ function v1Config(): Record<string, unknown> {
     launchAtLogin: true
   }
 }
+
+/** 合成的默认 telegram 通道形状（R6-W1 读兼容：旧 telegram 凭据 → channels[0]） */
+const synthesizedChannel = (botToken: string, chatId: string): ChannelConfig => ({
+  id: 'telegram',
+  type: 'telegram',
+  enabled: true,
+  botToken,
+  chatId
+})
 
 /** 一份典型 v2 盘上配置（sources 为 v2 形状：type 恒 'nodeseek'） */
 function v2Config(): Record<string, unknown> {
@@ -52,13 +65,19 @@ describe('migrateConfigEnvelope', () => {
     expect(out.pollIntervalSec).toBe(45)
     expect(out.proxyUrl).toBe('http://127.0.0.1:7890')
     expect(out.proxyScope).toBe('all')
-    expect(out.telegram).toEqual({ botToken: '111:abc', chatId: '-100200' })
+    expect((out as { telegram?: unknown }).telegram).toEqual({ botToken: '111:abc', chatId: '-100200' })
     expect(out.notifyEnabled).toBe(false)
     expect(out.launchAtLogin).toBe(true)
+
+    // R6-W1 读兼容：v1 的 telegram 凭据映射为 channels[0]（telegram 键本身保留
+    // 到 sanitize 才剔除——迁移链只做映射不做剔除）
+    expect(out.channels).toEqual([synthesizedChannel('111:abc', '-100200')])
 
     // 新增 v2 字段为默认值，v3 不再改动
     expect(out.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
     expect(out.ai).toEqual(DEFAULT_APP_CONFIG.ai)
+    expect(out.notify).toEqual(DEFAULT_APP_CONFIG.notify)
+    expect(out.routing).toEqual([])
   })
 
   it('v1 迁移不与入参共享引用（深拷贝）', () => {
@@ -79,7 +98,9 @@ describe('migrateConfigEnvelope', () => {
     // 其余段不动（含 ai 全段）
     expect(out.includeKeywords).toEqual(['vps'])
     expect(out.pollIntervalSec).toBe(45)
-    expect(out.telegram).toEqual({ botToken: '111:abc', chatId: '-100200' })
+    expect((out as { telegram?: unknown }).telegram).toEqual({ botToken: '111:abc', chatId: '-100200' })
+    // R6-W1 读兼容：v2 的 telegram 凭据同样映射为 channels[0]
+    expect(out.channels).toEqual([synthesizedChannel('111:abc', '-100200')])
     expect(out.ai).toEqual(v2Config().ai)
 
     // sources 项逐项映射：id/enabled 原样，type 恒 'nodeseek'
@@ -165,9 +186,13 @@ describe('migrateConfigEnvelope', () => {
     expect(v3.sources[2].filters?.includeCategories).toEqual(['tech'])
   })
 
-  it('v3 残缺 config（缺 sources/ai）也透传：兜底留给 merge DEFAULT + sanitize', () => {
+  it('v3 残缺 config（缺 sources/ai）也透传：兜底留给 merge DEFAULT + sanitize（R6-W1 channels 除外——normalize 保证非空）', () => {
     const out = migrateConfigEnvelope({ schemaVersion: MIGRATOR_TARGET_VERSION, config: { pollIntervalSec: 30 } })
-    expect(out).toEqual({ pollIntervalSec: 30 } as ReturnType<typeof migrateConfigEnvelope>)
+    expect(out).toEqual({
+      pollIntervalSec: 30,
+      // 无 channels 无旧 telegram → 默认空凭据 telegram 通道（对齐 DEFAULT）
+      channels: DEFAULT_APP_CONFIG.channels
+    } as ReturnType<typeof migrateConfigEnvelope>)
   })
 
   it('垃圾输入抛 Error：非对象 / 缺 config / 未知 schemaVersion', () => {
@@ -189,5 +214,66 @@ describe('migrateConfigEnvelope', () => {
     for (const g of garbage) {
       expect(() => migrateConfigEnvelope(g)).toThrow(Error)
     }
+  })
+})
+
+describe('normalizeLegacyChannels（R6-W1 盘上读兼容，DEC-9）', () => {
+  /** 旧 v3 盘上 config 形状：telegram 段仍在、无 channels/notify/routing */
+  type PreR6Input = Record<string, unknown>
+
+  it('旧 v3 带 telegram（无 channels）→ 合成 channels[0]（id=telegram、enabled、凭据 trim）', () => {
+    const legacy: PreR6Input = {
+      pollIntervalSec: 45,
+      telegram: { botToken: ' 111:abc ', chatId: ' -100200 ' }
+    }
+    const out = normalizeLegacyChannels(legacy as never)
+    expect(out.channels).toEqual([synthesizedChannel('111:abc', '-100200')])
+  })
+
+  it('无 telegram 无 channels → 默认空凭据 telegram 通道（对齐 DEFAULT.channels）', () => {
+    const out = normalizeLegacyChannels({ pollIntervalSec: 45 } as never)
+    expect(out.channels).toEqual(DEFAULT_APP_CONFIG.channels)
+    // 旧 telegram 键为空对象（两者都没有的边角）同样落默认
+    const out2 = normalizeLegacyChannels({ telegram: {} } as never)
+    expect(out2.channels).toEqual(DEFAULT_APP_CONFIG.channels)
+  })
+
+  it('已有 channels → 原样保留（忽略残留 telegram 键，双轨否决）', () => {
+    const channels: ChannelConfig[] = [
+      { id: 'tg-main', type: 'telegram', enabled: true, botToken: 'new', chatId: 'c1' },
+      { id: 'my-bark', type: 'bark', enabled: false, deviceKey: 'k' }
+    ]
+    const out = normalizeLegacyChannels({
+      channels,
+      telegram: { botToken: 'stale-old-token', chatId: 'old' }
+    } as never)
+    expect(out.channels).toEqual(channels)
+    expect(out.channels[0]).not.toBe(channels[0]) // 项是新建的：不与入参共享引用
+  })
+
+  it('任一凭据非空即触发合成（半截凭据也迁——交给 configured 判定拦）', () => {
+    const out = normalizeLegacyChannels({ telegram: { botToken: '', chatId: '-100200' } } as never)
+    expect(out.channels).toEqual([synthesizedChannel('', '-100200')])
+  })
+
+  it('channels 非数组（垃圾）→ 视为缺失，走 telegram/默认路径', () => {
+    const out = normalizeLegacyChannels({
+      channels: 'garbage',
+      telegram: { botToken: 't', chatId: 'c' }
+    } as never)
+    expect(out.channels).toEqual([synthesizedChannel('t', 'c')])
+  })
+
+  it('旧 v3 信封整体迁移：telegram → channels 合成（load 路径端到端）', () => {
+    const out = migrateConfigEnvelope({
+      schemaVersion: MIGRATOR_TARGET_VERSION,
+      config: {
+        pollIntervalSec: 45,
+        includeKeywords: ['vps'],
+        telegram: { botToken: '111:abc', chatId: '-100200' }
+      }
+    })
+    expect(out.channels).toEqual([synthesizedChannel('111:abc', '-100200')])
+    expect(out.includeKeywords).toEqual(['vps'])
   })
 })

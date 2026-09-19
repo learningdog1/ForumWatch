@@ -19,13 +19,17 @@ import {
   DEFAULT_APP_CONFIG,
   type AppConfig,
   type AiConfig,
+  type ChannelConfig,
   type MatchMode,
   type NodeseekSourceConfig,
+  type NotifyConfig,
   type PriceCurrency,
   type PriceCycle,
   type PriceRuleConfig,
   type ProxyScope,
   type RssSourceConfig,
+  type RoutingRule,
+  type RoutingWhen,
   type SourceConfig,
   type SourceFilters,
   type V2exSourceConfig
@@ -59,8 +63,20 @@ const SOURCE_FILTERS_MAX_ITEMS = 100
 const PRICE_RULES_MAX_ITEMS = 20
 /** 单条价格规则 keywords 的条数上限（超出截断） */
 const PRICE_RULE_KEYWORDS_MAX_ITEMS = 20
+/** 推送通道条数上限（第六轮 R6-W1；超出截断） */
+const CHANNELS_MAX_ITEMS = 8
+/** 路由规则条数上限（第六轮 R6-W1；超出截断） */
+const ROUTING_RULES_MAX_ITEMS = 20
+/** digest 间隔非法（非数字 / NaN / Infinity）时的回退值（分钟） */
+const DEFAULT_DIGEST_INTERVAL_MIN = 15
+/** 免打扰时段缺省回退（第六轮；与 DEFAULT_APP_CONFIG.notify.quietHours 对齐） */
+const DEFAULT_QUIET_START_HHMM = '23:00'
+const DEFAULT_QUIET_END_HHMM = '08:00'
 const PRICE_CYCLES: readonly PriceCycle[] = ['yearly', 'monthly', 'any']
 const PRICE_CURRENCIES: readonly PriceCurrency[] = ['CNY', 'USD', 'any']
+const NOTIFY_MODES: readonly NotifyConfig['mode'][] = ['instant', 'digest']
+/** routing.when.matchedBy 的合法枚举（与 HitRecord.matchedBy 同口径） */
+const MATCHED_BY_VALUES = ['literal', 'semantic', 'rule'] as const
 /** similarity.threshold 非法（非数字 / NaN / Infinity）时的回退值 */
 const DEFAULT_SIMILARITY_THRESHOLD = 0.72
 
@@ -77,7 +93,21 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.72
  * - `pollIntervalSec`：非数字/NaN/Infinity → 60；否则钳到 ≥15。
  * - `proxyUrl`：trim；非空时必须以 `http://` `https://` `socks5://` `socks5h://` 开头（忽略大小写），否则置 ''。
  * - `proxyScope`：只认 'all' | 'telegram-only'，非法回退 'telegram-only'。
- * - `telegram.botToken` / `telegram.chatId`：trim。
+ * - `channels`（第六轮 R6-W1，见 sanitizeChannels）：非数组 → 默认单项 telegram；
+ *   逐项按 type 分派重建（telegram: token/chatId trim，空凭据合法=未配置态；
+ *   bark: deviceKey trim、serverUrl 非 http(s) 弃字段；ntfy: topic trim 且非空
+ *   否则整项弃、serverUrl 同 bark；webhook: url 必须合法 http(s) URL 否则整项弃、
+ *   secret trim 空不落键）；enabled 布尔化；id slug 化去重（缺 id 按类型派生，
+ *   重复加 -2）；未知 type / 非对象整项弃；**列表恒至少保留一项**（全弃回默认
+ *   telegram 项）；上限 8 条。旧顶层 `telegram` 键**不在白名单**——写路径只写
+ *   新形状（读侧兼容由 migrations.normalizeLegacyChannels 负责）。
+ * - `notify`（第六轮，见 sanitizeNotify）：mode 只认 'instant'|'digest' 非法回
+ *   'instant'；digestIntervalMin 非法回 15、钳 [1,120]；quietHours.enabled 布尔化、
+ *   startHHMM/endHHMM 格式非法分别回 '23:00'/'08:00'（复用 timeHHMM 校验口径）。
+ * - `routing`（第六轮，见 sanitizeRouting）：非数组 → []（空=不路由，合法状态）；
+ *   上限 20 条；when.sourceId 悬挂（不在 sources）剔字段、matchedBy 枚举过滤
+ *   （清洗后空不落键）、ruleId 悬挂（不在 priceRules）剔字段；when 清洗后全空
+ *   → 整条弃；channelIds 只留存在的通道 id（过滤后空 → 整条弃）；id slug 化去重。
  * - `sources`（v3 判别联合，见 sanitizeSources）：非数组/空 → 默认单项 nodeseek；
  *   nodeseek/v2ex 项 id 规范 slug（非法字符替换 '-'，空则丢弃）、enabled 布尔化、
  *   filters 走 sanitizeFilters；rss 项同上且 **url 必须是合法 http(s) URL（能
@@ -101,20 +131,22 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.72
  */
 export function sanitizeConfig(cfg: AppConfig): AppConfig {
   const src = (typeof cfg === 'object' && cfg !== null ? cfg : {}) as Partial<AppConfig>
+  const sources = sanitizeSources(src.sources)
+  const priceRules = sanitizePriceRules(src.priceRules)
+  const channels = sanitizeChannels(src.channels)
   return {
     includeKeywords: sanitizeKeywordList(src.includeKeywords),
     excludeKeywords: sanitizeKeywordList(src.excludeKeywords),
     pollIntervalSec: sanitizePollIntervalSec(src.pollIntervalSec),
     proxyUrl: sanitizeProxyUrl(src.proxyUrl),
     proxyScope: sanitizeProxyScope(src.proxyScope),
-    telegram: {
-      botToken: sanitizeToken(src.telegram?.botToken),
-      chatId: sanitizeToken(src.telegram?.chatId)
-    },
+    channels,
+    notify: sanitizeNotify(src.notify),
+    routing: sanitizeRouting(src.routing, channels, sources, priceRules),
     notifyEnabled: src.notifyEnabled === true,
     launchAtLogin: src.launchAtLogin === true,
-    sources: sanitizeSources(src.sources),
-    priceRules: sanitizePriceRules(src.priceRules),
+    sources,
+    priceRules,
     similarity: sanitizeSimilarity(src.similarity),
     ai: sanitizeAi(src.ai)
   }
@@ -172,9 +204,10 @@ export class ConfigStore {
   }
 
   /**
-   * 浅合并更新：顶层字段直接覆盖；`telegram` / `sources` / `ai` 是嵌套对象与数组，
-   * 传入即**整体替换**（想只改 token 就得把 chatId 一起带上）。合并后过 sanitize
-   * 再落盘。
+   * 浅合并更新：顶层字段直接覆盖；`channels` / `sources` / `ai` 等嵌套对象与
+   * 数组传入即**整体替换**（想只改 telegram token 就得把整份 channels 带上）。
+   * 合并后过 sanitize 再落盘（盘上残留的旧顶层 `telegram` 键在 sanitize 重建时
+   * 被剔除——写路径只写新形状）。
    * @returns 落盘后的新配置（sanitize 之后的生效值）
    */
   update(patch: Partial<AppConfig>): AppConfig {
@@ -203,7 +236,8 @@ export class ConfigStore {
     } catch {
       return this.backupCorruptAndDefault(raw)
     }
-    // v1/v2 信封在这里沿迁移链升到 v3；形状不对（非对象/缺 config/未知版本）抛错 → 按损坏处理
+    // v1/v2/v3 信封在这里沿迁移链升到 v3（链尾含 R6-W1 的旧 telegram → channels
+    // 读兼容映射）；形状不对（非对象/缺 config/未知版本）抛错 → 按损坏处理
     let migrated: AppConfig
     try {
       migrated = migrateConfigEnvelope(parsed)
@@ -212,11 +246,10 @@ export class ConfigStore {
     }
 
     const defaults = structuredClone(DEFAULT_APP_CONFIG)
-    return sanitizeConfig({
-      ...defaults,
-      ...migrated,
-      telegram: { ...defaults.telegram, ...(migrated.telegram ?? {}) }
-    })
+    // migrated.channels 由迁移链保证非空；notify/routing 缺失（旧盘）由 defaults
+    // 兜底。盘上残留的旧顶层 telegram 键（迁移链读兼容的输入侧）在 sanitize
+    // 重建对象时自然消失——写路径只写新形状（DEC-9）。
+    return sanitizeConfig({ ...defaults, ...migrated })
   }
 
   private backupCorruptAndDefault(content: string): AppConfig {
@@ -266,7 +299,8 @@ function sanitizeProxyScope(value: ProxyScope | undefined): ProxyScope {
   return PROXY_SCOPES.includes(value as ProxyScope) ? (value as ProxyScope) : 'telegram-only'
 }
 
-function sanitizeToken(value: string | undefined): string {
+/** 字符串字段清洗：非字符串（含 unknown 盘上垃圾）→ ''，否则 trim */
+function sanitizeToken(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
@@ -358,6 +392,17 @@ function httpUrlHost(url: string): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * 可选 http(s) URL 字段清洗（第六轮：bark/ntfy 的 serverUrl）：非字符串/非 http(s)
+ * /解析失败 → undefined（**弃字段**，不弃项——调用方以 undefined = 用服务端默认）；
+ * 合法返回 trim 后的串。
+ */
+function sanitizeHttpUrlField(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const url = value.trim()
+  return httpUrlHost(url) !== null ? url : undefined
 }
 
 /**
@@ -464,6 +509,202 @@ function sanitizePriceRules(list: PriceRuleConfig[] | undefined): PriceRuleConfi
   return out
 }
 
+/** sanitize 视角下的原始 channels 项（未知数据，逐字段判型后再组装） */
+type RawChannelItem = {
+  id?: unknown
+  type?: unknown
+  enabled?: unknown
+  botToken?: unknown
+  chatId?: unknown
+  deviceKey?: unknown
+  serverUrl?: unknown
+  topic?: unknown
+  url?: unknown
+  secret?: unknown
+}
+
+/**
+ * 推送通道列表清洗（第六轮 R6-W1 契约，见 types.ts ChannelConfig）：
+ * - 非数组 → 默认单项 telegram（DEFAULT.channels）。
+ * - 逐项按 type 分派重建（**每个字段都必须在重建对象里**，坑4 同款）：
+ *   - telegram：botToken/chatId trim；**空凭据合法**（= 未配置态，默认配置本身
+ *     就是空凭据 telegram 项，不能弃）；
+ *   - bark：deviceKey trim（空=未配置态，保留）；serverUrl 非 http(s) **弃字段**
+ *     （缺省 = W2 发送端用官方 https://api.day.app）；
+ *   - ntfy：topic trim 且**非空**（空 topic 整项弃——没有可推送的目的地）；
+ *     serverUrl 同 bark（缺省 = W2 用 https://ntfy.sh）；
+ *   - webhook：url 必须是合法 http(s) URL（能 new URL 且有 host），否则**整项弃**；
+ *     secret trim、空不落键。
+ * - enabled 布尔化（`=== true`）；未知 type / 非对象整项弃。
+ * - id：slug 化（复用 SOURCE_ID_ILLEGAL_RE 口径），空则按类型派生默认 id
+ *   （telegram/bark/ntfy/webhook），仍冲突则追加 `-2`/`-3`…；被弃项不占 id。
+ * - **列表恒至少保留一项**：全部项被弃 → 回默认 telegram 项（与 sanitizeSources
+ *   "绝不落空列表"同一精神——空通道列表会让 configured 判定永久悬空）。
+ * - 上限 8 条（超出截断，按清洗后顺序）。
+ */
+function sanitizeChannels(list: ChannelConfig[] | undefined): ChannelConfig[] {
+  if (!Array.isArray(list)) return structuredClone(DEFAULT_APP_CONFIG.channels)
+  const out: ChannelConfig[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (out.length >= CHANNELS_MAX_ITEMS) break
+    if (typeof item !== 'object' || item === null) continue
+    const raw = item as RawChannelItem
+    const enabled = raw.enabled === true
+
+    let clean: ChannelConfig
+    if (raw.type === 'telegram') {
+      clean = {
+        id: '',
+        type: 'telegram',
+        enabled,
+        botToken: sanitizeToken(raw.botToken),
+        chatId: sanitizeToken(raw.chatId)
+      }
+    } else if (raw.type === 'bark') {
+      clean = { id: '', type: 'bark', enabled, deviceKey: sanitizeToken(raw.deviceKey) }
+      const serverUrl = sanitizeHttpUrlField(raw.serverUrl)
+      if (serverUrl !== undefined) clean.serverUrl = serverUrl
+    } else if (raw.type === 'ntfy') {
+      const topic = sanitizeToken(raw.topic)
+      if (topic === '') continue // trim+非空：无可推送目的地，整项弃
+      clean = { id: '', type: 'ntfy', enabled, topic }
+      const serverUrl = sanitizeHttpUrlField(raw.serverUrl)
+      if (serverUrl !== undefined) clean.serverUrl = serverUrl
+    } else if (raw.type === 'webhook') {
+      const url = typeof raw.url === 'string' ? raw.url.trim() : ''
+      if (httpUrlHost(url) === null) continue // 整项弃
+      clean = { id: '', type: 'webhook', enabled, url }
+      const secret = sanitizeToken(raw.secret)
+      if (secret !== '') clean.secret = secret
+    } else {
+      continue // 未知 type：整项弃
+    }
+
+    // id：slug 化，空则按类型派生；冲突追加 -2/-3…（对齐全列表去重语义）
+    const base = typeof raw.id === 'string' && slugifySourceId(raw.id) !== ''
+      ? slugifySourceId(raw.id)
+      : raw.type
+    let id = base
+    let suffix = 2
+    while (seen.has(id)) {
+      id = `${base}-${suffix}`
+      suffix++
+    }
+    seen.add(id)
+    clean.id = id
+    out.push(clean)
+  }
+  return out.length > 0 ? out : structuredClone(DEFAULT_APP_CONFIG.channels)
+}
+
+/**
+ * 推送策略清洗（第六轮契约；digest/免打扰由 W1-queue 消费，当前仅落契约）：
+ * mode 枚举非法回 'instant'；digestIntervalMin 非法回 15、钳到 [1,120]；
+ * quietHours.enabled 布尔化，startHHMM/endHHMM 格式非法（复用 timeHHMM 口径）
+ * 分别回 '23:00' / '08:00'。
+ */
+function sanitizeNotify(notify: AppConfig['notify'] | undefined): AppConfig['notify'] {
+  const raw =
+    typeof notify === 'object' && notify !== null
+      ? (notify as {
+          mode?: unknown
+          digestIntervalMin?: unknown
+          quietHours?: { enabled?: unknown; startHHMM?: unknown; endHHMM?: unknown }
+        })
+      : {}
+  const qh =
+    typeof raw.quietHours === 'object' && raw.quietHours !== null ? raw.quietHours : {}
+  return {
+    mode: NOTIFY_MODES.includes(raw.mode as NotifyConfig['mode'])
+      ? (raw.mode as NotifyConfig['mode'])
+      : 'instant',
+    digestIntervalMin: sanitizeDigestIntervalMin(raw.digestIntervalMin),
+    quietHours: {
+      enabled: qh.enabled === true,
+      startHHMM: sanitizeTimeHHMM(qh.startHHMM as string | undefined, DEFAULT_QUIET_START_HHMM),
+      endHHMM: sanitizeTimeHHMM(qh.endHHMM as string | undefined, DEFAULT_QUIET_END_HHMM)
+    }
+  }
+}
+
+/** digest 间隔清洗：非法（非数字 / NaN / Infinity）回 15，否则钳到 [1,120] 分钟 */
+function sanitizeDigestIntervalMin(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_DIGEST_INTERVAL_MIN
+  return Math.min(120, Math.max(1, value))
+}
+
+/** sanitize 视角下的原始 routing 项（未知数据，逐字段判型后再组装） */
+type RawRoutingItem = {
+  id?: unknown
+  when?: unknown
+  channelIds?: unknown
+}
+
+/**
+ * 路由规则清洗（第六轮契约，W3 router 消费；DEC-7：悬挂引用一律剔除）：
+ * - 非数组 → []（空 = 不路由，合法状态，不回默认）。
+ * - 整条非对象 / id 非字符串 / id slug 化后为空 → 整条丢弃；slug 后按 id 去重。
+ * - `when` 逐字段清洗（DEC-7 修正：**剔除悬挂的条件字段**而非整条弃）：
+ *   sourceId 不在 sources → 剔字段；matchedBy 枚举过滤（清洗后空数组不落键）；
+ *   ruleId 不在 priceRules → 剔字段。when 清洗后**全空** → 整条弃（没有条件
+ *   的路由无法判定，语义悬空）。
+ * - channelIds 只保留存在于 channels 的 id（顺序保留、去重）；过滤后空 → 整条弃。
+ * - 列表上限 20 条（超出截断）。
+ */
+function sanitizeRouting(
+  list: RoutingRule[] | undefined,
+  channels: ChannelConfig[],
+  sources: SourceConfig[],
+  priceRules: PriceRuleConfig[]
+): RoutingRule[] {
+  if (!Array.isArray(list)) return []
+  const channelIds = new Set(channels.map((c) => c.id))
+  const sourceIds = new Set(sources.map((s) => s.id))
+  const ruleIds = new Set(priceRules.map((r) => r.id))
+  const out: RoutingRule[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (out.length >= ROUTING_RULES_MAX_ITEMS) break
+    if (typeof item !== 'object' || item === null) continue
+    const raw = item as RawRoutingItem
+    if (typeof raw.id !== 'string') continue
+    const id = slugifySourceId(raw.id)
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+
+    const w =
+      typeof raw.when === 'object' && raw.when !== null
+        ? (raw.when as { sourceId?: unknown; matchedBy?: unknown; ruleId?: unknown })
+        : {}
+    const when: RoutingWhen = {}
+    if (typeof w.sourceId === 'string' && sourceIds.has(w.sourceId)) when.sourceId = w.sourceId
+    const matchedBy = Array.isArray(w.matchedBy)
+      ? w.matchedBy.filter((m): m is (typeof MATCHED_BY_VALUES)[number] =>
+          MATCHED_BY_VALUES.includes(m as (typeof MATCHED_BY_VALUES)[number])
+        )
+      : []
+    if (matchedBy.length > 0) when.matchedBy = matchedBy
+    if (typeof w.ruleId === 'string' && ruleIds.has(w.ruleId)) when.ruleId = w.ruleId
+    if (when.sourceId === undefined && when.matchedBy === undefined && when.ruleId === undefined) {
+      continue // when 全空：无法判定的路由，整条弃
+    }
+
+    const targets: string[] = []
+    if (Array.isArray(raw.channelIds)) {
+      for (const cid of raw.channelIds) {
+        if (typeof cid === 'string' && channelIds.has(cid) && !targets.includes(cid)) {
+          targets.push(cid)
+        }
+      }
+    }
+    if (targets.length === 0) continue // 目标全悬挂：整条弃
+
+    out.push({ id, when, channelIds: targets })
+  }
+  return out
+}
+
 /** 相似帖降噪清洗（第五轮）：enabled **默认开**（`!== false`，与 ai.commentary.enabled
  * 同方向——旧配置缺失该字段时不能静默关掉降噪）；threshold 非法回 0.72，否则钳到
  * [0,1] 并保留两位小数。 */
@@ -546,12 +787,17 @@ function sanitizeInterests(list: string[] | undefined): string[] {
   return out
 }
 
-function sanitizeTimeHHMM(value: string | undefined): string {
-  if (typeof value !== 'string' || !TIME_HHMM_RE.test(value)) return DEFAULT_REPORT_TIME_HHMM
+/**
+ * 'HH:MM' 清洗：两位时(0-23):两位分(0-59)，非法（含缺失/非字符串）回 fallback。
+ * 第六轮起带 fallback 参数：ai.dailyReport.timeHHMM 用 '22:00'（既有口径），
+ * notify.quietHours 用 '23:00'/'08:00'（第六轮默认）。
+ */
+function sanitizeTimeHHMM(value: string | undefined, fallback = DEFAULT_REPORT_TIME_HHMM): string {
+  if (typeof value !== 'string' || !TIME_HHMM_RE.test(value)) return fallback
   const hh = Number(value.slice(0, 2))
   const mm = Number(value.slice(3, 5))
   if (!Number.isInteger(hh) || hh > 23 || !Number.isInteger(mm) || mm > 59) {
-    return DEFAULT_REPORT_TIME_HHMM
+    return fallback
   }
   return value
 }
