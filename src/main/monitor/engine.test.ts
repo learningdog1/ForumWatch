@@ -22,6 +22,7 @@ import type { SemanticEvaluator, SemanticVerdict } from '../ai/evaluator'
 import { CommentGenerator } from '../ai/commentary'
 import type { ChatRequest } from '../ai/provider'
 import { TelegramError } from '../notify/telegram'
+import type { HitMessageInput } from '../notify/types'
 import { createLogger, type Logger } from '../logger'
 import {
   DEFAULT_APP_CONFIG,
@@ -70,6 +71,7 @@ interface Harness {
   scheduler: PollScheduler
   fetchLatest: Mock
   sendHit: Mock
+  sendRaw: Mock
   sendTest: Mock
   seen: FileSeenStore
   state: FileEngineState
@@ -109,7 +111,7 @@ function build(
     ...structuredClone(DEFAULT_APP_CONFIG),
     includeKeywords: ['羊毛'],
     excludeKeywords: ['广告'],
-    telegram: { botToken: 'T', chatId: 'C' },
+    channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'T', chatId: 'C' }],
     ...opts.config
   }
 
@@ -120,7 +122,8 @@ function build(
   state.load()
   opts.preSeed?.(seen, state)
 
-  const sendHit = vi.fn(async () => {})
+  const sendHit = vi.fn(async (_input: unknown) => {})
+  const sendRaw = vi.fn(async (_text: string) => {})
   const sendTest = vi.fn(async () => {})
   const onHit = vi.fn()
   const onStatus = vi.fn()
@@ -146,7 +149,7 @@ function build(
     getSources: () => sources, // 访问器：热更新语义（D3）
     seen,
     state,
-    notifier: { sendHit, sendTest },
+    notifier: { id: 'telegram', sendHit, sendRaw, sendTest },
     getConfig: opts.getConfig ?? (() => config),
     scheduler,
     logger,
@@ -172,6 +175,7 @@ function build(
     scheduler,
     fetchLatest,
     sendHit,
+    sendRaw,
     sendTest,
     seen,
     state,
@@ -272,7 +276,7 @@ describe('首启基线（防通知风暴）', () => {
       getSources: () => [{ id: 'nodeseek', name: 'fake', fetchLatest: h.fetchLatest }],
       seen: seen2,
       state: h.state,
-      notifier: { sendHit: h.sendHit, sendTest: h.sendTest },
+      notifier: { id: 'telegram', sendHit: h.sendHit, sendRaw: h.sendRaw, sendTest: h.sendTest },
       getConfig: () => h.config,
       scheduler: h.scheduler,
       logger: h.logger
@@ -319,8 +323,8 @@ describe('正常轮', () => {
     await h.engine.pollOnce()
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0][0].id).toBe('5')
-    expect(h.sendHit.mock.calls[0][1]).toEqual(['羊毛'])
+    expect(h.sendHit.mock.calls[0][0].topic.id).toBe('5')
+    expect(h.sendHit.mock.calls[0][0].matchedKeywords).toEqual(['羊毛'])
 
     // 置顶与被排除的都只入去重集
     expect(h.seen.has('nodeseek:4')).toBe(true)
@@ -354,7 +358,7 @@ describe('正常轮', () => {
 
     expect(h.onHit.mock.calls.map((c) => (c[0] as { topic: Topic }).topic.id)).toEqual(['8', '9'])
     expect(h.engine.getRecentHits().map((x) => x.topic.id)).toEqual(['8', '9'])
-    expect(h.sendHit.mock.calls.map((c) => (c[0] as Topic).id)).toEqual(['8', '9'])
+    expect(h.sendHit.mock.calls.map((c) => (c[0].topic as Topic).id)).toEqual(['8', '9'])
   })
 
   it('单个推送失败不中断本轮：后续 topic 仍处理，HitRecord 记 notifyError', async () => {
@@ -405,7 +409,7 @@ describe('正常轮', () => {
   it('telegram 未配置：同静音态，不调用 sendHit', async () => {
     const h = build({
       impl: async () => [topic('1')],
-      config: { telegram: { botToken: '', chatId: '' } }
+      config: { channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: '', chatId: '' }] }
     })
     await h.engine.pollOnce()
     h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
@@ -414,6 +418,76 @@ describe('正常轮', () => {
     expect(h.sendHit).not.toHaveBeenCalled()
     expect(h.engine.getRecentHits()[0]).toMatchObject({ notifiedAt: null, notifyError: null })
     expect(h.engine.getStatus().totalHits).toBe(1)
+  })
+
+  // ---- R6-W1：configured 判定通道化（isChannelReady 单一事实源，本轮仅 telegram） ----
+
+  it('channels 空列表 = 未配置态：同静音，不调用 sendHit（sanitize 层不会产出，防手工配置）', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { channels: [] }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.engine.getRecentHits()[0]).toMatchObject({ notifiedAt: null, notifyError: null })
+    // 与静音同待遇：入集不重试
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+  })
+
+  it('enabled=false 的凭据齐备通道不算已配置；enabled=true 且凭据齐备才算（等价旧判定）', async () => {
+    // 注意：四个子用例共用同一 tmpdir（seen.json/state.json 同文件），topic id
+    // 各自错开防跨 harness 污染（baselineDone/seen 会串）。
+    // 通道被停用（凭据仍在）→ 未配置态：静音
+    const h1 = build({
+      impl: async () => [topic('1')],
+      config: { channels: [{ id: 'telegram', type: 'telegram', enabled: false, botToken: 'T', chatId: 'C' }] }
+    })
+    await h1.engine.pollOnce()
+    h1.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h1.engine.pollOnce()
+    expect(h1.sendHit).not.toHaveBeenCalled()
+
+    // 半截凭据（只有 token）→ 同样不算齐备
+    const h2 = build({
+      impl: async () => [topic('3')],
+      config: { channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'T', chatId: '' }] }
+    })
+    await h2.engine.pollOnce()
+    h2.fetchLatest.mockImplementation(async () => [topic('4', { title: '羊毛' }), topic('3')])
+    await h2.engine.pollOnce()
+    expect(h2.sendHit).not.toHaveBeenCalled()
+
+    // R6-W2 起 bark 已实现（IMPLEMENTED_CHANNEL_TYPES）：enabled 且凭据齐备 → 已配置，正常推送
+    const h3 = build({
+      impl: async () => [topic('5')],
+      config: {
+        channels: [{ id: 'my-bark', type: 'bark', enabled: true, deviceKey: 'k' } as never]
+      }
+    })
+    await h3.engine.pollOnce()
+    h3.fetchLatest.mockImplementation(async () => [topic('6', { title: '羊毛' }), topic('5')])
+    await h3.engine.pollOnce()
+    expect(h3.sendHit).toHaveBeenCalledTimes(1)
+    expect(h3.engine.getRecentHits()[0].notifiedAt).not.toBeNull()
+
+    // 任一 enabled 且凭据齐备的 telegram 通道在列表中（即使前面有未就绪项）→ 推送
+    const h4 = build({
+      impl: async () => [topic('7')],
+      config: {
+        channels: [
+          { id: 'telegram', type: 'telegram', enabled: true, botToken: '', chatId: '' },
+          { id: 'tg-2', type: 'telegram', enabled: true, botToken: 'T2', chatId: 'C2' }
+        ]
+      }
+    })
+    await h4.engine.pollOnce()
+    h4.fetchLatest.mockImplementation(async () => [topic('8', { title: '羊毛' }), topic('7')])
+    await h4.engine.pollOnce()
+    expect(h4.sendHit).toHaveBeenCalledTimes(1)
+    expect(h4.engine.getRecentHits()[0].notifiedAt).not.toBeNull()
   })
 
   it('getRecentHits 环形 200 条：第 201 条起淘汰最老', async () => {
@@ -592,7 +666,7 @@ describe('失败与健康流转', () => {
       ...structuredClone(DEFAULT_APP_CONFIG),
       includeKeywords: ['羊毛'],
       pollIntervalSec: 30,
-      telegram: { botToken: 'T', chatId: 'C' }
+      channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'T', chatId: 'C' }]
     }
     let broken = false
     const h = build({
@@ -695,7 +769,7 @@ describe('生命周期与 desired 状态', () => {
       getSources: () => [{ id: 'nodeseek', name: 'fake', fetchLatest: async () => [] as Topic[] }],
       seen: h.seen,
       state: state2,
-      notifier: { sendHit: h.sendHit, sendTest: h.sendTest },
+      notifier: { id: 'telegram', sendHit: h.sendHit, sendRaw: h.sendRaw, sendTest: h.sendTest },
       getConfig: () => h.config,
       scheduler: h.scheduler,
       logger: createLogger()
@@ -740,7 +814,7 @@ describe('多来源（D3：单引擎循环多 source）', () => {
     await h.engine.pollOnce()
     expect(fetchA).toHaveBeenCalledTimes(1) // 冷却中未被重试
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0][0]).toMatchObject({ id: 'b2', sourceId: 'forumB' })
+    expect(h.sendHit.mock.calls[0][0].topic).toMatchObject({ id: 'b2', sourceId: 'forumB' })
     expect(h.seen.has('forumB:b2')).toBe(true)
     expect(h.state.getFor('forumB').totalHits).toBe(1) // per-source 累计
 
@@ -798,7 +872,7 @@ describe('多来源（D3：单引擎循环多 source）', () => {
     fetchB.mockResolvedValue([topic('2', { title: '羊毛B2' })])
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.sendHit.mock.calls.map((c) => (c[0] as Topic).sourceId).sort()).toEqual(['aa', 'bb'])
+    expect(h.sendHit.mock.calls.map((c) => (c[0].topic as Topic).sourceId).sort()).toEqual(['aa', 'bb'])
     expect(h.seen.has('aa:2')).toBe(true)
     expect(h.seen.has('bb:2')).toBe(true)
     for (const x of h.engine.getRecentHits()) {
@@ -822,7 +896,7 @@ describe('多来源（D3：单引擎循环多 source）', () => {
     await h.engine.pollOnce()
     // A 已基线：a1 命中正常推送；B 未基线：整页（含会命中的 b1）只入集不推送
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0][0]).toMatchObject({ id: 'a1', sourceId: 'aa' })
+    expect(h.sendHit.mock.calls[0][0].topic).toMatchObject({ id: 'a1', sourceId: 'aa' })
     expect(h.seen.has('bb:b1')).toBe(true)
     expect(h.state.getFor('bb').baselineDone).toBe(true) // B 本轮完成基线
 
@@ -830,7 +904,7 @@ describe('多来源（D3：单引擎循环多 source）', () => {
     fetchB.mockResolvedValue([topic('b2', { title: '羊毛B2' })])
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.sendHit.mock.calls[1][0]).toMatchObject({ id: 'b2', sourceId: 'bb' })
+    expect(h.sendHit.mock.calls[1][0].topic).toMatchObject({ id: 'b2', sourceId: 'bb' })
   })
 
   it('全局 scheduler 间隔 = max(配置间隔, 最差 source 剩余退避)；全部健康回配置值', async () => {
@@ -936,7 +1010,7 @@ describe('语义评估管线（D4）', () => {
     expect(interestsArg).toEqual(['自建主机'])
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0][1]).toEqual([]) // semantic 命中不带关键词
+    expect(h.sendHit.mock.calls[0][0].matchedKeywords).toEqual([]) // semantic 命中不带关键词
     const hits = h.engine.getRecentHits()
     expect(hits[0]).toMatchObject({
       matchedBy: 'semantic',
@@ -1305,7 +1379,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
     // 第 2 轮：字面管线照旧重试（不走语义路径），成功后两表都清
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.sendHit.mock.calls[1]![1]).toEqual(['羊毛']) // 仍是字面命中形态
+    expect(h.sendHit.mock.calls[1]![0].matchedKeywords).toEqual(['羊毛']) // 仍是字面命中形态
     const hits = h.engine.getRecentHits()
     expect(hits[1]).toMatchObject({ matchedBy: 'literal', matchedKeywords: ['羊毛'] })
     expect(h.seen.has('nodeseek:2')).toBe(true)
@@ -1396,7 +1470,7 @@ describe('语义置信度阈值（R5-P2b：ai.semanticThreshold）', () => {
     await h.engine.pollOnce()
 
     expect(h.sendHit).toHaveBeenCalledTimes(1) // 0.8 >= 0.7：过闸推送
-    expect(h.sendHit.mock.calls[0][1]).toEqual([])
+    expect(h.sendHit.mock.calls[0][0].matchedKeywords).toEqual([])
     expect(h.engine.getRecentHits()[0]).toMatchObject({
       matchedBy: 'semantic',
       semanticReason: '与自建主机相关',
@@ -1538,7 +1612,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     // 旧帖：入 seen、绝不推送/不进命中管线
     expect(h.seen.has('nodeseek:800')).toBe(true)
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('1003')
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('1003')
     expect(h.engine.getStatus().totalHits).toBe(1)
     // 阈值推进到本页 max；吞并有观测日志
     expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(1003)
@@ -1626,7 +1700,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     fetchLatest.mockImplementation(async () => [topic('150', { title: '羊毛' }), topic('100')])
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2) // 重试路径，而非静默入 seen
-    expect(h.sendHit.mock.calls[1]![0].id).toBe('150')
+    expect(h.sendHit.mock.calls[1]![0].topic.id).toBe('150')
     expect(h.seen.has('nodeseek:150')).toBe(true) // 重试成功后才入集
     expect(h.engine.getStatus().health).toBe('ok')
   })
@@ -1661,7 +1735,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     ])
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('937072')
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('937072')
     expect(h.seen.has('nodeseek:900000')).toBe(true)
   })
 
@@ -1783,7 +1857,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     ])
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.sendHit.mock.calls.map((c) => (c[0] as Topic).id).sort()).toEqual([
+    expect(h.sendHit.mock.calls.map((c) => (c[0].topic as Topic).id).sort()).toEqual([
       '9007199254740995',
       'zzz'
     ])
@@ -1811,7 +1885,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     fetchLatest.mockImplementation(async () => [topic('def', { title: '羊毛' }), topic('abc')])
     await h.engine.pollOnce() // 仍无 pageMax → def 照常推送（不被任何轮吞掉）
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('def')
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('def')
     expect(h.seen.has('nodeseek:def')).toBe(true)
   })
 
@@ -1841,7 +1915,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     await h.engine.pollOnce()
     // 未声明能力 → 不触发升级初始化轮，低 id 帖照常走管线（命中推送 / 未命中入集）
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('50')
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('50')
     expect(h.seen.has('nodeseek:40')).toBe(true)
     expect(h.state.getFor('nodeseek').maxSeenTopicId).toBeNull() // 阈值永不写入
     expect(h.logger.getRecent().some((e) => e.msg.includes('id threshold'))).toBe(false)
@@ -1902,9 +1976,9 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(gen.generate).toHaveBeenCalledTimes(1)
     expect(gen.generate.mock.calls[0]![0]).toMatchObject({ id: '2', sourceId: 'nodeseek' })
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('2')
-    expect(h.sendHit.mock.calls[0]![1]).toEqual(['羊毛'])
-    expect(h.sendHit.mock.calls[0]![2]).toBe('犀利点评') // 第三参
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('2')
+    expect(h.sendHit.mock.calls[0]![0].matchedKeywords).toEqual(['羊毛'])
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBe('犀利点评') // 第三参
     const hits = h.engine.getRecentHits()
     expect(hits[0].commentary).toBe('犀利点评')
     expect(hits[0].matchedBy).toBe('literal')
@@ -1939,7 +2013,7 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(evaluate).toHaveBeenCalledTimes(1)
     expect(gen.generate).toHaveBeenCalledTimes(1)
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![2]).toBe('语义锐评')
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBe('语义锐评')
     const hits = h.engine.getRecentHits()
     expect(hits[0]).toMatchObject({ matchedBy: 'semantic', semanticReason: '与自建主机相关' })
     expect(hits[0].commentary).toBe('语义锐评')
@@ -1959,7 +2033,7 @@ describe('AI 锐评集成（第三轮）', () => {
 
     expect(gen.generate).not.toHaveBeenCalled()
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull()
     expect(h.engine.getRecentHits()[0].commentary).toBeNull()
     expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 0, commentaryToday: 0 })
   })
@@ -1980,7 +2054,7 @@ describe('AI 锐评集成（第三轮）', () => {
 
     expect(gen.generate).not.toHaveBeenCalled()
     expect(h.sendHit).toHaveBeenCalledTimes(1) // 字面命中照常推送，只是无锐评
-    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull()
     expect(h.engine.getRecentHits()[0].commentary).toBeNull()
     expect(h.engine.getStatus().ai.commentaryToday).toBe(0)
   })
@@ -1999,7 +2073,7 @@ describe('AI 锐评集成（第三轮）', () => {
 
     expect(gen.generate).not.toHaveBeenCalled()
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull()
     expect(h.engine.getRecentHits()[0].commentary).toBeNull()
     expect(h.engine.getStatus().ai.callsToday).toBe(DAILY_AI_CALL_LIMIT) // 不再增长
   })
@@ -2034,8 +2108,8 @@ describe('AI 锐评集成（第三轮）', () => {
     // 锐评被静默降级：不打 LLM、无锐评推送，但命中本身照常推
     expect(gen.generate).not.toHaveBeenCalled()
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('3')
-    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('3')
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull()
     expect(h.engine.getRecentHits()[0].commentary).toBeNull()
     expect(h.engine.getStatus().ai).toMatchObject({
       callsToday: 101, // 语义评估 +1；锐评不再计数
@@ -2058,7 +2132,7 @@ describe('AI 锐评集成（第三轮）', () => {
     await h.engine.pollOnce()
 
     expect(gen.generate).toHaveBeenCalledTimes(2) // 新日锐评恢复（未被昨日计数卡死）
-    expect(h.sendHit.mock.calls[1]![2]).toBe('一句锐评')
+    expect(h.sendHit.mock.calls[1]![0].commentary).toBe('一句锐评')
     expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 1, commentaryToday: 1 }) // 清零后重新计数
   })
 
@@ -2079,7 +2153,7 @@ describe('AI 锐评集成（第三轮）', () => {
 
     expect(generateSpy).toHaveBeenCalledTimes(1)
     expect(chat).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![2]).toBe('原句锐评')
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBe('原句锐评')
     const failed = h.engine.getRecentHits()[0]
     expect(failed.commentary).toBe('原句锐评') // 失败轮 HitRecord 也带锐评
     expect(failed.notifiedAt).toBeNull()
@@ -2090,7 +2164,7 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(generateSpy).toHaveBeenCalledTimes(2)
     expect(chat).toHaveBeenCalledTimes(1) // 缓存生效：无第二次 LLM 调用
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.sendHit.mock.calls[1]![2]).toBe('原句锐评') // 仍带原锐评
+    expect(h.sendHit.mock.calls[1]![0].commentary).toBe('原句锐评') // 仍带原锐评
     const done = h.engine.getRecentHits()[1]
     expect(done.commentary).toBe('原句锐评')
     expect(done.notifiedAt).not.toBeNull()
@@ -2170,7 +2244,7 @@ describe('AI 锐评集成（第三轮）', () => {
     h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2) // processHit/sendHit 重试路径再次被调
-    expect(h.sendHit.mock.calls[1]![2]).toBe('原句锐评') // 命中的是缓存里的原句
+    expect(h.sendHit.mock.calls[1]![0].commentary).toBe('原句锐评') // 命中的是缓存里的原句
     expect(chat).toHaveBeenCalledTimes(1) // 关键断言：LLM 未被重打
     expect(h.seen.has('nodeseek:2')).toBe(true)
   })
@@ -2200,7 +2274,7 @@ describe('AI 锐评集成（第三轮）', () => {
     await h.engine.pollOnce()
     expect(chat).toHaveBeenCalledTimes(2)
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.sendHit.mock.calls[1]![2]).toBe('原句锐评')
+    expect(h.sendHit.mock.calls[1]![0].commentary).toBe('原句锐评')
   })
 
   it('F4：ai.commentaryLimit 随状态下发（锐评上限单一事实源，渲染层不硬编码）', async () => {
@@ -2218,7 +2292,7 @@ describe('AI 锐评集成（第三轮）', () => {
     await literalHitRound(h)
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![2]).toBeNull() // engine 统一传 string|null，不传 undefined
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull() // engine 统一传 string|null，不传 undefined
     const hits = h.engine.getRecentHits()
     expect(hits[0].commentary).toBeNull()
     expect('commentary' in hits[0]).toBe(true) // 新记录字段恒存在（值 null，非 undefined）
@@ -2235,7 +2309,7 @@ describe('AI 锐评集成（第三轮）', () => {
     })
     await literalHitRound(h1)
     expect(genNull.generate).toHaveBeenCalledTimes(1) // 调用即计数（返回 null 也计）
-    expect(h1.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h1.sendHit.mock.calls[0]![0].commentary).toBeNull()
     expect(h1.engine.getRecentHits()[0].commentary).toBeNull()
     expect(h1.engine.getStatus().ai).toMatchObject({ callsToday: 1, commentaryToday: 1 })
 
@@ -2275,7 +2349,7 @@ describe('per-source 过滤（R5-P2a 第 2 步：滤帖入 seen 不推送不评�
     await h.engine.pollOnce()
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('3')
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('3')
     expect(h.seen.has('nodeseek:2')).toBe(true) // 被滤帖只入 seen
     expect(h.onHit).toHaveBeenCalledTimes(1)
     expect(h.engine.getRecentHits()).toHaveLength(1)
@@ -2304,7 +2378,7 @@ describe('per-source 过滤（R5-P2a 第 2 步：滤帖入 seen 不推送不评�
     await h.engine.pollOnce()
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].id).toBe('4')
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('4')
     expect(h.seen.has('nodeseek:2')).toBe(true)
     expect(h.seen.has('nodeseek:3')).toBe(true)
   })
@@ -2343,7 +2417,7 @@ describe('per-source 过滤（R5-P2a 第 2 步：滤帖入 seen 不推送不评�
     h2.fetchLatest.mockImplementation(async () => [topic('3', { title: '羊毛again', author: 'spambot' }), topic('1')])
     await h2.engine.pollOnce()
     expect(h2.sendHit).toHaveBeenCalledTimes(1) // 不再过滤：照常命中
-    expect(h2.sendHit.mock.calls[0]![0].id).toBe('3')
+    expect(h2.sendHit.mock.calls[0]![0].topic.id).toBe('3')
   })
 })
 
@@ -2368,9 +2442,9 @@ describe('价格规则命中（R5-P2a 第 6 步：先于 literal、命中即得�
     await h.engine.pollOnce()
 
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![1]).toEqual([]) // 规则命中不带关键词
-    expect(h.sendHit.mock.calls[0]![2]).toBeNull() // commentary 恒 string|null
-    expect(h.sendHit.mock.calls[0]![3]).toBe('白菜月付') // 第 4 参 = 规则 label
+    expect(h.sendHit.mock.calls[0]![0].matchedKeywords).toEqual([]) // 规则命中不带关键词
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull() // commentary 恒 string|null
+    expect(h.sendHit.mock.calls[0]![0].matchedRule).toBe('白菜月付') // 第 4 参 = 规则 label
     const hits = h.engine.getRecentHits()
     expect(hits[0]).toMatchObject({
       matchedBy: 'rule',
@@ -2395,7 +2469,7 @@ describe('价格规则命中（R5-P2a 第 6 步：先于 literal、命中即得�
 
     const hits = h.engine.getRecentHits()
     expect(hits[0]).toMatchObject({ matchedBy: 'rule', matchedRule: '百元内年付', matchedKeywords: [] })
-    expect(h.sendHit.mock.calls[0]![3]).toBe('百元内年付')
+    expect(h.sendHit.mock.calls[0]![0].matchedRule).toBe('百元内年付')
     expect(h.sendHit).toHaveBeenCalledTimes(1)
   })
 
@@ -2421,7 +2495,7 @@ describe('价格规则命中（R5-P2a 第 6 步：先于 literal、命中即得�
     await h2.engine.pollOnce()
     expect(h2.engine.getRecentHits()[0]).toMatchObject({ matchedBy: 'literal', matchedKeywords: ['羊毛'] })
     expect(h2.engine.getRecentHits()[0].matchedRule).toBeNull()
-    expect(h2.sendHit.mock.calls[0]![3]).toBeNull()
+    expect(h2.sendHit.mock.calls[0]![0].matchedRule).toBeNull()
   })
 
   it('semantic-only 模式下规则仍生效（不受 matchMode 门控）：规则命中帖不进 AI 批', async () => {
@@ -2720,5 +2794,478 @@ describe('第 2 页自适应（R5-P2a / DEC-8 修正口径）', () => {
     await h.engine.pollOnce()
     expect(lastPages(h.fetchLatest)).toBe(1)
     expect(h.engine.getStatus().health).toBe('ok')
+  })
+})
+
+// ---- 免打扰时段 + 摘要模式（R6-W1q，DEC-11 挂起语义） ------------------------
+
+/** 观测引擎私有挂起队列尺寸（DEC-11；同 retryMapSize 的测试专用观测面先例） */
+function deferredQueueSize(engine: MonitorEngine): number {
+  return (engine as unknown as Record<string, Map<string, unknown>>).deferredHits!.size
+}
+
+/** 观测引擎私有相似窗尺寸（DEC-11 flush 入窗断言；同款测试专用观测面） */
+function similarityWindowSize(engine: MonitorEngine): number {
+  return (engine as unknown as Record<string, unknown[]>).pushedTitles!.length
+}
+
+/** quiet-hours 打开的完整 notify 覆盖段（默认 23:00-08:00，instant 模式） */
+function quietOn(startHHMM = '23:00', endHHMM = '08:00'): AppConfig['notify'] {
+  return { mode: 'instant', digestIntervalMin: 15, quietHours: { enabled: true, startHHMM, endHHMM } }
+}
+
+/** digest 模式的完整 notify 覆盖段 */
+function digestCfg(intervalMin = 15, quietEnabled = false): AppConfig['notify'] {
+  return {
+    mode: 'digest',
+    digestIntervalMin: intervalMin,
+    quietHours: { enabled: quietEnabled, startHHMM: '23:00', endHHMM: '08:00' }
+  }
+}
+
+describe('免打扰挂起（R6-W1q / DEC-11：quiet-hours defer + flush）', () => {
+  beforeEach(() => {
+    // 23:30（本地时区，窗内）；advanceMs 推进假时钟跨过窗尾
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0))
+  })
+
+  it('窗内命中 → 挂起：不入 seen / 无 HitRecord / 无 onHit / 不推 / 不入相似窗（坑6 三不动）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce() // 基线
+
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.onHit).not.toHaveBeenCalled()
+    expect(h.seen.has('nodeseek:2')).toBe(false) // 不入 seen：入了下轮会被当已处理吞掉
+    expect(h.engine.getRecentHits()).toHaveLength(0) // 不 recordHit：flush 前不产生记录
+    expect(h.engine.getStatus().totalHits).toBe(0)
+    expect(deferredQueueSize(h.engine)).toBe(1)
+    expect(similarityWindowSize(h.engine)).toBe(0) // 不入相似窗：没推过不算"已推"
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'info' && e.msg.includes('hit deferred (quiet-hours)'))
+    ).toBe(true)
+  })
+
+  it('窗尾过后首轮 flush：推送 + notifiedAt=冲刷时刻 + 入 seen + 入相似窗 + 计数（对齐即时路径三动作）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    advanceMs((8 * 60 + 31) * 60_000) // 23:30 → 次日 08:01（窗外）
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    const input = h.sendHit.mock.calls[0]![0] as {
+      topic: Topic
+      matchedKeywords: string[]
+      commentary: string | null
+    }
+    expect(input.topic.id).toBe('2')
+    expect(input.matchedKeywords).toEqual(['羊毛'])
+    expect(input.commentary).toBeNull()
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(deferredQueueSize(h.engine)).toBe(0)
+    expect(similarityWindowSize(h.engine)).toBe(1) // 成功入窗
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).toBe(new Date(2026, 8, 11, 8, 1, 0, 0).toISOString())
+    expect(hits[0]!.notifyError).toBeNull()
+    expect(hits[0]!.matchedBy).toBe('literal')
+    expect(h.engine.getStatus().totalHits).toBe(1)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+  })
+
+  it('挂起帖下轮被 unseen 链整帖跳过：不重新匹配（defer 日志仅一条）、不计数、不入 seen', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    await h.engine.pollOnce() // 第三轮（仍窗内，同页）
+    await h.engine.pollOnce() // 第四轮
+    const deferLogs = h.logger.getRecent().filter((e) => e.msg.includes('hit deferred'))
+    expect(deferLogs).toHaveLength(1) // 没有重新匹配 → 没有二次挂起日志
+    expect(deferredQueueSize(h.engine)).toBe(1)
+    expect(h.engine.getStatus().totalHits).toBe(0)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+  })
+
+  it('flush 失败重试：前两次留队只 warn；第 3 次落 notifyError 终态 + 入 seen + emit 一次', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    h.sendHit.mockRejectedValue(new Error('tg down'))
+    advanceMs((8 * 60 + 31) * 60_000) // 08:01：窗外，之后每轮都 due
+    await h.engine.pollOnce() // 尝试 1
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(deferredQueueSize(h.engine)).toBe(1)
+    expect(h.engine.getRecentHits()).toHaveLength(0)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    expect(h.onHit).not.toHaveBeenCalled()
+
+    await h.engine.pollOnce() // 尝试 2
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(deferredQueueSize(h.engine)).toBe(1)
+
+    await h.engine.pollOnce() // 尝试 3 → 终态
+    expect(h.sendHit).toHaveBeenCalledTimes(3)
+    expect(deferredQueueSize(h.engine)).toBe(0)
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 防重新匹配死循环
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).toBeNull()
+    expect(hits[0]!.notifyError).toBe('tg down')
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'error' && e.msg.includes('giving up'))
+    ).toBe(true)
+    // 终态后不再重试：再来一轮不触 sendHit、不产生新记录
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(3)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+  })
+
+  it('挂起超过 24h → 超时收口：notifyError=deferred timeout + 入 seen + 出队（仍在窗内也不推）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 23:30 挂起
+
+    advanceMs(24 * 3600 * 1000 + 60_000) // → 次日 23:31：仍窗内（flush 不 due），已超 24h
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).not.toHaveBeenCalled()
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).toBeNull()
+    expect(hits[0]!.notifyError).toBe('deferred timeout')
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(deferredQueueSize(h.engine)).toBe(0)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+  })
+
+  it('静音不走 defer：notifyEnabled=false + 窗内命中 → 立即静音终态（mute 语义不变）', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: quietOn(), notifyEnabled: false }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(deferredQueueSize(h.engine)).toBe(0) // 不挂起：静音是终态
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).toBeNull()
+    expect(hits[0]!.notifyError).toBeNull()
+  })
+
+  it('挂起期间热更新为静音 → flush 按静音终态收口（不推、不入窗、出队）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+
+    h.config.notifyEnabled = false // 热更新：静音
+    advanceMs((8 * 60 + 31) * 60_000) // 08:01
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(deferredQueueSize(h.engine)).toBe(0)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(similarityWindowSize(h.engine)).toBe(0)
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).toBeNull()
+    expect(hits[0]!.notifyError).toBeNull()
+  })
+
+  it('与 W3 旧帖阈值的交互：挂起帖不入 seen，下轮 id ≤ 阈值不被吞，flush 后正常推送', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100')] as Topic[])
+    const h = build({
+      sources: [{ id: 'nodeseek', name: 'NodeSeek', fetchLatest, creationOrderedIds: true }],
+      config: { notify: quietOn() }
+    })
+    await h.engine.pollOnce() // 基线：阈值 = 100
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(100)
+
+    fetchLatest.mockImplementation(async () => [topic('101', { title: '羊毛' }), topic('100')])
+    await h.engine.pollOnce() // 挂起（101 > 100 未被滤），阈值推进到 101
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(101)
+
+    await h.engine.pollOnce() // 下一轮：101 ≤ 阈值，但队列成员先被跳过（不入 seen）
+    expect(h.seen.has('nodeseek:101')).toBe(false)
+    expect(deferredQueueSize(h.engine)).toBe(1)
+
+    advanceMs((8 * 60 + 31) * 60_000) // 08:01 → flush
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:101')).toBe(true)
+  })
+
+  it('重启自愈：队列是内存态——窗内重启同帖重新匹配重新入队；窗外重启直接即时推送（不双发）', async () => {
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起；seen 无 nodeseek:2
+    expect(deferredQueueSize(h.engine)).toBe(1)
+
+    // "重启"：同一 seen/state 文件、同页数据的新引擎（旧实例连同内存队列一起消失）
+    const seen2 = new FileSeenStore(join(dir, 'seen.json'))
+    seen2.load()
+    const state2 = new FileEngineState(join(dir, 'state.json'))
+    state2.load()
+    const sendHit2 = vi.fn(async () => {})
+    let engine2!: MonitorEngine
+    engine2 = new MonitorEngine({
+      getSources: () => [{ id: 'nodeseek', name: 'NodeSeek', fetchLatest: h.fetchLatest }],
+      seen: seen2,
+      state: state2,
+      notifier: { id: 'telegram', sendHit: sendHit2, sendRaw: h.sendRaw, sendTest: h.sendTest },
+      getConfig: () => h.config,
+      scheduler: h.scheduler,
+      logger: h.logger
+    })
+
+    // 仍在窗内：重新匹配 → 重新入队（自愈路径一半）
+    await engine2.pollOnce()
+    expect(sendHit2).not.toHaveBeenCalled()
+    expect(deferredQueueSize(engine2)).toBe(1)
+    expect(seen2.has('nodeseek:2')).toBe(false)
+
+    // 窗外：flush 一次推送，无双发
+    advanceMs((8 * 60 + 31) * 60_000)
+    await engine2.pollOnce()
+    expect(sendHit2).toHaveBeenCalledTimes(1)
+    expect(seen2.has('nodeseek:2')).toBe(true)
+    expect(deferredQueueSize(engine2)).toBe(0)
+  })
+
+  it('instant + quietHours 关（默认配置）：深夜命中仍即时推送——与特性引入前完全一致', async () => {
+    const h = build({ impl: async () => [topic('1')] }) // 默认 notify：instant / quiet 关
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 23:30（本地），深夜 ≠ 静默：quiet 关即不参与判定
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(deferredQueueSize(h.engine)).toBe(0)
+    expect(h.engine.getRecentHits()[0]!.notifiedAt).not.toBeNull()
+  })
+})
+
+describe('digest 摘要模式（R6-W1q / DEC-11：攒批 + 批窗口计时器）', () => {
+  it('攒批合并：批内多次命中到点一次冲刷、按插入序；未到点不冲', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 10, 0, 0, 0))
+    const h = build({ impl: async () => [topic('1')], config: { notify: digestCfg(15) } })
+    await h.engine.pollOnce() // 10:00 基线
+
+    advanceMs(60_000) // 10:01
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // t2 挂起（批锚点 = 10:01）
+    expect(h.sendHit).not.toHaveBeenCalled()
+
+    advanceMs(4 * 60_000) // 10:05
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛来了' }),
+      topic('2', { title: '羊毛' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce() // t3 挂起
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(deferredQueueSize(h.engine)).toBe(2)
+
+    advanceMs(5 * 60_000) // 10:10 < 边界 10:16：不冲
+    await h.engine.pollOnce()
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(deferredQueueSize(h.engine)).toBe(2)
+
+    advanceMs(6 * 60_000) // 10:16 ≥ 边界：冲
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect((h.sendHit.mock.calls[0]![0] as { topic: Topic }).topic.id).toBe('2') // 插入序
+    expect((h.sendHit.mock.calls[1]![0] as { topic: Topic }).topic.id).toBe('3')
+    const flushIso = new Date(2026, 8, 10, 10, 16, 0, 0).toISOString()
+    expect(h.engine.getRecentHits().map((r) => r.notifiedAt)).toEqual([flushIso, flushIso])
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(h.seen.has('nodeseek:3')).toBe(true)
+    expect(deferredQueueSize(h.engine)).toBe(0)
+  })
+
+  it('digest + quiet 窗内：digest 计时器是唯一释放闸——窗尾不触发冲刷，批边界到点才冲', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 7, 50, 0, 0)) // 窗内（07:50 < 08:00）
+    const h = build({ impl: async () => [topic('1')], config: { notify: digestCfg(15, true) } })
+    await h.engine.pollOnce() // 基线
+
+    advanceMs(60_000) // 07:51：挂起（锚点 07:51，边界 08:06）
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    expect(
+      h.logger.getRecent().some((e) => e.msg.includes('hit deferred (digest)'))
+    ).toBe(true) // 窗内挂起原因仍是 digest（quiet 不叠加）
+
+    advanceMs(10 * 60_000) // 08:01：已出窗但未到批边界 → 不冲
+    await h.engine.pollOnce()
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(deferredQueueSize(h.engine)).toBe(1)
+
+    advanceMs(5 * 60_000) // 08:06：批边界 → 冲
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(deferredQueueSize(h.engine)).toBe(0)
+  })
+
+  it('长空闲后的新批不从旧锚点立即冲刷：批首条挂起重开锚点（摘要不退化为即时）', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 10, 0, 0, 0))
+    const h = build({ impl: async () => [topic('1')], config: { notify: digestCfg(15) } })
+    await h.engine.pollOnce()
+
+    advanceMs(60_000) // 10:01 挂起 t2
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+    advanceMs(16 * 60_000) // 10:17：冲刷 t2，锚点 → 10:17
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+
+    advanceMs(24 * 3600 * 1000) // 次日 10:17（远超旧锚点边界）
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛又来' }),
+      topic('2', { title: '羊毛' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce() // t3 挂起：锚点过期 → 重开为现在（次日 10:17）
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(deferredQueueSize(h.engine)).toBe(1)
+
+    advanceMs(60_000) // 次日 10:18：新批边界未到 → 不冲（若沿用旧锚点会立即冲 = 退化即时）
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+
+    advanceMs(15 * 60_000) // 次日 10:33：新批边界 → 冲
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect((h.sendHit.mock.calls[1]![0] as { topic: Topic }).topic.id).toBe('3')
+  })
+})
+
+// ---- per-channel 推送明细（R6-W4：report 回调 → HitRecord.notifyDetail）------
+
+describe('per-channel 推送明细（R6-W4：report 回调 → HitRecord.notifyDetail + pendingNotifyCount）', () => {
+  it('即时路径：通道 report 自报成功 → HitRecord 带 notifyDetail；静音路径不落键', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce() // 基线
+
+    h.sendHit.mockImplementation(async (input: HitMessageInput) => {
+      input.report?.('ch-a', true)
+    })
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).not.toBeNull()
+    expect(hits[0]!.notifyError).toBeNull()
+    expect(hits[0]!.notifyDetail).toEqual({ 'ch-a': { ok: true } })
+
+    // 静音路径不调 sendHit → 无明细键（不落空对象）
+    h.config.notifyEnabled = false
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛' }),
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    const mutedHit = h.engine.getRecentHits().at(-1)!
+    expect(mutedHit.notifiedAt).toBeNull()
+    expect(mutedHit.notifyError).toBeNull()
+    expect(mutedHit.notifyDetail).toBeUndefined()
+  })
+
+  it('flush 路径：挂起条目冲刷同样收集明细；pendingNotifyCount 随状态快照下发', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0)) // 窗内（23:00-08:00）
+    const h = build({ impl: async () => [topic('1')], config: { notify: quietOn() } })
+    await h.engine.pollOnce() // 基线
+
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 挂起
+    expect(h.engine.getStatus().pendingNotifyCount).toBe(1)
+
+    h.sendHit.mockImplementation(async (input: HitMessageInput) => {
+      input.report?.('ch-a', true)
+      input.report?.('ch-b', true)
+    })
+    advanceMs((8 * 60 + 31) * 60_000) // 08:01：窗外 → 首轮 flush
+    await h.engine.pollOnce()
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).not.toBeNull()
+    expect(hits[0]!.notifyDetail).toEqual({ 'ch-a': { ok: true }, 'ch-b': { ok: true } })
+    expect(h.engine.getStatus().pendingNotifyCount).toBe(0)
+  })
+
+  it('部分成功（any-success 聚合）：sendHit resolve + detail 两键；notifyError 不落', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce() // 基线
+
+    h.sendHit.mockImplementation(async (input: HitMessageInput) => {
+      input.report?.('ch-a', false, 'a down')
+      input.report?.('ch-b', true) // composite 任一成功即 resolve
+    })
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    const hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).not.toBeNull()
+    expect(hits[0]!.notifyError).toBeNull()
+    expect(hits[0]!.notifyDetail).toEqual({
+      'ch-a': { ok: false, error: 'a down' },
+      'ch-b': { ok: true }
+    })
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 聚合成功 → 入集不重试
+  })
+
+  it('全失败：notifyError 取首个通道错误、detail 全量落盘；通道未接 report 时回退抛错消息', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce() // 基线
+
+    h.sendHit.mockImplementation(async (input: HitMessageInput) => {
+      input.report?.('ch-a', false, 'a down')
+      input.report?.('ch-b', false, 'b down')
+      throw new Error('all channels failed: ch-a: a down; ch-b: b down')
+    })
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    let hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0]!.notifiedAt).toBeNull()
+    expect(hits[0]!.notifyError).toBe('a down') // 首个失败通道的错误
+    expect(hits[0]!.notifyDetail).toEqual({
+      'ch-a': { ok: false, error: 'a down' },
+      'ch-b': { ok: false, error: 'b down' }
+    })
+
+    // 旧式单 notifier（不接 report）：回退抛错消息（既有语义不变）、无明细键
+    h.sendHit.mockRejectedValue(new Error('telegram send failed after 3 attempts: HTTP 400'))
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛又' }),
+      topic('2'),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    hits = h.engine.getRecentHits()
+    expect(hits.at(-1)!.notifiedAt).toBeNull()
+    expect(hits.at(-1)!.notifyError).toContain('telegram send failed')
+    expect(hits.at(-1)!.notifyDetail).toBeUndefined()
   })
 })

@@ -28,6 +28,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
 import { HttpClient, redactProxyUrl } from '../src/main/net/http'
+import type { FetchLike } from '../src/main/net/http-types'
 import { AiProvider } from '../src/main/ai/provider'
 import { SemanticEvaluator } from '../src/main/ai/evaluator'
 import { CommentGenerator } from '../src/main/ai/commentary'
@@ -42,8 +43,13 @@ import { V2exSourceAdapter } from '../src/main/monitor/sources/v2ex'
 import { FileEngineState } from '../src/main/monitor/state'
 import type { SourceAdapter } from '../src/main/monitor/types'
 import { TelegramNotifier } from '../src/main/notify/telegram'
+import { BarkNotifier } from '../src/main/notify/bark'
+import { NtfyNotifier } from '../src/main/notify/ntfy'
+import { WebhookNotifier } from '../src/main/notify/webhook'
+import { CompositeNotifier } from '../src/main/notify/composite'
+import { isChannelReady, type Notifier } from '../src/main/notify/types'
 import { createLogger } from '../src/main/logger'
-import type { AppConfig, EngineStatus, HitRecord, SourceConfig } from '../src/shared/types'
+import type { AppConfig, EngineStatus, HitRecord, ChannelConfig, SourceConfig } from '../src/shared/types'
 
 const USAGE = `usage: npm run engine:headless -- [--config <dir>] [--once] [--duration <sec>] [--interval <sec>]
   --config <dir>     数据目录（config/seen/state/logs），默认 ./data/headless
@@ -132,12 +138,27 @@ async function main(): Promise<number | null> {
     logger.info('telegram credentials merged from NSM_BOT_TOKEN / NSM_CHAT_ID (env only, not persisted)')
   }
 
+  // R6-W1（DEC-9）：env 凭据覆盖**第一个** telegram 通道的 botToken/chatId
+  // （单 telegram 通道时代与旧 effective.telegram 合并完全等价：env 非空优先、
+  // 否则保留盘上值；enabled 不动——用户显式关掉的通道不被 env 偷偷唤醒）。
+  // 多 telegram 通道时只覆盖首个（多通道的 env 注入语义 W4 定）。
+  const mergeEnvTelegram = (channels: ChannelConfig[]): ChannelConfig[] => {
+    if (envToken === '' && envChat === '') return channels
+    const idx = channels.findIndex((ch) => ch.type === 'telegram')
+    if (idx === -1) return channels
+    const next = [...channels]
+    const ch = next[idx] as Extract<ChannelConfig, { type: 'telegram' }>
+    next[idx] = {
+      ...ch,
+      botToken: envToken !== '' ? envToken : ch.botToken,
+      chatId: envChat !== '' ? envChat : ch.chatId
+    }
+    return next
+  }
+
   const effective: AppConfig = {
     ...diskConfig,
-    telegram: {
-      botToken: envToken !== '' ? envToken : diskConfig.telegram.botToken,
-      chatId: envChat !== '' ? envChat : diskConfig.telegram.chatId
-    },
+    channels: mergeEnvTelegram(diskConfig.channels),
     ...(args.intervalSec !== null
       ? { pollIntervalSec: Math.max(MIN_POLL_INTERVAL_SEC, args.intervalSec) }
       : {})
@@ -238,9 +259,76 @@ async function main(): Promise<number | null> {
     return out
   }
 
-  const notifier = new TelegramNotifier({
-    post: (url, init) => tgClient.post(url, init),
-    getConfig: () => effective.telegram
+  // R6-W4 多通道推送装配（与 runtime.ts 同款）：为就绪通道（isChannelReady）
+  // 构造发送器，包 CompositeNotifier 做路由扇出。client 路由同 runtime：
+  // telegram 走 tgClient（恒代理作用域），bark/ntfy/webhook 走 siteClient
+  // （proxyScope='all' 才有代理，telegram-only 时直连）。headless 配置是启动
+  // 快照（无热更新），getConfig 直接闭包读 effective.channels 即可，无需
+  // runtime 那层稳定壳（通道集合不会变）。
+  const channelById = (id: string) => effective.channels.find((ch) => ch.id === id)
+  const buildNotifiers = (): Notifier[] => {
+    const post: FetchLike = (url, init) => siteClient.post(url, init)
+    const out: Notifier[] = []
+    for (const ch of effective.channels) {
+      if (!isChannelReady(ch)) continue
+      if (ch.type === 'telegram') {
+        out.push(
+          new TelegramNotifier({
+            id: ch.id,
+            post: (url, init) => tgClient.post(url, init),
+            getConfig: () => {
+              const cur = channelById(ch.id)
+              return cur !== undefined && cur.type === 'telegram'
+                ? { botToken: cur.botToken, chatId: cur.chatId }
+                : { botToken: '', chatId: '' }
+            }
+          })
+        )
+      } else if (ch.type === 'bark') {
+        out.push(
+          new BarkNotifier({
+            id: ch.id,
+            post,
+            getConfig: () => {
+              const cur = channelById(ch.id)
+              return cur !== undefined && cur.type === 'bark'
+                ? { deviceKey: cur.deviceKey, ...(cur.serverUrl !== undefined ? { serverUrl: cur.serverUrl } : {}) }
+                : { deviceKey: '' }
+            }
+          })
+        )
+      } else if (ch.type === 'ntfy') {
+        out.push(
+          new NtfyNotifier({
+            id: ch.id,
+            post,
+            getConfig: () => {
+              const cur = channelById(ch.id)
+              return cur !== undefined && cur.type === 'ntfy'
+                ? { topic: cur.topic, ...(cur.serverUrl !== undefined ? { serverUrl: cur.serverUrl } : {}) }
+                : { topic: '' }
+            }
+          })
+        )
+      } else {
+        out.push(
+          new WebhookNotifier({
+            id: ch.id,
+            post,
+            getConfig: () => {
+              const cur = channelById(ch.id)
+              return cur !== undefined && cur.type === 'webhook'
+                ? { url: cur.url, ...(cur.secret !== undefined ? { secret: cur.secret } : {}) }
+                : { url: '' }
+            }
+          })
+        )
+      }
+    }
+    return out
+  }
+  const notifier = new CompositeNotifier(buildNotifiers(), {
+    getRouting: () => effective.routing
   })
 
   // ---- AI 装配（D4/D5 + 第三轮锐评）：provider / evaluator / 锐评 / hits / 日报 -

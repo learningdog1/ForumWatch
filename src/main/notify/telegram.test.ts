@@ -65,6 +65,7 @@ function makeHarness(
   }
 
   const notifier = new TelegramNotifier({
+    id: 'telegram',
     post,
     getConfig: () => cfg,
     now: () => clock,
@@ -154,7 +155,7 @@ describe('formatHitMessage', () => {
 describe('TelegramNotifier', () => {
   it('sendHit 成功：URL 带 token，JSON body 字段齐全，保留链接预览', async () => {
     const h = makeHarness(() => okRes)
-    await h.notifier.sendHit(topic, ['冰箱'])
+    await h.notifier.sendHit({ topic, matchedKeywords: ['冰箱'] })
 
     expect(h.calls.length).toBe(1)
     expect(h.calls[0]?.url).toBe('https://api.telegram.org/bot123456:AA-token/sendMessage')
@@ -177,7 +178,7 @@ describe('TelegramNotifier', () => {
   it('sendHit 第三参透传：锐评进 body.text，与 formatHitMessage 三参版本一致', async () => {
     const h = makeHarness(() => okRes)
     const commentary = '便宜 <但> 要谨慎 & 快冲'
-    await h.notifier.sendHit(topic, ['冰箱'], commentary)
+    await h.notifier.sendHit({ topic, matchedKeywords: ['冰箱'], commentary })
 
     expect(h.calls.length).toBe(1)
     const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as {
@@ -192,7 +193,7 @@ describe('TelegramNotifier', () => {
 
   it('sendHit 第四参透传（R5-P2a）：规则 label 进 body.text 的「命中规则」行，与四参版本一致', async () => {
     const h = makeHarness(() => okRes)
-    await h.notifier.sendHit(topic, [], null, '白菜月付')
+    await h.notifier.sendHit({ topic, matchedKeywords: [], commentary: null, matchedRule: '白菜月付' })
     const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as { text: string }
     expect(body.text).toBe(formatHitMessage(topic, [], null, '白菜月付'))
     expect(body.text).toContain('🎯 命中规则: 白菜月付')
@@ -266,7 +267,9 @@ describe('TelegramNotifier', () => {
 
   it('未配置 token/chatId → 立即抛 TelegramError，不发请求不等待', async () => {
     const h = makeHarness(() => okRes, { botToken: '', chatId: '-100200' })
-    await expect(h.notifier.sendHit(topic, ['冰箱'])).rejects.toThrow('telegram not configured')
+    await expect(h.notifier.sendHit({ topic, matchedKeywords: ['冰箱'] })).rejects.toThrow(
+      'telegram not configured'
+    )
     expect(h.calls.length).toBe(0)
     expect(h.sleeps).toEqual([])
 
@@ -279,11 +282,24 @@ describe('TelegramNotifier', () => {
     const h = makeHarness(() => okRes)
     const topic2: Topic = { ...topic, id: '936635', url: 'https://www.nodeseek.com/post-936635-1' }
 
-    await Promise.all([h.notifier.sendHit(topic, ['a']), h.notifier.sendHit(topic2, ['b'])])
+    await Promise.all([
+      h.notifier.sendHit({ topic, matchedKeywords: ['a'] }),
+      h.notifier.sendHit({ topic: topic2, matchedKeywords: ['b'] })
+    ])
 
     expect(h.calls.length).toBe(2)
     // 全部成功场景下唯一的 sleep 就是限流等待（第二条消息进入时距上一条 0ms）
     expect(h.sleeps).toEqual([1050])
+  })
+
+  it('R6-W1：实现 Notifier 接口——id 来自构造、sendRaw/sendTest 具名存在', async () => {
+    const h = makeHarness(() => okRes)
+    expect(h.notifier.id).toBe('telegram')
+    // 结构类型自证：实例可赋给 Notifier（编译期保证，这里运行时再点一遍名）
+    const n: { id: string; sendHit: unknown; sendRaw: unknown; sendTest: unknown } = h.notifier
+    expect(typeof n.sendHit).toBe('function')
+    expect(typeof n.sendRaw).toBe('function')
+    expect(typeof n.sendTest).toBe('function')
   })
 
   it('sendRaw 成功：进队发送、原文透传、不带 parse_mode（<b> 不被解析为实体）', async () => {

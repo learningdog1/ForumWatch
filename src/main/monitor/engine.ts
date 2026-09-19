@@ -70,6 +70,27 @@
  *   health=ok → fetchLatest({pages:2})（第 2 页失败由 adapter 吞并，按第 1 页
  *   成功收尾）；观测面 SourceStatus.page2Fetches（内存累计）。
  *
+ * 免打扰 + 摘要模式（R6-W1q，DEC-11 挂起语义；纯时间逻辑在 notify/queue.ts）：
+ * - processHit 推送前（相似闸之后、仅 notifyEnabled 且有就绪通道的推送分支内）
+ *   decideNotifyAction 判定 defer（免打扰窗内 / digest 模式恒挂起）→ 帖子进
+ *   内存挂起队列 deferredHits（坑6：**不入 seen、不 recordHit、不入相似窗**——
+ *   否则 flush 前下轮会被当旧帖吞掉 / hits 每轮重复追加）；payload 自含全量
+ *   （含 match 时已生成的锐评，flush 不重打 LLM）。
+ * - unseen 处理链开头查挂起集：已在队列的帖整帖跳过（不重新匹配/不重评估/不入
+ *   seen），等 flush 收口——否则免打扰结束的那轮会绕过队列直接即时推送，与
+ *   flush 双发。
+ * - flush 只随轮询 piggyback（pollOnce 开头检查 due）：暂停期间无轮询 → 无
+ *   flush，恢复后首轮补发。digest 批窗口锚点 lastDigestFlushAt（批首条挂起
+ *   时刻或上次冲刷时刻），due = 锚点 + digestIntervalMin 到点；instant 模式的
+ *   挂起条目在 decideNotifyAction 不再 defer（窗结束/quiet 热更新关掉）时冲刷。
+ * - flush 逐条推送：成功 = seen.add + recordHit(notifiedAt=now) + 相似窗入窗
+ *   （对齐即时路径成功后的三个动作）；失败重试，3 次后落 notifyError 终态 +
+ *   seen.add（防重新匹配死循环）；冲刷时刻已静音 → 按静音终态出队（静音不重试）。
+ * - 挂起超 24h → recordHit(notifyError='deferred timeout') + seen.add + 出队
+ *   （有界内存；挂点对齐 pruneRetryMaps）。
+ * - 队列是内存态：重启丢队列是接受的语义——未入 seen 的挂起帖若仍在第 1 页，
+ *   重启后会被重新匹配（窗内重新入队 / 窗外直接即时推送），自愈且不双发。
+ *
  * 全局聚合（每轮收尾 finishRound 派生，既有消费方——托盘/UI——不破）：
  * health = 各 source 最差（challenged > backoff > ok；无 source → ok）；
  * consecutiveFailures 取最差、lastError 取最新、lastSuccessAt 取最新；
@@ -106,6 +127,10 @@ import { ChallengeError, type SourceAdapter } from './types'
 import type { SemanticEvaluator } from '../ai/evaluator'
 import { MAX_SEMANTIC_BATCH } from '../ai/evaluator'
 import type { CommentGenerator } from '../ai/commentary'
+import type { Notifier } from '../notify/types'
+import type { HitMessageInput } from '../notify/types'
+import { anyChannelReady } from '../notify/types'
+import { decideNotifyAction, nextDigestFlush } from '../notify/queue'
 import type { Logger } from '../logger'
 import {
   DEFAULT_APP_CONFIG,
@@ -152,6 +177,81 @@ export const PAGE2_TRIGGER_EFFECTIVE_NEW = 40
  * 语义评估在总桶里至少保留 200 容量，两用途无需调序。
  */
 export const DAILY_COMMENTARY_LIMIT = 100
+
+/**
+ * 挂起推送的最长滞留（R6-W1q / DEC-11）：24h。超时条目按
+ * notifyError='deferred timeout' 落终态（recordHit + seen.add + 出队）——
+ * 有界内存保证（挂起队列是内存态，不靠 roundTopicKeys 裁剪：挂起帖滚出
+ * 首页后仍应等到 flush / 超时，不能像重试缓存那样被清理）。
+ */
+export const DEFERRED_HIT_TIMEOUT_MS = 24 * 60 * 60 * 1000
+
+/** 挂起条目 flush 推送失败的重试上限（DEC-11：第 3 次失败落 notifyError 终态） */
+export const DEFERRED_FLUSH_MAX_ATTEMPTS = 3
+
+/**
+ * 挂起队列条目（DEC-11）：payload 自含 flush 所需全量信息——topic/关键词/
+ * 规则/语义理由/锐评（锐评在 match 时已生成，flush 直接用不再重打 LLM）。
+ */
+interface DeferredHit {
+  payload: HitMessageInput & { matchedBy: 'literal' | 'semantic' | 'rule' }
+  /** 首次挂起时刻（epoch ms；24h 超时 prune 的基准，重试不刷新） */
+  addedAt: number
+  /** flush 推送失败计数；达 DEFERRED_FLUSH_MAX_ATTEMPTS 落终态出队 */
+  attempts: number
+}
+
+/** DeferredHit → HitRecord（flush 的成功/失败/超时三态收口共用一个组装口径） */
+function deferredHitRecord(
+  entry: DeferredHit,
+  notifiedAt: string | null,
+  notifyError: string | null,
+  notifyDetail?: Record<string, { ok: boolean; error?: string }>
+): HitRecord {
+  const p = entry.payload
+  return {
+    topic: p.topic,
+    matchedKeywords: p.matchedKeywords,
+    matchedBy: p.matchedBy,
+    semanticReason: p.semanticReason ?? null,
+    matchedRule: p.matchedBy === 'rule' ? (p.matchedRule ?? null) : null,
+    commentary: p.commentary ?? null,
+    notifiedAt,
+    notifyError,
+    ...(notifyDetail !== undefined && Object.keys(notifyDetail).length > 0 ? { notifyDetail } : {})
+  }
+}
+
+/**
+ * per-channel 推送明细收集器（R6-W4，processHit 即时路径与 flushDeferred 共用）：
+ * `report` 挂进 HitMessageInput，各通道 sendHit 最终结果落定后自报（composite
+ * 原样透传 input 不重复调用）；detail 按上报顺序累积（= composite 串行扇出序）。
+ * 至少一条记录时 HitRecord 才落 notifyDetail 键（静音路径不调 sendHit → 无键）。
+ */
+interface NotifyDetailCollector {
+  /** 挂进 HitMessageInput.report 的回调（约定不抛，通道实现保证） */
+  report: (channelId: string, ok: boolean, error?: string) => void
+  /** 已收集的明细（实时读；sendHit settle 后不再变） */
+  readonly detail: Record<string, { ok: boolean; error?: string }>
+  /** 首个失败通道的错误（失败路径聚合 notifyError 的取值优先级）；无失败 → undefined */
+  firstError(): string | undefined
+}
+
+function createNotifyDetailCollector(): NotifyDetailCollector {
+  const detail: Record<string, { ok: boolean; error?: string }> = {}
+  return {
+    report: (channelId, ok, error) => {
+      detail[channelId] = ok ? { ok } : { ok, error: error ?? 'unknown channel error' }
+    },
+    detail,
+    firstError: () => {
+      for (const v of Object.values(detail)) {
+        if (!v.ok) return v.error ?? 'unknown channel error'
+      }
+      return undefined
+    }
+  }
+}
 
 /**
  * 全局去重键 = `${sourceId}:${topic.id}`（D2/D3）。与 v1 seen.json 迁移的前缀口径
@@ -243,20 +343,13 @@ export interface EngineDeps {
    */
   getSourceFilters?: (sourceId: string) => SourceFilters | undefined
   /**
-   * Telegram 推送（TelegramNotifier 结构满足此接口；单测可全 mock）。
-   * sendHit 第三参 commentary（第三轮 AI 锐评）与第四参 matchedRule（第五轮
-   * 价格规则命中的规则 label；literal/semantic 命中恒传 null——不传 undefined）：
-   * 两参/三参实现的旧装配方结构兼容无需改动（参数少的方法可赋给参数多的签名）。
+   * 推送器（R6-W1 起为 Notifier 接口——通道无关抽象，本轮实现只有
+   * TelegramNotifier；W3 router/composite 在引擎外侧扇出，engine 不感知通道数）。
+   * sendHit 收 HitMessageInput 单参对象（topic/matchedKeywords/commentary/
+   * matchedRule——matchedRule 仅 rule 命中非 null，与 commentary 同款"不留
+   * undefined"约定）。单测可全 mock。
    */
-  notifier: {
-    sendHit(
-      topic: Topic,
-      matchedKeywords: string[],
-      commentary?: string | null,
-      matchedRule?: string | null
-    ): Promise<void>
-    sendTest(): Promise<void>
-  }
+  notifier: Notifier
   /** 每轮轮询前重读的配置访问器（装配方保证热更新） */
   getConfig: () => AppConfig
   /** 装配方创建并注入：onTick 绑 engine.pollOnce、onScheduled 绑 engine.noteScheduled */
@@ -316,6 +409,20 @@ export class MonitorEngine {
    * score（不再过闸），无需保存。
    */
   private readonly semanticVerdicts = new Map<string, { reason: string | null }>()
+  /**
+   * 免打扰/digest 挂起队列（R6-W1q，DEC-11）：全局去重键 → DeferredHit。
+   * 挂起帖**不入 seen**（坑6：入了会被下轮当旧帖/已处理吞掉）、不 recordHit
+   * （flush 前不产生 HitRecord，否则每轮重复追加）、不入相似窗（没推过不算
+   * "已推"）。unseen 处理链开头按本队列跳过（等 flush 收口）。插入序 = Map
+   * 迭代序 = flush 顺序。内存态：重启丢队列，自愈语义见类注释。
+   */
+  private readonly deferredHits = new Map<string, DeferredHit>()
+  /**
+   * digest 批窗口锚点（epoch ms）：上一批的冲刷时刻，或空队列重启批时的首条
+   * 挂起时刻。due = now >= nextDigestFlush(锚点, interval)（notify/queue.ts 纯
+   * 计算）。null = 尚未开过批窗口。instant 模式不使用（免打扰挂起靠窗尾判定）。
+   */
+  private lastDigestFlushAt: number | null = null
   /** sourceId -> 运行态（含热更新后加入的 source；移除的 source 保留卡但退出聚合） */
   private readonly runtimes = new Map<string, SourceRuntime>()
   /** sourceId -> 本轮新增命中数（轮末按 source 持久化 totalHits 后清零） */
@@ -415,7 +522,13 @@ export class MonitorEngine {
 
   /** 实时状态快照（新对象，调用方改动不影响引擎内部）；ai 段每次派生（观测面） */
   getStatus(): EngineStatus {
-    return { ...INITIAL_ENGINE_STATUS, ...this.status, ai: this.deriveAiStatus() }
+    return {
+      ...INITIAL_ENGINE_STATUS,
+      ...this.status,
+      // R6-W4：挂起待推送条数随快照下发（免打扰/digest 可观测性；旧读者容忍缺失）
+      pendingNotifyCount: this.deferredHits.size,
+      ai: this.deriveAiStatus()
+    }
   }
 
   /** 内存命中环形（旧→新顺序），给 UI 展示；返回拷贝 */
@@ -462,6 +575,14 @@ export class MonitorEngine {
     this.configFailures = 0
     this.configLastError = null
 
+    // 挂起队列冲刷检查（R6-W1q，DEC-11）：piggyback 语义——只随轮询触发，无独立
+    // 定时器；暂停（pause）期间无轮询 → 无 flush，恢复后的首轮 pollOnce 在这里
+    // 补发。getConfig 抛错的早退轮不冲刷（拿不到 notify 策略，宁可多等一轮）。
+    // **队列空时不得 await**：保持 pollOnce 到 fetchLatest 的同步调用深度
+    // （start() 的同步首轮语义，既有契约——见 similarityWindowReady 注释）；
+    // 有挂起条目才让出微任务。
+    if (this.deferredHits.size > 0) await this.flushDeferredIfDue(cfg)
+
     const activeIds: string[] = []
     /** 本轮实际抓到的全部 topic 的 seen 键（F5 轮末清理的保留集） */
     const roundTopicKeys = new Set<string>()
@@ -484,6 +605,9 @@ export class MonitorEngine {
       }
     }
     this.pruneRetryMaps(roundTopicKeys, observedSources)
+    // 挂起队列 24h 超时收口（R6-W1q）：时间维度的有界内存保证，不依赖
+    // roundTopicKeys/observedSources——超时就是超时，与帖子是否还在首页无关。
+    this.pruneDeferredHits()
     // 相似降噪窗口轮末 prune（R5-P2a 第 10 步）：只保留仍在 48h 窗口内的条目
     // （时间维度全局裁剪，与 per-source 的 roundTopicKeys 无关；生命周期对齐
     // pruneRetryMaps 的调用点）
@@ -553,10 +677,12 @@ export class MonitorEngine {
    * 盖章（1）→ per-source 过滤（2，R5-P2a：滤帖入 seen 不推送不评估）→
    * 基线判断（W3：基线轮末同轮初始化 id 阈值）→ 存量升级静默初始化轮
    * （W3：baselineDone=true 但阈值 null 时整页入 seen 不推送）→ 新帖逆序处理
-   * （旧帖 id 过滤(3) → 置顶(4) → 排除词否决(5) → 价格规则(6，R5-P2a：先于
-   * literal、命中即得) → literal(7) → 语义候选收集(9)）→ 命中帖推送前统一过
-   * 相似降噪闸（8，R5-P2a：与 48h 已推窗口相似 → 入 seen 不推）→ 语义批评估 →
-   * 轮末 flush/prune/prevUnseenKeys 轮换/阈值推进与 totalHits 合并持久化。
+   * （挂起队列成员整帖跳过(0，R6-W1q DEC-11：已在 deferredHits 的帖等 flush，
+   * 不重新匹配) → 旧帖 id 过滤(3) → 置顶(4) → 排除词否决(5) → 价格规则(6，
+   * R5-P2a：先于 literal、命中即得) → literal(7) → 语义候选收集(9)）→
+   * 命中帖推送前统一过相似降噪闸（8，R5-P2a：与 48h 已推窗口相似 → 入 seen
+   * 不推）→ 语义批评估 → 轮末 flush/prune/prevUnseenKeys 轮换/阈值推进与
+   * totalHits 合并持久化。
    * 推送顺序：literal/规则命中按页面逆序（旧→新）在遍历中即时推送；语义命中在其后
    * 按批内顺序（旧→新）推送——批式评估天然滞后一轮内位置，跨档顺序不保证。
    * 异常上抛给 pollOnce 的 per-source catch。
@@ -671,6 +797,14 @@ export class MonitorEngine {
     // 页面最新在前 → 逆序处理，推送顺序旧→新
     for (const topic of [...unseen].reverse()) {
       const key = seenKeyFor(adapter.id, topic.id)
+      // 挂起队列成员检查（R6-W1q，DEC-11 坑6）：已在挂起队列的帖**整帖跳过**——
+      // 不重新匹配/不重评估/不入 seen（它已在队列里等 flush 收口）。插点在 unseen
+      // 循环最顶部（先于 per-source 过滤/id 阈值/置顶/排除词），与 semanticVerdicts
+      // 缓存查询同款"命中前拦截"模式但覆盖**全部**命中方式：literal/rule 命中的
+      // 挂起帖若重新走匹配，免打扰结束的那轮会绕过队列直接即时推送——与 flush
+      // 双发。prevUnseenKeys 豁免集对挂起键同样生效（它们在本轮 unseen 集里），
+      // 但队列成员资格本身就是更强的豁免，双保险。
+      if (this.deferredHits.has(key)) continue
       // per-source 过滤（R5-P2a 第 2 步，先于 id 阈值——ultrabrain 裁定管线顺序）：
       // 分类白/黑名单（显示名或 slug 双口径）与作者黑名单。被滤帖入 seen 不推送
       // 不评估（与旧帖阈值同款语义）。
@@ -1066,9 +1200,139 @@ export class MonitorEngine {
     }
   }
 
+  // ---- 免打扰/digest 挂起队列（R6-W1q，DEC-11） -----------------------------
+
   /**
-   * 处理一条命中的新帖：相似降噪闸 → 生成锐评（第三轮）→ 尝试推送 →
-   * 组 HitRecord → 计数入环 → emit onHit。
+   * 挂起队列到点冲刷检查（每轮 pollOnce 开头调用；piggyback 语义见调用点注释）。
+   * due 判定按**当前**配置（热更新语义）：
+   * - digest 模式：now >= nextDigestFlush(lastDigestFlushAt, interval)（批窗口
+   *   计时器；锚点 null 视为 due——防御，正常路径首条挂起时已起锚，不给队列
+   *   被无锚点卡死留门）；
+   * - instant 模式（免打扰挂起的条目）：decideNotifyAction 不再 defer——窗已
+   *   结束，或 quietHours 被热更新关掉——即 due；
+   * - 已静音（notifyEnabled=false / 无就绪通道）：恒 due——静音是终态，挂起
+   *   条目按静音收口（flushDeferred 内处理），不为一个永远不会发生的推送空等。
+   * 模式热切换（digest↔instant）不逐条区分挂起原因：队列在"当前策略放行"或
+   * "当前 digest 计时器到点"时整体冲刷，条目不携带各自的释放时刻，语义最简。
+   */
+  private async flushDeferredIfDue(cfg: AppConfig): Promise<void> {
+    if (this.deferredHits.size === 0) return
+    const nowMs = this.now()
+    const muted = !(cfg.notifyEnabled && anyChannelReady(cfg.channels))
+    let due: boolean
+    if (muted) {
+      due = true
+    } else if (cfg.notify.mode === 'digest') {
+      due =
+        this.lastDigestFlushAt === null ||
+        nowMs >= nextDigestFlush(this.lastDigestFlushAt, cfg.notify.digestIntervalMin)
+    } else {
+      due = !decideNotifyAction(cfg.notify, new Date(nowMs)).defer
+    }
+    if (due) await this.flushDeferred(cfg)
+  }
+
+  /**
+   * 冲刷挂起队列（DEC-11）：按插入序（Map 迭代序）逐条收口。单条语义：
+   * - 推送成功：seen.add + recordHit（notifiedAt=冲刷时刻，完整 payload 字段）
+   *   + 相似窗入窗——对齐即时路径成功后的三个动作；
+   * - 推送失败：attempts++；未达上限（3）留队列下次 flush 重试（锐评已在
+   *   match 时生成，重试不重打 LLM；失败中间态只 log 不 emit，防刷屏——与
+   *   即时路径"同失败态只 emit 一次"同一精神）；达上限 → recordHit
+   *   （notifiedAt=null、notifyError=最后错误）+ **seen.add**（防下轮重新匹配
+   *   死循环）+ 出队 + emit 终态；
+   * - 冲刷时刻已静音（热更新结果）：按静音终态出队（notifiedAt/notifyError
+   *   均 null，对齐即时路径的 mute 语义——静音不重试）。
+   * 全队列处理完：lastDigestFlushAt = now（digest 批窗口重开；instant 模式
+   * 写入也无害——切回 digest 时从新锚点起算）。
+   * 重启丢队列是接受的语义（内存态）：未入 seen 的挂起帖若仍在第 1 页，重启后
+   * 会被重新匹配——窗内重新入队、窗外直接即时推送（自愈，不双发：旧进程已死）。
+   */
+  private async flushDeferred(cfg: AppConfig): Promise<void> {
+    if (this.deferredHits.size === 0) return
+    // 相似窗就位保障：与 processHit 同款（flush 可能先于本轮首个 processHit
+    // 触碰窗口；构造期 promise 此后已 settle，await 零成本）
+    await this.similarityWindowReady
+    const muted = !(cfg.notifyEnabled && anyChannelReady(cfg.channels))
+    for (const [key, entry] of [...this.deferredHits.entries()]) {
+      if (muted) {
+        this.deferredHits.delete(key)
+        this.deps.seen.add(key)
+        const hit = deferredHitRecord(entry, null, null)
+        this.recordHit(hit)
+        this.deps.logger.info(`deferred hit muted at flush: "${entry.payload.topic.title}"`)
+        this.deps.onHit?.(hit)
+        continue
+      }
+      // per-channel 明细（R6-W4）：report 挂在发送时的浅拷贝上，不回写挂起
+      // payload（重试轮各自重新收集，detail 不跨轮残留）
+      const collector = createNotifyDetailCollector()
+      try {
+        await this.deps.notifier.sendHit({ ...entry.payload, report: collector.report })
+        this.deferredHits.delete(key)
+        this.deps.seen.add(key)
+        const hit = deferredHitRecord(entry, this.isoNow(), null, collector.detail)
+        this.recordHit(hit)
+        this.pushedTitles.push({
+          title: normalizeTitle(entry.payload.topic.title),
+          at: this.now()
+        })
+        this.deps.logger.info(`deferred hit pushed: "${entry.payload.topic.title}"`)
+        this.deps.onHit?.(hit)
+      } catch (err) {
+        entry.attempts++
+        // 失败聚合语义与即时路径一致：首个失败通道的错误优先，无明细（通道未接
+        // report / 单 notifier mock）回退抛错消息
+        const msg = collector.firstError() ?? describeError(err)
+        if (entry.attempts >= DEFERRED_FLUSH_MAX_ATTEMPTS) {
+          this.deferredHits.delete(key)
+          this.deps.seen.add(key)
+          const hit = deferredHitRecord(entry, null, msg, collector.detail)
+          this.recordHit(hit)
+          this.deps.logger.error(
+            `deferred hit flush failed ${entry.attempts} times, giving up ` +
+              `(notifyError recorded): "${entry.payload.topic.title}": ${msg}`
+          )
+          this.deps.onHit?.(hit)
+        } else {
+          this.deps.logger.warn(
+            `deferred hit flush failed (attempt ${entry.attempts}/${DEFERRED_FLUSH_MAX_ATTEMPTS}), ` +
+              `will retry next flush: "${entry.payload.topic.title}": ${msg}`
+          )
+        }
+      }
+    }
+    this.lastDigestFlushAt = this.now()
+  }
+
+  /**
+   * 挂起队列超时收口（DEC-11，挂点对齐 pruneRetryMaps 的调用点）：挂起超过
+   * DEFERRED_HIT_TIMEOUT_MS(24h) 的条目 recordHit（notifyError='deferred
+   * timeout'）+ seen.add（防重新匹配）+ 出队。时间维度裁剪，不看
+   * roundTopicKeys/observedSources——挂起帖滚出首页不构成放弃它的理由
+   * （与重试缓存语义相反），24h 是唯一的界。
+   */
+  private pruneDeferredHits(): void {
+    if (this.deferredHits.size === 0) return
+    const cutoff = this.now() - DEFERRED_HIT_TIMEOUT_MS
+    for (const [key, entry] of [...this.deferredHits.entries()]) {
+      if (entry.addedAt >= cutoff) continue
+      this.deferredHits.delete(key)
+      this.deps.seen.add(key)
+      const hit = deferredHitRecord(entry, null, 'deferred timeout')
+      this.recordHit(hit)
+      this.deps.logger.warn(
+        `deferred hit timed out after 24h (notifyError recorded): "${entry.payload.topic.title}"`
+      )
+      this.deps.onHit?.(hit)
+    }
+  }
+
+  /**
+   * 处理一条命中的新帖：相似降噪闸 → 生成锐评（第三轮）→ 免打扰/digest 挂起
+   * 判定（R6-W1q，DEC-11：defer 则入内存队列不入 seen/不 recordHit/不入相似窗，
+   * 等 flush——见 flushDeferred）→ 尝试推送 → 组 HitRecord → 计数入环 →
+   * emit onHit。
    *
    * 相似降噪（R5-P2a 第 8 步，作用于**所有**命中方式推送前）：cfg.similarity.enabled
    * 时与"近期已推"窗口比对标题，相似 → 入 seen 不推送不 emit 不计 HitRecord
@@ -1076,8 +1340,8 @@ export class MonitorEngine {
    * enabled=false 时整段跳过（行为与升级前一致）。
    *
    * 推送结果语义（ADR 8.10）：
-   * - **成功 / 静音**（notifyEnabled=false 或 telegram 未配置）→ 入去重集。
-   *   静音是用户主动行为，不重试；
+   * - **成功 / 静音**（notifyEnabled=false 或无就绪通道，R6-W1 起通道化判定）
+   *   → 入去重集。静音是用户主动行为，不重试；
    * - **真实推送失败**（notifier 抛错）→ **不**入去重集，下轮自然重试
    *   （帖子滚出首页第 1 页即止，天然有界）；同键同失败态只 emit/log 一次，
    *   成功或转静音后清除待重试标记并 emit 最终态。
@@ -1118,21 +1382,71 @@ export class MonitorEngine {
     const commentary = await this.maybeGenerateCommentary(topic, cfg)
     let notifiedAt: string | null = null
     let notifyError: string | null = null
-    const configured = cfg.telegram.botToken !== '' && cfg.telegram.chatId !== ''
+    // per-channel 推送明细收集（R6-W4）：各通道 sendHit 最终结果落定后经
+    // input.report 自报（composite 透传不重复调用），成功/失败路径的
+    // HitRecord 据此落 notifyDetail 键（至少一条记录时才落；静音路径不调
+    // sendHit → 无键）。
+    const collector = createNotifyDetailCollector()
+    // configured 判定（R6-W1 起通道化）：任一 enabled 且凭据齐备的**已实现**通道
+    // （本轮仅 telegram，notify/types.isChannelReady 的单一事实源）。单 telegram
+    // 通道时代与旧 cfg.telegram.botToken/chatId 直读完全等价；notifyEnabled 静音
+    // 语义不动（静音 = 已配置但用户关闸，仍入 seen 不重试）。
+    const configured = anyChannelReady(cfg.channels)
     if (cfg.notifyEnabled && configured) {
+      // 免打扰/digest 挂起判定（R6-W1q，DEC-11）：在推送分支内、相似闸与锐评
+      // 生成之后——静音/未配置不走 defer（下方 mute 路径原样），锐评在 match 时
+      // 已生成并随 payload 挂起（flush 不再重打 LLM）。挂起 = 不入 seen /
+      // 不 recordHit / 不入相似窗（坑6），直接返回等 flush。
+      const deferAction = decideNotifyAction(
+        cfg.notify,
+        new Date(this.now()),
+        this.lastDigestFlushAt
+      )
+      if (deferAction.defer) {
+        const deferKey = seenKeyFor(topic.sourceId, topic.id)
+        // digest 批窗口锚点：仅当队列从空开始（新批）且上一窗口已到期/从未开过
+        // 时重开——否则沿用既有锚点，连续命中下批窗口不被无限续期（防饿死）。
+        const deferNow = this.now()
+        if (
+          deferAction.reason === 'digest' &&
+          this.deferredHits.size === 0 &&
+          (this.lastDigestFlushAt === null ||
+            deferNow >= nextDigestFlush(this.lastDigestFlushAt, cfg.notify.digestIntervalMin))
+        ) {
+          this.lastDigestFlushAt = deferNow
+        }
+        this.deferredHits.set(deferKey, {
+          payload: {
+            topic,
+            matchedKeywords,
+            commentary,
+            matchedRule: matchedBy === 'rule' ? matchedRule : null,
+            semanticReason,
+            matchedBy
+          },
+          addedAt: deferNow,
+          attempts: 0
+        })
+        this.deps.logger.info(`hit deferred (${deferAction.reason}): "${topic.title}"`)
+        return
+      }
       try {
-        // 第四参 matchedRule：rule 命中传 label（telegram 侧渲染「命中规则」行），
-        // 其余命中方式恒传 null（与 commentary 同款"不留 undefined"约定）
-        await this.deps.notifier.sendHit(
+        // matchedRule 仅 rule 命中传 label（telegram 侧渲染「命中规则」行），
+        // 其余命中方式恒传 null（与 commentary 同款"不留 undefined"约定）；
+        // report 挂外层 collector（成功/失败两路径的 HitRecord 共用同一明细）
+        await this.deps.notifier.sendHit({
           topic,
           matchedKeywords,
           commentary,
-          matchedBy === 'rule' ? matchedRule : null
-        )
+          matchedRule: matchedBy === 'rule' ? matchedRule : null,
+          report: collector.report
+        })
         notifiedAt = this.isoNow()
       } catch (err) {
         notifiedAt = null
-        notifyError = err instanceof Error ? err.message : String(err)
+        // 聚合 notifyError：首个失败通道的错误优先（单通道时代与抛错消息等价）；
+        // 无明细（通道未接 report / 单 notifier mock）回退抛错消息（既有语义）
+        notifyError = collector.firstError() ?? describeError(err)
       }
     }
 
@@ -1157,7 +1471,8 @@ export class MonitorEngine {
         matchedRule: matchedBy === 'rule' ? matchedRule : null,
         commentary,
         notifiedAt: null,
-        notifyError
+        notifyError,
+        ...(Object.keys(collector.detail).length > 0 ? { notifyDetail: collector.detail } : {})
       }
       this.recordHit(hit)
       this.deps.logger.error(
@@ -1186,7 +1501,8 @@ export class MonitorEngine {
       matchedRule: matchedBy === 'rule' ? matchedRule : null,
       commentary,
       notifiedAt,
-      notifyError: null
+      notifyError: null,
+      ...(Object.keys(collector.detail).length > 0 ? { notifyDetail: collector.detail } : {})
     }
     this.recordHit(hit)
     if (notifiedAt !== null) {
@@ -1204,7 +1520,7 @@ export class MonitorEngine {
         )
       }
     } else {
-      this.deps.logger.info(`hit muted (notify disabled or telegram unconfigured): "${topic.title}"`)
+      this.deps.logger.info(`hit muted (notify disabled or no channel ready): "${topic.title}"`)
     }
     this.deps.onHit?.(hit)
   }

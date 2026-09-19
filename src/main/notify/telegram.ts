@@ -1,5 +1,5 @@
 /**
- * Telegram Bot 推送（ADR 8.6；D5 增补 sendRaw）。
+ * Telegram Bot 推送（ADR 8.6；D5 增补 sendRaw；R6-W1 实现 Notifier 接口）。
  *
  * - 网络 post 由外部注入（FetchLike，生产传 HttpClient 封装），本模块零直接网络依赖。
  * - 限流：内部串行队列，两次实际发送间隔 >= 1050ms。放弃 20 msg/min 全局限流——
@@ -11,10 +11,16 @@
  * - 其他失败（网络异常 / 非 2xx 非 429）：共 3 次尝试，间隔 1s / 2s，仍失败抛 TelegramError
  *   （message 带最后一次响应 body 前 200 字符）。
  * - now / sleep 可注入：单测用假时钟，不真睡。
+ * - R6-W1：外壳 `implements Notifier`（sendHit 改收 HitMessageInput 单参对象；
+ *   新增只读 id），内部队列/限速/429/重试/格式化逻辑与改造前逐行为一致——
+ *   这是既有 342 测试的看家资产，只动外壳不动管线。
+ * - R6-W4：sendHit 补 report 回调接线（最终成功/失败各一次，对齐 bark/ntfy/
+ *   webhook 的口径），engine 据此收集 HitRecord.notifyDetail 的 per-channel 明细。
  */
 
 import type { FetchLike, HttpResponse, HttpRequestInit } from '../net/http-types'
 import type { TelegramConfig, Topic } from '@shared/types'
+import type { HitMessageInput, Notifier } from './types'
 
 export class TelegramError extends Error {
   constructor(
@@ -27,9 +33,17 @@ export class TelegramError extends Error {
 }
 
 export interface TelegramDeps {
+  /**
+   * 通道 id（R6-W1：Notifier.id，per-channel 推送明细的键）。单 telegram 通道
+   * 时代装配方恒传 'telegram'；W3 router 落盘 notifyDetail 时以它为键。
+   */
+  id: string
   /** 注入的 HTTP POST（生产传 HttpClient 的封装） */
   post: FetchLike
-  /** 引擎侧读取当前配置（支持热更新，每次发送前重读） */
+  /**
+   * 引擎侧读取当前凭据（支持热更新，每次发送前重读）。静态通道配置
+   * （headless/测试快照）直接传 `() => ({ botToken, chatId })` 包装。
+   */
   getConfig: () => TelegramConfig
   /** 测试注入假时钟；默认 Date.now */
   now?: () => number
@@ -95,7 +109,8 @@ function parseRetryAfterSec(body: string): number | undefined {
   }
 }
 
-export class TelegramNotifier {
+export class TelegramNotifier implements Notifier {
+  readonly id: string
   private readonly post: FetchLike
   private readonly getConfig: () => TelegramConfig
   private readonly now: () => number
@@ -105,6 +120,7 @@ export class TelegramNotifier {
   private lastSendAt = Number.NEGATIVE_INFINITY
 
   constructor(deps: TelegramDeps) {
+    this.id = deps.id
     this.post = deps.post
     this.getConfig = deps.getConfig
     this.now = deps.now ?? (() => Date.now())
@@ -113,19 +129,30 @@ export class TelegramNotifier {
   }
 
   /**
-   * 命中推送（HTML parse_mode）。第三参 commentary（AI 锐评）与第四参 matchedRule
-   * （价格规则 label，第五轮）可选：不传 / null / 空串时消息与少参版本逐字节一致，
-   * 既有调用方（engine）无需改动即可升到本签名。
+   * 命中推送（HTML parse_mode；R6-W1 起收 HitMessageInput 单参对象，字段与旧
+   * 四参签名一一对应：topic/matchedKeywords/commentary/matchedRule）。commentary
+   * 与 matchedRule 可选：不传 / null / 空串时消息与少参版本逐字节一致。
+   * R6-W4 report 接线（对齐 bark/ntfy/webhook 的口径）：sendHit 最终结果落定后
+   * 回调一次 `input.report?.(this.id, true/false, error?)`，失败回调后照常上抛。
    */
-  async sendHit(
-    topic: Topic,
-    matchedKeywords: string[],
-    commentary?: string | null,
-    matchedRule?: string | null
-  ): Promise<void> {
-    await this.enqueue(() =>
-      this.deliver(formatHitMessage(topic, matchedKeywords, commentary, matchedRule), 'HTML')
-    )
+  async sendHit(input: HitMessageInput): Promise<void> {
+    try {
+      await this.enqueue(() =>
+        this.deliver(
+          formatHitMessage(
+            input.topic,
+            input.matchedKeywords,
+            input.commentary,
+            input.matchedRule
+          ),
+          'HTML'
+        )
+      )
+      input.report?.(this.id, true)
+    } catch (err) {
+      input.report?.(this.id, false, err instanceof Error ? err.message : String(err))
+      throw err
+    }
   }
 
   async sendTest(): Promise<void> {
