@@ -1,7 +1,33 @@
-import { contextBridge } from 'electron'
+/**
+ * preload（contextIsolation 开启）：只经 contextBridge 暴露白名单 API。
+ * 形状单一事实源是 src/shared/ipc.ts 的 DesktopApi；通道名/载荷类型全走 IPC 常量。
+ * 事件订阅（onStatus/onHit/onLog）返回取消订阅函数，渲染进程卸载组件时调用。
+ */
+import { contextBridge, ipcRenderer } from 'electron'
+import { IPC, type DesktopApi } from '../shared/ipc'
+import type { EngineStatus, HitRecord, LogEntry } from '../shared/types'
 
-// 占位：S11 IPC 契约冻结后由 desktop 集成替换为白名单 API。
+function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
+  const listener = (_event: unknown, payload: T): void => {
+    callback(payload)
+  }
+  ipcRenderer.on(channel, listener)
+  return () => {
+    ipcRenderer.removeListener(channel, listener)
+  }
+}
 
-contextBridge.exposeInMainWorld('api', {
-  ping: (): string => 'pong'
-})
+const api: DesktopApi = {
+  getConfig: () => ipcRenderer.invoke(IPC.getConfig),
+  saveConfig: (config) => ipcRenderer.invoke(IPC.saveConfig, config),
+  getStatus: () => ipcRenderer.invoke(IPC.getStatus),
+  getHits: () => ipcRenderer.invoke(IPC.getHits),
+  getLogs: () => ipcRenderer.invoke(IPC.getLogs),
+  engineControl: (command) => ipcRenderer.invoke(IPC.engineControl, command),
+  openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url),
+  onStatus: (callback) => subscribe<EngineStatus>(IPC.evStatus, callback),
+  onHit: (callback) => subscribe<HitRecord>(IPC.evHit, callback),
+  onLog: (callback) => subscribe<LogEntry>(IPC.evLog, callback)
+}
+
+contextBridge.exposeInMainWorld('api', api)
