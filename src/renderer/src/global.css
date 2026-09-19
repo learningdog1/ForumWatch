@@ -255,6 +255,7 @@ textarea,
   font-size: var(--fs-12);
   font-weight: 400;
   color: var(--text-3);
+  white-space: nowrap;
 }
 
 .card-count {
@@ -286,14 +287,14 @@ textarea,
   font-size: var(--fs-12);
 }
 
-/* ── 空态（D8 ⑤：插画 + 引导文案 + 可选操作） ──────────────────── */
+/* ── 空态（D8 ⑤：插画 + 引导文案 + 可选操作；紧凑档） ──────────── */
 
 .empty-state {
-  padding: var(--space-6) var(--space-4);
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
   text-align: center;
 }
 .empty-illus {
@@ -309,7 +310,7 @@ textarea,
   font-size: var(--fs-12);
   color: var(--text-3);
   max-width: 380px;
-  line-height: 1.65;
+  line-height: 1.6;
 }
 .empty-state-action {
   margin-top: var(--space-1);
@@ -488,23 +489,21 @@ textarea,
   color: var(--text-2);
   font-size: var(--fs-12);
   font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--text-3) 38%, transparent);
 }
 .ai-mode.ai {
   background: var(--ai-bg);
+  border-color: color-mix(in srgb, var(--ai) 45%, transparent);
   color: var(--ai);
 }
 .ai-calls {
   font-size: var(--fs-12);
   color: var(--text-3);
 }
+/* 降级提示统一琥珀弱警示（未配置 / 配额耗尽都是"降级"信号） */
 .ai-degraded {
   margin-top: var(--space-1);
   font-size: var(--fs-12);
-}
-.ai-degraded.muted {
-  color: var(--text-3);
-}
-.ai-degraded.warn {
   color: var(--warn);
 }
 .ai-err {
@@ -515,6 +514,18 @@ textarea,
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: help;
+}
+
+/* 操作条：子卡底部整行右对齐 */
+.subactions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  background: var(--card);
+  padding: var(--space-2) var(--space-3);
 }
 
 .statuscard .lasterr:last-child,
@@ -581,13 +592,25 @@ textarea,
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: var(--btn-primary-bg, var(--accent));
   border-color: transparent;
-  color: var(--on-accent);
+  color: #ffffff;
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--btn-primary-hover, var(--accent-hover));
   border-color: transparent;
+}
+
+/* 危险操作（暂停监控）：红描边弱底 */
+.btn-danger {
+  border-color: color-mix(in srgb, var(--err) 55%, transparent);
+  color: var(--err);
+  background: transparent;
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--err-bg);
+  border-color: color-mix(in srgb, var(--err) 75%, transparent);
+  color: var(--err);
 }
 
 .actions {
@@ -715,6 +738,7 @@ textarea,
   border-radius: 999px;
   background: var(--chip-bg);
   color: var(--text-2);
+  border: 1px solid color-mix(in srgb, var(--text-3) 38%, transparent);
 }
 .hit-how.semantic .how-badge {
   background: var(--ai-bg);
@@ -784,9 +808,13 @@ textarea,
 .log-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* 折行悬挂缩进：时间戳列对齐（时间宽 58px + 间距 8px） */
+  padding-left: 66px;
+  text-indent: -66px;
 }
 .log-line .t {
   color: var(--text-3);
+  opacity: 0.75;
   margin-right: var(--space-2);
 }
 .log-line.info {

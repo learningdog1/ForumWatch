@@ -159,7 +159,7 @@ export function Reports() {
           className={`report-date${selected === today ? ' active' : ''}`}
           onClick={() => setSelected(today)}
         >
-          <span className="label">{formatDayLabel(today, today)}</span>
+          <span className="label">{formatDayLabel(today, today, true)}</span>
           {!dates.includes(today) && <span className="sub">未生成</span>}
         </button>
         {historyDates.length > 0 && <div className="report-rail-sep">更早</div>}
@@ -170,7 +170,7 @@ export function Reports() {
             className={`report-date${selected === d ? ' active' : ''}`}
             onClick={() => setSelected(d)}
           >
-            <span className="label">{formatDayLabel(d, today)}</span>
+            <span className="label">{formatDayLabel(d, today, true)}</span>
           </button>
         ))}
       </aside>

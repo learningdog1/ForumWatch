@@ -1,12 +1,12 @@
 /**
- * 监控台：状态卡 + 操作按钮（暂停/恢复、立即轮询、发送测试通知）
- * + 最近命中列表 + 运行日志。数据全部来自 useApi（全量 + 增量）。
+ * 监控台：状态卡（含来源/AI 状态与操作条）+ 最近命中列表 + 运行日志。
+ * 数据全部来自 useApi（全量 + 增量）；按钮逻辑在本层，
+ * 摆放与分级（danger/普通/主按钮）在 StatusCard 的 subactions。
  */
 import { useState } from 'react'
 import { HitList } from '../components/HitList'
 import { LogView } from '../components/LogView'
 import { StatusCard } from '../components/StatusCard'
-import { IconPause, IconPlay, IconRefresh, IconSend } from '../components/icons'
 import type { ApiState } from '../hooks/useApi'
 import { useNow } from '../hooks/useNow'
 
@@ -47,33 +47,25 @@ export function Dashboard(props: ApiState) {
 
   return (
     <div className="page page-dashboard">
-      <StatusCard status={status} now={now} />
+      <StatusCard
+        status={status}
+        now={now}
+        actions={{
+          paused,
+          busy,
+          onPauseToggle: () => void control(paused ? 'resume' : 'pause'),
+          onRunNow: () => void control('runNow'),
+          onSendTest: () => void sendTest(),
+          feedback
+        }}
+      />
 
-      <section className="card">
-        <div className="actions">
-          <button type="button" className="btn" disabled={busy} onClick={() => void control(paused ? 'resume' : 'pause')}>
-            {paused ? <IconPlay size={14} /> : <IconPause size={14} />}
-            {paused ? '恢复监控' : '暂停监控'}
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy || paused}
-            title={paused ? '已暂停：先恢复监控' : '忽略等待，立即补一轮轮询'}
-            onClick={() => void control('runNow')}
-          >
-            <IconRefresh size={14} />
-            立即轮询
-          </button>
-          <button type="button" className="btn" disabled={busy} onClick={() => void sendTest()}>
-            <IconSend size={14} />
-            发送测试通知
-          </button>
-          {feedback != null && <span className={`feedback ${feedback.kind}`}>{feedback.text}</span>}
-        </div>
-      </section>
-
-      <HitList hits={hits} />
+      <HitList
+        hits={hits}
+        totalHits={status.totalHits}
+        runNowDisabled={busy || paused}
+        onRunNow={() => void control('runNow')}
+      />
       <LogView logs={logs} />
     </div>
   )

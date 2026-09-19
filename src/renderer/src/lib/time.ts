@@ -50,16 +50,20 @@ export function localDate(d: Date = new Date()): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 }
 
-/** 'YYYY-MM-DD' → 展示标签："今天 · 09-19 周五" 这类；无效原样返回 */
-export function formatDayLabel(date: string, todayStr: string): string {
+/**
+ * 'YYYY-MM-DD' → 展示标签；无效原样返回。
+ * short=true 给侧栏窄列用（"今天 09-19" / "昨天 09-18" / "09-17 周三"），
+ * 完整版（"今天 · 09-19 周五"）给正文标题用。
+ */
+export function formatDayLabel(date: string, todayStr: string, short = false): string {
   const d = new Date(`${date}T00:00:00`)
   if (Number.isNaN(d.getTime())) return date
   const weekdays = ['日', '一', '二', '三', '四', '五', '六']
   const md = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
   const weekday = `周${weekdays[d.getDay()]}` as const
-  if (date === todayStr) return `今天 · ${md} ${weekday}`
   const yesterday = new Date()
   yesterday.setDate(yesterday.getDate() - 1)
-  if (date === localDate(yesterday)) return `昨天 · ${md} ${weekday}`
+  if (date === todayStr) return short ? `今天 ${md}` : `今天 · ${md} ${weekday}`
+  if (date === localDate(yesterday)) return short ? `昨天 ${md}` : `昨天 · ${md} ${weekday}`
   return `${md} ${weekday}`
 }

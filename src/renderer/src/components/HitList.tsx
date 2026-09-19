@@ -9,6 +9,7 @@ import type { HitRecord } from '@shared/types'
 import { sourceLabel } from '../lib/status'
 import { formatClock } from '../lib/time'
 import { EmptyState } from './EmptyState'
+import { IconRefresh } from './icons'
 
 function PushState(props: { hit: HitRecord }) {
   const { hit } = props
@@ -62,7 +63,13 @@ function MatchInfo(props: { hit: HitRecord }) {
   )
 }
 
-export function HitList(props: { hits: HitRecord[] }) {
+export function HitList(props: {
+  hits: HitRecord[]
+  /** 持久累计命中数（EngineStatus.totalHits）：与内存列表口径不同，空态联动展示 */
+  totalHits: number
+  onRunNow: () => void
+  runNowDisabled: boolean
+}) {
   const { hits } = props
   return (
     <section className="card">
@@ -72,10 +79,29 @@ export function HitList(props: { hits: HitRecord[] }) {
       </div>
       <div className="card-scroll">
         {hits.length === 0 ? (
-          <EmptyState
-            title="还没有命中"
-            hint="配置关键词或兴趣描述后，论坛新帖命中时会出现在这里"
-          />
+          props.totalHits > 0 ? (
+            <EmptyState
+              title="启动后还没有新命中"
+              hint={`累计已命中 ${props.totalHits} 条；命中列表只保留本次运行（重启后清空），历史命中见「今日回顾」日报`}
+              action={
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={props.runNowDisabled}
+                  title={props.runNowDisabled ? '已暂停：先恢复监控' : '忽略等待，立即补一轮轮询'}
+                  onClick={props.onRunNow}
+                >
+                  <IconRefresh size={14} />
+                  立即轮询
+                </button>
+              }
+            />
+          ) : (
+            <EmptyState
+              title="还没有命中"
+              hint="配置关键词或兴趣描述后，论坛新帖命中时会出现在这里"
+            />
+          )
         ) : (
           hits.map((hit) => (
             <div className="hit" key={hit.topic.id}>

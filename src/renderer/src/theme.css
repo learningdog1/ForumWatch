@@ -64,6 +64,9 @@
   --accent: #2f6fd6;
   --accent-hover: #2861bd;
   --on-accent: #ffffff;
+  /* 主按钮（深蓝底白字，深浅两套同构） */
+  --btn-primary-bg: #2f6fd6;
+  --btn-primary-hover: #2861bd;
   --ok: #1f8a44;
   --ok-bg: rgba(31, 138, 68, 0.12);
   --warn: #a85a00;
@@ -86,9 +89,10 @@
     --input-bg: #202026;
     --chip-bg: #3b3b43;
 
+    /* 辅助文字提亮一档（looker：dark 下帮助文案/标签灰对比不足） */
     --text: #f0f0f2;
-    --text-2: #b0b0b8;
-    --text-3: #83838d;
+    --text-2: #b3b3bb;
+    --text-3: #94949e;
 
     --border: #3b3b42;
     --border-strong: #4b4b54;
@@ -99,6 +103,9 @@
     --accent: #5a9bf7;
     --accent-hover: #6fa9ff;
     --on-accent: #0e1218;
+    /* 主按钮深浅同构：同为深蓝底白字 */
+    --btn-primary-bg: #2f6fd6;
+    --btn-primary-hover: #255eb0;
     --ok: #41c173;
     --ok-bg: rgba(65, 193, 115, 0.16);
     --warn: #eda13f;

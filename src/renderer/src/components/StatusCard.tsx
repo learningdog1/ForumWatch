@@ -1,7 +1,8 @@
 /**
  * 状态卡：大号状态徽标（与 deriveTrayLabel 同优先级派生）+ 四格指标
  * + 来源状态（per-source：健康点 / 最近成功 / 退避倒计时）
- * + AI 状态（生效模式徽标 / 降级提示 / 今日调用 / 最近错误）。
+ * + AI 状态（生效模式徽标 / 降级提示 / 今日调用 / 最近错误）
+ * + 操作条（子卡底部右对齐：暂停 danger / 测试灰描边 / 立即轮询主按钮）。
  * 下次轮询在已暂停时按契约忽略 nextPollAt（pause 后它保留旧值），显示 "—"。
  *
  * AI 展示口径（W2-c）：看 effectiveMode（实际生效）而非 config.ai.matchMode；
@@ -11,7 +12,17 @@ import { deriveTrayLabel } from '@shared/ipc'
 import type { AiRuntimeStatus, EngineStatus, SourceStatus } from '@shared/types'
 import { deriveRunState, matchModeLabel, sourceLabel, sourceToneKey } from '../lib/status'
 import { formatCountdown, formatRelative } from '../lib/time'
-import { IconBroadcast, IconDot, IconSparkles } from './icons'
+import { IconBroadcast, IconDot, IconPause, IconPlay, IconRefresh, IconSend, IconSparkles } from './icons'
+
+/** 操作条（Dashboard 注入；按钮逻辑留在页面层，状态卡只管摆放与分级） */
+export interface StatusActions {
+  paused: boolean
+  busy: boolean
+  onPauseToggle(): void
+  onRunNow(): void
+  onSendTest(): void
+  feedback: { kind: 'ok' | 'err' | 'pending'; text: string } | null
+}
 
 function Metric(props: { k: string; v: string; tone?: 'warn' | 'err'; title?: string }) {
   return (
@@ -68,7 +79,7 @@ function AiBlock(props: { ai: AiRuntimeStatus }) {
         </span>
       </div>
       {ai.degraded === 'unconfigured' && (
-        <div className="ai-degraded muted">AI 未配置，语义监控停用</div>
+        <div className="ai-degraded warn">AI 未配置，语义监控停用</div>
       )}
       {ai.degraded === 'quota-exhausted' && (
         <div className="ai-degraded warn">今日 AI 配额用尽，已降级字面匹配</div>
@@ -82,8 +93,43 @@ function AiBlock(props: { ai: AiRuntimeStatus }) {
   )
 }
 
-export function StatusCard(props: { status: EngineStatus; now: number }) {
-  const { status, now } = props
+/** 操作条：子卡底部右对齐（暂停 danger / 测试灰描边 / 立即轮询主按钮） */
+function SubActions(props: { actions: StatusActions }) {
+  const { actions } = props
+  return (
+    <div className="subactions">
+      <button
+        type="button"
+        className={`btn${actions.paused ? '' : ' btn-danger'}`}
+        disabled={actions.busy}
+        onClick={actions.onPauseToggle}
+      >
+        {actions.paused ? <IconPlay size={14} /> : <IconPause size={14} />}
+        {actions.paused ? '恢复监控' : '暂停监控'}
+      </button>
+      <button type="button" className="btn" disabled={actions.busy} onClick={actions.onSendTest}>
+        <IconSend size={14} />
+        发送测试通知
+      </button>
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={actions.busy || actions.paused}
+        title={actions.paused ? '已暂停：先恢复监控' : '忽略等待，立即补一轮轮询'}
+        onClick={actions.onRunNow}
+      >
+        <IconRefresh size={14} />
+        立即轮询
+      </button>
+      {actions.feedback != null && (
+        <span className={`feedback ${actions.feedback.kind}`}>{actions.feedback.text}</span>
+      )}
+    </div>
+  )
+}
+
+export function StatusCard(props: { status: EngineStatus; now: number; actions: StatusActions }) {
+  const { status, now, actions } = props
   const state = deriveRunState(status)
 
   return (
@@ -121,6 +167,7 @@ export function StatusCard(props: { status: EngineStatus; now: number }) {
           )}
         </div>
         <AiBlock ai={status.ai} />
+        <SubActions actions={actions} />
       </div>
       {status.lastError != null && (
         <div className="lasterr" title={status.lastError}>

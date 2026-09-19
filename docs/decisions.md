@@ -95,3 +95,15 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 **D8 UI 路线**：保留零框架手写 CSS + 令牌升级（不引入 tailwind/radix）。五个方向按性价比：① emoji 全换内联 SVG sprite（stroke 1.5px、currentColor、16/20 两档，品牌标复用 app 图标单体路径）；② 排版纪律（tnum 等宽数字、12/13/15/20/28 字号阶、4px 栅格、标题字距）；③ 材质层次（双层阴影、圆角 6/10/14 阶、侧栏带 accent 色相、dark 拉开明度差）；④ 微交互（120-180ms transition、focus-visible ring、新命中行入场动画）；⑤ 空态插画 + 引导文案。布局骨架不动。
 
 **新增坑清单**：① getSources 必须是访问器；② 新旧双装=双推送（发布说明置顶）；③ 迁移 seen 拷贝失败 → 强制重置 baselineDone；④ hits/reports 日分桶与 timeHHMM 判断必须本地时区（ISO slice(0,10) 是错的）；⑤ headless.ts 必须同步接线 AI 能力（或显式 no-op）；⑥ 'both' 模式 AI 判 hit 但推送失败的帖子不入 seen 下轮重评——verdict Map 为这个角落存在；⑦ TG 4096 是 UTF-16 单位数，分段切点按行聚合；⑧ sharp 平台二进制只进 lockfile 不进产物，无需 .npmrc。
+
+---
+
+## 第二轮执行纪要（2026-09-19）
+
+- **D1–D3 已落地，无偏差**：更名与首启迁移（字节级拷贝 config/seen/state、logs/ 不拷、旧目录保留、seen 拷失败强制重置 baselineDone、新 config.json 即迁移标记）；配置 v2 + seen/state 迁移函数；多来源引擎（getSources 访问器、per-source 独立退避与状态、聚合 health 取最差、全局间隔 = max(配置间隔, 最差剩余退避)）。
+- **D4 已落地，无偏差**：批式单请求（cap 12）+ pollOnce 内联 await、评估失败不进 consecutiveFailures、未决不入 seen、排除词先于 AI、300/日限额（常量）、未配置/耗尽降级字面、verdict 仅内存 Map。
+- **D5 已落地，一处执行期细化**：「今日回顾 → 立即生成」对当天已有日报为**覆盖重生成**（裁定只约束了自动触发的"不存在才生成"，手动路径补齐为覆盖语义，writeFile 直接覆写）。3500 字符 UTF-16 按行分段、零命中心跳、attempts≤3、仅当天补做均照裁定。
+- **D6 已落地，无偏差**：第三 aiClient（30s 超时）、proxyScope 复用（telegram-only 时 AI 直连）、redactSecrets 全链路脱敏、baseUrl 去尾斜杠拼 /chat/completions。
+- **D7 已落地，一处执行期细化**：**16px 图标去青点**（looker 复核返修：青点折算 16px 后距环内缘不足 0.2px，抗锯齿后与环顶描边熔成糊团——16 档与 Template 对齐只留"环 + 针"，青点保留在 32 档）。npm run icons（sharp devDep）+ design/ SVG 源入库照裁定。
+- **D8 已落地**：三 tab（监控台/今日回顾/设置）、设置八卡片（关键词/Telegram/AI 模型/监控模式/每日总结/轮询/网络/行为）、命中列表来源徽标 + 字面/语义命中方式徽标 + 语义理由、AI 状态块看 effectiveMode 与 degraded 三态。
+- **坑清单 ①–⑧ 全部兑现**：含 ⑤ headless.ts 同款接线 AI 能力（aiClient/evaluator/hitsStore/DailyReportService）。

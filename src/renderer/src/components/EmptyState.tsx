@@ -8,7 +8,7 @@ import { IllustrationRadar } from './icons'
 export function EmptyState(props: { title: string; hint?: string; action?: ReactNode }) {
   return (
     <div className="empty-state">
-      <IllustrationRadar size={64} className="empty-illus" />
+      <IllustrationRadar size={44} className="empty-illus" />
       <div className="empty-state-title">{props.title}</div>
       {props.hint != null && <div className="empty-state-hint">{props.hint}</div>}
       {props.action != null && <div className="empty-state-action">{props.action}</div>}
