@@ -23,6 +23,10 @@
  *   key 为 string 且 hit 为 boolean），防误吞模型回显的 interests 字符串数组。
  *
  * 零 electron 依赖；provider 由外部注入（单测全 mock）。
+ * R7-W4（DEC-5）反馈闭环：构造 deps 可选注入 getFeedbackExamples（正负例
+ * 标题，通常接 FileFeedbackStore.recentForPrompt），每次评估现读并追加在
+ * SYSTEM_PROMPT 尾部（格式与护栏见 buildFeedbackSection）；无反馈时 prompt
+ * 与基线逐字节一致。engine 不动——反馈只经本模块进 prompt。
  */
 import type { Topic } from '../../shared/types'
 import { AiProviderError, type AiProvider } from './provider'
@@ -52,6 +56,13 @@ export interface SemanticEvaluatorDeps {
   provider: Pick<AiProvider, 'chat'>
   /** 测试注入假时钟（当前实现不读时钟，保留给未来节流/冷却用） */
   now?: () => number
+  /**
+   * R7-W4（DEC-5）反馈闭环：正负例标题访问器（通常接 FileFeedbackStore 的
+   * recentForPrompt，新→旧各 ≤8 条）。**每次 evaluate 现读**——投票/改票/
+   * 撤销后下一次评估即生效。缺省 / 返回空时 system prompt 与基线逐字节一致
+   * （旧测试零回归）；标题换行剥离 + 总长护栏见 buildFeedbackSection。
+   */
+  getFeedbackExamples?: () => { positive: string[]; negative: string[] }
 }
 
 /**
@@ -72,11 +83,88 @@ const SYSTEM_PROMPT =
   '{"verdicts":[{"key":"nodeseek:1","hit":true,"score":0.95,"reason":"与自建主机相关"},' +
   '{"key":"nodeseek:2","hit":false,"score":0.1}]}。'
 
+// ---- R7-W4（DEC-5）反馈注入段 ------------------------------------------------
+
+/** 负例段头（列表项随后，每行一个标题） */
+const FEEDBACK_NEGATIVE_HEADER = '\n以下标题用户明确表示不想要，判定时宁可判不相关：'
+/** 正例段头 */
+const FEEDBACK_POSITIVE_HEADER = '\n以下标题用户明确表示想要，同类新帖可判相关：'
+/** 注入段总长护栏（字符）：超出按条截断（段头保留，条目整条取舍，绝不截半条） */
+const FEEDBACK_SECTION_MAX_CHARS = 2000
+
+/**
+ * 组装反馈注入段（追加在 SYSTEM_PROMPT 之后；两段都空 → 空串 = 不追加，
+ * 无反馈路径的 system prompt 与基线逐字节一致）。
+ * - 段序：负例在前、正例在后（负例是"宁可判不相关"的强信号，优先呈现）；
+ *   只有负例或只有正例时只注入存在的段。
+ * - 标题清洗：剥离换行（\r\n 归一为空格）+ trim——帖子标题里的换行会被模型
+ *   读成伪造的新列表项（prompt 注入面），清洗后每条恒为单行。
+ * - 长度护栏：注入段总长 > 2000 字符时按条截断——段头必留，条目逐条入账直到
+ *   预算耗尽（条目序 = 调用方给的新→旧，截掉的是最旧的）。
+ */
+function buildFeedbackSection(positive: string[], negative: string[]): string {
+  const blocks: Array<{ header: string; titles: string[] }> = []
+  if (negative.length > 0) blocks.push({ header: FEEDBACK_NEGATIVE_HEADER, titles: negative })
+  if (positive.length > 0) blocks.push({ header: FEEDBACK_POSITIVE_HEADER, titles: positive })
+  if (blocks.length === 0) return ''
+  const rendered = blocks
+    .map((b) => [b.header, ...b.titles.map((t) => `- ${sanitizeFeedbackTitle(t)}`)].join('\n'))
+    .join('')
+  if (rendered.length <= FEEDBACK_SECTION_MAX_CHARS) return rendered
+  let budget = FEEDBACK_SECTION_MAX_CHARS
+  const parts: string[] = []
+  for (const b of blocks) {
+    if (b.header.length > budget) break
+    parts.push(b.header)
+    budget -= b.header.length
+    for (const t of b.titles) {
+      const line = `\n- ${sanitizeFeedbackTitle(t)}`
+      if (line.length > budget) break
+      parts.push(line)
+      budget -= line.length
+    }
+  }
+  return parts.join('')
+}
+
+/** 反馈标题清洗：剥离换行（防注入伪造列表项）+ trim；清洗后为空的条目丢弃 */
+function sanitizeFeedbackTitle(title: string): string {
+  return title.replace(/[\r\n]+/g, ' ').trim()
+}
+
+/** accessor 返回值的防御性归一：非数组按空；非字符串 / 清洗后空的条目丢弃 */
+function normalizeFeedbackTitles(list: unknown): string[] {
+  if (!Array.isArray(list)) return []
+  const out: string[] = []
+  for (const t of list) {
+    if (typeof t !== 'string') continue
+    if (sanitizeFeedbackTitle(t) === '') continue
+    out.push(t)
+  }
+  return out
+}
+
 export class SemanticEvaluator {
   private readonly provider: Pick<AiProvider, 'chat'>
+  private readonly getFeedbackExamples: (() => { positive: string[]; negative: string[] }) | undefined
 
   constructor(deps: SemanticEvaluatorDeps) {
     this.provider = deps.provider
+    this.getFeedbackExamples = deps.getFeedbackExamples
+  }
+
+  /**
+   * 每次评估组装 system prompt：基线 SYSTEM_PROMPT +（有反馈且非空时）
+   * DEC-5 反馈注入段。无 accessor / 反馈为空 → 恒返回基线常量
+   * （与 R7-W4 之前的 system prompt 逐字节一致，旧路径零回归）。
+   */
+  private buildSystemPrompt(): string {
+    if (this.getFeedbackExamples === undefined) return SYSTEM_PROMPT
+    const raw = this.getFeedbackExamples()
+    const positive = normalizeFeedbackTitles(raw?.positive)
+    const negative = normalizeFeedbackTitles(raw?.negative)
+    const section = buildFeedbackSection(positive, negative)
+    return section === '' ? SYSTEM_PROMPT : SYSTEM_PROMPT + section
   }
 
   /**
@@ -108,7 +196,7 @@ export class SemanticEvaluator {
       }))
     })
     const content = await this.provider.chat({
-      system: SYSTEM_PROMPT,
+      system: this.buildSystemPrompt(),
       user,
       jsonMode: true,
       timeoutMs: EVALUATE_TIMEOUT_MS,
