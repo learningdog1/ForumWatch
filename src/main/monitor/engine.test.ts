@@ -7,12 +7,18 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { MonitorEngine } from './engine'
+import {
+  DAILY_AI_CALL_LIMIT,
+  DAILY_COMMENTARY_LIMIT,
+  MonitorEngine
+} from './engine'
 import { computeBackoffMs, PollScheduler } from './poller'
 import { FileSeenStore } from './dedup'
 import { FileEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
 import type { SemanticEvaluator, SemanticVerdict } from '../ai/evaluator'
+import { CommentGenerator } from '../ai/commentary'
+import type { ChatRequest } from '../ai/provider'
 import { TelegramError } from '../notify/telegram'
 import { createLogger, type Logger } from '../logger'
 import { DEFAULT_APP_CONFIG, type AppConfig, type HitRecord, type Topic } from '../../shared/types'
@@ -84,6 +90,8 @@ function build(
     evaluator?: { evaluate: Mock }
     /** 命中持久化 mock（D5） */
     hitsStore?: { append: Mock }
+    /** 锐评生成器（第三轮；mock 或真实 CommentGenerator 实例；缺省不注入 = 恒无锐评） */
+    commentaryGenerator?: Pick<CommentGenerator, 'generate' | 'prune'>
   } = {}
 ): Harness {
   const config: AppConfig = {
@@ -137,7 +145,11 @@ function build(
     ...(opts.evaluator !== undefined
       ? { semanticEvaluator: opts.evaluator as unknown as SemanticEvaluator }
       : {}),
-    ...(opts.hitsStore !== undefined ? { hitsStore: opts.hitsStore } : {})
+    ...(opts.hitsStore !== undefined ? { hitsStore: opts.hitsStore } : {}),
+    // 第三轮：锐评生成器可选注入（不注入 = 恒 null，与旧装配行为一致）
+    ...(opts.commentaryGenerator !== undefined
+      ? { commentaryGenerator: opts.commentaryGenerator }
+      : {})
   })
 
   return {
@@ -1524,5 +1536,323 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
     expect(h.seen.has('nodeseek:40')).toBe(true)
     expect(h.state.getFor('nodeseek').maxSeenTopicId).toBeNull() // 阈值永不写入
     expect(h.logger.getRecent().some((e) => e.msg.includes('id threshold'))).toBe(false)
+  })
+})
+
+describe('AI 锐评集成（第三轮）', () => {
+  /** 已配置好的 AI 段（provider 三项齐备；锐评默认关，按需开） */
+  function aiConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
+    return {
+      provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-k', model: 'm' },
+      matchMode: 'literal',
+      interests: [],
+      dailyReport: { enabled: false, timeHHMM: '22:00' },
+      commentary: { enabled: false },
+      ...overrides
+    }
+  }
+
+  /** mock 锐评生成器（结构满足 Pick<CommentGenerator, 'generate' | 'prune'>） */
+  function commentMock(text: string | null = '一句锐评') {
+    const generate = vi.fn(async (_t: Topic) => text)
+    const prune = vi.fn((_keep: ReadonlySet<string>) => {})
+    return { generate, prune }
+  }
+
+  /**
+   * 直接操纵引擎内部 AI 计数器（fake 时钟冻结在同一天，不触发翻转清零；
+   * 与 retryMapSize 同款"测试专用观测面"先例——跑 300 次语义调用来耗尽配额不划算）。
+   */
+  function setAiCounters(
+    engine: MonitorEngine,
+    aiCallsToday: number,
+    commentaryToday: number
+  ): void {
+    const internals = engine as unknown as Record<string, number>
+    internals.aiCallsToday = aiCallsToday
+    internals.commentaryToday = commentaryToday
+  }
+
+  /** 标准两轮流程：基线 → 出一条 literal 命中新帖（title 含默认关键词「羊毛」） */
+  async function literalHitRound(h: Awaited<ReturnType<typeof build>>): Promise<void> {
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
+    await h.engine.pollOnce()
+  }
+
+  it('literal 命中：generate 被调（盖章后的 topic）、sendHit 收到第三参、HitRecord.commentary 正确、双计数 +1', async () => {
+    const gen = commentMock('犀利点评')
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'literal', commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await literalHitRound(h)
+
+    expect(gen.generate).toHaveBeenCalledTimes(1)
+    expect(gen.generate.mock.calls[0]![0]).toMatchObject({ id: '2', sourceId: 'nodeseek' })
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('2')
+    expect(h.sendHit.mock.calls[0]![1]).toEqual(['羊毛'])
+    expect(h.sendHit.mock.calls[0]![2]).toBe('犀利点评') // 第三参
+    const hits = h.engine.getRecentHits()
+    expect(hits[0].commentary).toBe('犀利点评')
+    expect(hits[0].matchedBy).toBe('literal')
+    expect(hits[0].notifiedAt).not.toBeNull()
+    const st = h.engine.getStatus()
+    expect(st.ai.callsToday).toBe(1) // 锐评计入总桶
+    expect(st.ai.commentaryToday).toBe(1)
+  })
+
+  it('语义命中同样带锐评：evaluate 与 generate 各一次，callsToday=2 / commentaryToday=1', async () => {
+    const gen = commentMock('语义锐评')
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '与自建主机相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: {
+        ai: aiConfig({
+          matchMode: 'semantic',
+          interests: ['自建主机'],
+          commentary: { enabled: true }
+        })
+      },
+      evaluator: { evaluate },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '出手一台家用小主机' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(gen.generate).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![2]).toBe('语义锐评')
+    const hits = h.engine.getRecentHits()
+    expect(hits[0]).toMatchObject({ matchedBy: 'semantic', semanticReason: '与自建主机相关' })
+    expect(hits[0].commentary).toBe('语义锐评')
+    const st = h.engine.getStatus()
+    expect(st.ai.callsToday).toBe(2) // 1 语义评估 + 1 锐评（共用总桶）
+    expect(st.ai.commentaryToday).toBe(1)
+  })
+
+  it('开关关（commentary.enabled=false）：不调 generate、sendHit 第三参 null、HitRecord.commentary null', async () => {
+    const gen = commentMock()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: false } }) },
+      commentaryGenerator: gen
+    })
+    await literalHitRound(h)
+
+    expect(gen.generate).not.toHaveBeenCalled()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.engine.getRecentHits()[0].commentary).toBeNull()
+    expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 0, commentaryToday: 0 })
+  })
+
+  it('provider 未配置：开关开也不调 generate（复用 aiConfigured 口径），推送照常', async () => {
+    const gen = commentMock()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: {
+        ai: aiConfig({
+          provider: { baseUrl: '', apiKey: '', model: '' },
+          commentary: { enabled: true }
+        })
+      },
+      commentaryGenerator: gen
+    })
+    await literalHitRound(h)
+
+    expect(gen.generate).not.toHaveBeenCalled()
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 字面命中照常推送，只是无锐评
+    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.engine.getRecentHits()[0].commentary).toBeNull()
+    expect(h.engine.getStatus().ai.commentaryToday).toBe(0)
+  })
+
+  it('总配额耗尽（callsToday=300）：不调 generate（锐评静默降级），推送照常', async () => {
+    const gen = commentMock()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线（计数器已按今日登记）
+    setAiCounters(h.engine, DAILY_AI_CALL_LIMIT, 0)
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(gen.generate).not.toHaveBeenCalled()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.engine.getRecentHits()[0].commentary).toBeNull()
+    expect(h.engine.getStatus().ai.callsToday).toBe(DAILY_AI_CALL_LIMIT) // 不再增长
+  })
+
+  it('子限额耗尽（commentaryToday=100）：不调 generate；总桶有余量时语义评估照常可用', async () => {
+    const gen = commentMock()
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: {
+        ai: aiConfig({ matchMode: 'both', interests: ['自建主机'], commentary: { enabled: true } })
+      },
+      evaluator: { evaluate },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线
+    setAiCounters(h.engine, 100, DAILY_COMMENTARY_LIMIT)
+    // 3 = literal 命中（推送、锐评降级）；2 = 非字面帖进语义批（miss 入集）
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛大促' }),
+      topic('2', { title: '闲聊杂谈' }),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+
+    // 子限额只约束锐评：语义评估照常调（总桶 100/300 未耗尽）——两用途无需调序
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    // 锐评被静默降级：不打 LLM、无锐评推送，但命中本身照常推
+    expect(gen.generate).not.toHaveBeenCalled()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('3')
+    expect(h.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h.engine.getRecentHits()[0].commentary).toBeNull()
+    expect(h.engine.getStatus().ai).toMatchObject({
+      callsToday: 101, // 语义评估 +1；锐评不再计数
+      commentaryToday: DAILY_COMMENTARY_LIMIT
+    })
+  })
+
+  it('跨日翻转：callsToday 与 commentaryToday 一并清零，新日锐评恢复', async () => {
+    const gen = commentMock()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await literalHitRound(h)
+    expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 1, commentaryToday: 1 })
+
+    vi.advanceTimersByTime(48 * 3600 * 1000) // 跨过本地自然日（48h 对 DST 也安全）
+    h.fetchLatest.mockImplementation(async () => [topic('3', { title: '羊毛新帖' }), topic('2')])
+    await h.engine.pollOnce()
+
+    expect(gen.generate).toHaveBeenCalledTimes(2) // 新日锐评恢复（未被昨日计数卡死）
+    expect(h.sendHit.mock.calls[1]![2]).toBe('一句锐评')
+    expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 1, commentaryToday: 1 }) // 清零后重新计数
+  })
+
+  it('推送失败重试轮：CommentGenerator 内部缓存防二次 LLM，sendHit 仍带原锐评', async () => {
+    // 真实 CommentGenerator + mock provider（chat = LLM 打点面），spy generate 观测 engine 侧重调
+    const chat = vi.fn(async (_req: ChatRequest) => '原句锐评')
+    const gen = new CommentGenerator({ provider: { chat } })
+    const generateSpy = vi.spyOn(gen, 'generate')
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce() // 失败轮：generate 1 次 → LLM 1 次
+
+    expect(generateSpy).toHaveBeenCalledTimes(1)
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![2]).toBe('原句锐评')
+    const failed = h.engine.getRecentHits()[0]
+    expect(failed.commentary).toBe('原句锐评') // 失败轮 HitRecord 也带锐评
+    expect(failed.notifiedAt).toBeNull()
+    expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 1, commentaryToday: 1 })
+
+    await h.engine.pollOnce() // 重试轮：engine 再调 generate（缓存命中，不打 LLM）
+
+    expect(generateSpy).toHaveBeenCalledTimes(2)
+    expect(chat).toHaveBeenCalledTimes(1) // 缓存生效：无第二次 LLM 调用
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.sendHit.mock.calls[1]![2]).toBe('原句锐评') // 仍带原锐评
+    const done = h.engine.getRecentHits()[1]
+    expect(done.commentary).toBe('原句锐评')
+    expect(done.notifiedAt).not.toBeNull()
+    expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 2, commentaryToday: 2 }) // 调用即计数
+  })
+
+  it('prune：轮末收到 roundTopicKeys（基线/命中轮都调，滚出首页的键不在保留集）', async () => {
+    const gen = commentMock()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen
+    })
+    await h.engine.pollOnce() // 基线轮：页面 {1}
+    expect(gen.prune).toHaveBeenCalledTimes(1)
+    expect(gen.prune.mock.calls[0]![0]).toEqual(new Set(['nodeseek:1']))
+
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 命中轮：页面 {2,1}
+    expect(gen.prune).toHaveBeenCalledTimes(2)
+    expect(gen.prune.mock.calls[1]![0]).toEqual(new Set(['nodeseek:1', 'nodeseek:2']))
+
+    h.fetchLatest.mockImplementation(async () => [topic('1')])
+    await h.engine.pollOnce() // 2 滚出首页：保留集只剩 {1}
+    expect(gen.prune).toHaveBeenCalledTimes(3)
+    expect(gen.prune.mock.calls[2]![0]).toEqual(new Set(['nodeseek:1']))
+  })
+
+  it('deps 未注入 commentaryGenerator：行为与升级前一致（恒 null、sendHit 第三参 null、零计数）', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) } // 开关开也没用：没注入生成器
+    })
+    await literalHitRound(h)
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![2]).toBeNull() // engine 统一传 string|null，不传 undefined
+    const hits = h.engine.getRecentHits()
+    expect(hits[0].commentary).toBeNull()
+    expect('commentary' in hits[0]).toBe(true) // 新记录字段恒存在（值 null，非 undefined）
+    expect(h.engine.getStatus().ai).toMatchObject({ callsToday: 0, commentaryToday: 0 })
+  })
+
+  it('HitRecord.commentary 恒 string|null：generate 返回 null（负缓存）→ null；推送失败 → 文本保留', async () => {
+    // a) generate 返回 null（LLM 失败被模块消化）：sendHit 第三参与 HitRecord 均 null
+    const genNull = commentMock(null)
+    const h1 = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: genNull
+    })
+    await literalHitRound(h1)
+    expect(genNull.generate).toHaveBeenCalledTimes(1) // 调用即计数（返回 null 也计）
+    expect(h1.sendHit.mock.calls[0]![2]).toBeNull()
+    expect(h1.engine.getRecentHits()[0].commentary).toBeNull()
+    expect(h1.engine.getStatus().ai).toMatchObject({ callsToday: 1, commentaryToday: 1 })
+
+    // b) 推送失败但锐评已生成：HitRecord.commentary 保留文本，notifiedAt=null
+    //    （换 topic id：与 a) 共享同一 tmpdir，seen/state 已含 nodeseek:1/2）
+    const gen2 = commentMock('失败轮锐评')
+    const h2 = build({
+      impl: async () => [topic('9')],
+      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      commentaryGenerator: gen2
+    })
+    await h2.engine.pollOnce() // 基线（state 沿用 a) 的 baselineDone=true，9 为新帖入集）
+    h2.fetchLatest.mockImplementation(async () => [topic('10', { title: '羊毛' }), topic('9')])
+    h2.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h2.engine.pollOnce()
+    const hit = h2.engine.getRecentHits()[0]
+    expect(hit.commentary).toBe('失败轮锐评')
+    expect(hit.notifiedAt).toBeNull()
+    expect(hit.notifyError).toContain('telegram send failed')
   })
 })

@@ -26,6 +26,15 @@
  * - verdict 缓存（D4 坑⑥，F2）：语义命中但推送失败的帖 reason 存内存 Map
  *   （semanticVerdicts），下轮**不重进 AI 批**、按已判 hit 直接重试推送；
  *   推送成功/转静音后清除；帖子滚出首页即随轮末清理回收（F5）。
+ * - 锐评（第三轮）：processHit 内 sendHit 之前按四条件生成（开关开 / provider
+ *   已配置 / 总配额未耗尽 / 子限额 100 未耗尽），任一不满足 → commentary=null
+ *   不打 LLM；真调 generate 即双计数（callsToday 与 commentaryToday 各 +1，
+ *   成败都计——generate 内部消化异常）。子限额 100 保证语义评估在总桶里至少
+ *   剩 200 容量，两用途无需调序（literal 命中先于语义批烧配额是有意的先到先得）。
+ *   推送失败重试轮 generate 会被再次调用，但 CommentGenerator 内部缓存（含
+ *   失败负缓存）保证不再打 LLM；轮末与 pruneRetryMaps 同调用点、同一
+ *   roundTopicKeys 键集调 prune 清理其缓存。deps 未注入生成器 = 恒无锐评，
+ *   行为与升级前完全一致。
  *
  * per-source 运行态（SourceRuntime，内存）：health / lastSuccessAt / lastError /
  * consecutiveFailures / cooldownUntilMs——同一退避曲线 computeBackoffMs（含
@@ -78,6 +87,7 @@ import type { FileEngineState, SourceEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
 import type { SemanticEvaluator } from '../ai/evaluator'
 import { MAX_SEMANTIC_BATCH } from '../ai/evaluator'
+import type { CommentGenerator } from '../ai/commentary'
 import type { Logger } from '../logger'
 import {
   DEFAULT_APP_CONFIG,
@@ -97,6 +107,13 @@ export const HIT_RING_CAPACITY = 200
 
 /** AI 每日调用上限（D4：常量 300，v2 不进配置） */
 export const DAILY_AI_CALL_LIMIT = 300
+
+/**
+ * 锐评每日调用子限额（第三轮：常量 100，v2 不进配置）。与 300 总桶共用
+ * callsToday 计数；超限当日静默降级（无锐评推送，不打 LLM）——100 上限保证
+ * 语义评估在总桶里至少保留 200 容量，两用途无需调序。
+ */
+export const DAILY_COMMENTARY_LIMIT = 100
 
 /**
  * 全局去重键 = `${sourceId}:${topic.id}`（D2/D3）。与 v1 seen.json 迁移的前缀口径
@@ -169,9 +186,14 @@ export interface EngineDeps {
   seen: FileSeenStore
   /** 引擎状态持久化（per-source baselineDone / totalHits；按 sourceId getFor/setFor） */
   state: FileEngineState
-  /** Telegram 推送（TelegramNotifier 结构满足此接口；单测可全 mock） */
+  /**
+   * Telegram 推送（TelegramNotifier 结构满足此接口；单测可全 mock）。
+   * sendHit 第三参 commentary（第三轮 AI 锐评）：engine 统一传 string|null
+   * （不传 undefined）——null/空串时消息与两参版本逐字节一致，两参实现的
+   * 旧装配方结构兼容无需改动。
+   */
   notifier: {
-    sendHit(topic: Topic, matchedKeywords: string[]): Promise<void>
+    sendHit(topic: Topic, matchedKeywords: string[], commentary?: string | null): Promise<void>
     sendTest(): Promise<void>
   }
   /** 每轮轮询前重读的配置访问器（装配方保证热更新） */
@@ -184,6 +206,12 @@ export interface EngineDeps {
    * engine 只依赖 evaluate 接口（SemanticEvaluator 结构类型）。
    */
   semanticEvaluator?: SemanticEvaluator
+  /**
+   * AI 锐评生成器（第三轮；可选——不注入 = 恒无锐评，行为与升级前完全一致）。
+   * engine 只依赖 generate/prune 接口（CommentGenerator 结构类型）；generate
+   * 的"绝不抛 / 成败皆缓存 / 在途去重"契约由模块自身保证，engine 不 try/catch。
+   */
+  commentaryGenerator?: Pick<CommentGenerator, 'generate' | 'prune'>
   /**
    * 命中持久化（D5 hits/<date>.jsonl；可选）。每次 emit onHit 的同处 append；
    * append 失败只 log warn 不中断（调用方 catch，hits-store 的 append 会 reject）。
@@ -230,6 +258,12 @@ export class MonitorEngine {
   private aiMode: MatchMode = 'literal'
   /** 今日语义评估调用数（本地自然日滚动：aiCallsDay 用 formatLocalDate 判日） */
   private aiCallsToday = 0
+  /**
+   * 今日锐评调用数（第三轮；与 aiCallsToday 同日键 aiCallsDay 一起翻转清零）。
+   * 上限 DAILY_COMMENTARY_LIMIT(100)，超限当日静默降级；每次真调 generate 时
+   * 与 aiCallsToday 同时 +1（共用总桶）。
+   */
+  private commentaryToday = 0
   private aiCallsDay = ''
   /** 最近一次评估错误消息（provider 已脱敏）；评估成功后清空 */
   private aiLastError: string | null = null
@@ -353,6 +387,10 @@ export class MonitorEngine {
       }
     }
     this.pruneRetryMaps(roundTopicKeys, observedSources)
+    // 锐评缓存清理（第三轮）：与 pruneRetryMaps 同一调用点、同一 roundTopicKeys
+    // 键集（键注册在 pollSource 的提前 return 之前，基线/升级初始化轮同样覆盖）；
+    // deps 未注入生成器时跳过（可选链）
+    this.deps.commentaryGenerator?.prune(roundTopicKeys)
     this.finishRound(cfg.pollIntervalSec, activeIds)
   }
 
@@ -370,12 +408,13 @@ export class MonitorEngine {
     this.rollAiDay()
   }
 
-  /** callsToday 的本地自然日翻转（formatLocalDate 判日，D5 坑清单④） */
+  /** callsToday / commentaryToday 的本地自然日翻转（formatLocalDate 判日，D5 坑清单④） */
   private rollAiDay(): void {
     const today = formatLocalDate(new Date(this.now()))
     if (this.aiCallsDay !== today) {
       this.aiCallsDay = today
       this.aiCallsToday = 0
+      this.commentaryToday = 0
       this.aiQuotaLogged = false
     }
   }
@@ -392,6 +431,7 @@ export class MonitorEngine {
     const base = {
       configured: this.aiConfigured,
       callsToday: this.aiCallsToday,
+      commentaryToday: this.commentaryToday,
       dailyLimit: DAILY_AI_CALL_LIMIT,
       lastAiError: this.aiLastError
     }
@@ -847,7 +887,8 @@ export class MonitorEngine {
   }
 
   /**
-   * 处理一条命中的新帖：尝试推送 → 组 HitRecord → 计数入环 → emit onHit。
+   * 处理一条命中的新帖：生成锐评（第三轮）→ 尝试推送 → 组 HitRecord →
+   * 计数入环 → emit onHit。
    * 推送结果语义（ADR 8.10）：
    * - **成功 / 静音**（notifyEnabled=false 或 telegram 未配置）→ 入去重集。
    *   静音是用户主动行为，不重试；
@@ -858,6 +899,8 @@ export class MonitorEngine {
    * （跨 source 同 id 帖子不互相吞 emit）。
    * matchedBy：literal（字面管线，matchedKeywords 非空）/ semantic（语义管线，
    * matchedKeywords 恒空数组，semanticReason 带 AI 判定理由或 null）。
+   * commentary：sendHit 之前生成（无论推送是否会被静音——HitRecord/内存环仍要
+   * 展示）；恒 string|null，不留 undefined、不写空串（见 maybeGenerateCommentary）。
    */
   private async processHit(
     topic: Topic,
@@ -866,12 +909,13 @@ export class MonitorEngine {
     matchedBy: 'literal' | 'semantic' = 'literal',
     semanticReason: string | null = null
   ): Promise<void> {
+    const commentary = await this.maybeGenerateCommentary(topic, cfg)
     let notifiedAt: string | null = null
     let notifyError: string | null = null
     const configured = cfg.telegram.botToken !== '' && cfg.telegram.chatId !== ''
     if (cfg.notifyEnabled && configured) {
       try {
-        await this.deps.notifier.sendHit(topic, matchedKeywords)
+        await this.deps.notifier.sendHit(topic, matchedKeywords, commentary)
         notifiedAt = this.isoNow()
       } catch (err) {
         notifiedAt = null
@@ -896,6 +940,7 @@ export class MonitorEngine {
         matchedKeywords,
         matchedBy,
         semanticReason,
+        commentary,
         notifiedAt: null,
         notifyError
       }
@@ -918,6 +963,7 @@ export class MonitorEngine {
       matchedKeywords,
       matchedBy,
       semanticReason,
+      commentary,
       notifiedAt,
       notifyError: null
     }
@@ -936,6 +982,32 @@ export class MonitorEngine {
       this.deps.logger.info(`hit muted (notify disabled or telegram unconfigured): "${topic.title}"`)
     }
     this.deps.onHit?.(hit)
+  }
+
+  /**
+   * 命中帖锐评（第三轮）：四条件全部满足才真调 generate，否则 commentary=null
+   * 且不打 LLM：
+   * - deps.commentaryGenerator 已注入（旧装配/测试不注入 = 恒 null，行为不变）；
+   * - cfg.ai.commentary.enabled === true（恒存在恒布尔，防御式严格比较）；
+   * - provider 齐备（this.aiConfigured，每轮 updateAiConfig 从配置刷新）；
+   * - 总配额 callsToday < DAILY_AI_CALL_LIMIT（与语义评估共用桶）；
+   * - 子限额 commentaryToday < DAILY_COMMENTARY_LIMIT（超限当日静默降级：
+   *   无锐评推送、不 log——100 子限额保证语义评估在总桶至少剩 200，无需调序）。
+   * 真调用前后双计数（callsToday++ / commentaryToday++）：generate 内部消化一切
+   * 异常，调用即计数无论成败；推送失败重试轮 generate 会被再次调用并计数，但
+   * 其内部缓存保证不再打 LLM。generate 绝不抛（模块保证），无需 try/catch。
+   */
+  private async maybeGenerateCommentary(topic: Topic, cfg: AppConfig): Promise<string | null> {
+    const gen = this.deps.commentaryGenerator
+    if (gen === undefined) return null
+    if (cfg.ai.commentary.enabled !== true) return null
+    if (!this.aiConfigured) return null
+    this.rollAiDay()
+    if (this.aiCallsToday >= DAILY_AI_CALL_LIMIT) return null
+    if (this.commentaryToday >= DAILY_COMMENTARY_LIMIT) return null
+    this.aiCallsToday++
+    this.commentaryToday++
+    return await gen.generate(topic)
   }
 
   /** 计入 totalHits（聚合 + 该 source 的待持久化 delta）并压入内存环形（超容量淘汰最老） */

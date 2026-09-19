@@ -171,6 +171,12 @@ export interface AiRuntimeStatus {
   degraded: 'none' | 'unconfigured' | 'quota-exhausted'
   /** 今日语义评估调用次数（本地自然日滚动） */
   callsToday: number
+  /**
+   * 每日锐评调用数，上限 100（第三轮）。**可选**：渲染层后续消费，旧消费者
+   * （状态快照的既有读者）不破——缺字段等价于 0。与 callsToday 共用同一本地
+   * 自然日滚动与同一总桶（dailyLimit 300）：锐评每次调用同时计入两者。
+   */
+  commentaryToday?: number
   /** 每日调用上限（常量 300，v2 不进配置） */
   dailyLimit: number
   lastAiError: string | null
