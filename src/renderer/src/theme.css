@@ -1,0 +1,71 @@
+/**
+ * 设计令牌（CSS 变量）：浅色为基础，prefers-color-scheme: dark 整组覆盖。
+ * 配合 index.html 的 color-scheme: light dark，原生控件（单选、滚动条）自动跟随系统。
+ * 零外部资源：不引字体、不引图标（图标一律 emoji / 纯 CSS）。
+ */
+:root {
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
+    'Liberation Mono', monospace;
+
+  /* 表面 */
+  --bg: #ececf0;          /* 窗口底 */
+  --bg-sidebar: #e4e4e9;  /* 侧栏（比窗口底略深/略异色） */
+  --card: #ffffff;        /* 卡片 */
+  --card-alt: #f6f6f8;    /* 卡片内嵌区（日志底） */
+  --input-bg: #ffffff;
+  --chip-bg: #e9e9ee;
+
+  /* 文字 */
+  --text: #1d1d1f;
+  --text-2: #5f5f66;
+  --text-3: #8e8e96;
+
+  /* 线与投影 */
+  --border: #d9d9df;
+  --border-strong: #c5c5cd;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+
+  /* 语义色 */
+  --accent: #2f6fd6;
+  --accent-hover: #2861bd;
+  --on-accent: #ffffff;
+  --ok: #1f8a44;
+  --ok-bg: rgba(31, 138, 68, 0.12);
+  --warn: #a85a00;
+  --warn-bg: rgba(168, 90, 0, 0.12);
+  --err: #c73a34;
+  --err-bg: rgba(199, 58, 52, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202024;
+    --bg-sidebar: #1a1a1e;
+    --card: #2a2a2f;
+    --card-alt: #222226;
+    --input-bg: #1f1f23;
+    --chip-bg: #3a3a41;
+
+    --text: #f0f0f2;
+    --text-2: #b0b0b8;
+    --text-3: #7e7e87;
+
+    --border: #3b3b42;
+    --border-strong: #4b4b54;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+
+    --accent: #5a9bf7;
+    --accent-hover: #6fa9ff;
+    --on-accent: #0e1218;
+    --ok: #41c173;
+    --ok-bg: rgba(65, 193, 115, 0.16);
+    --warn: #eda13f;
+    --warn-bg: rgba(237, 161, 63, 0.15);
+    --err: #ff6f61;
+    --err-bg: rgba(255, 111, 97, 0.14);
+  }
+}
