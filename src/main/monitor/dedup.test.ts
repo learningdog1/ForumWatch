@@ -3,7 +3,13 @@ import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { FileSeenStore, SeenStore } from './dedup'
+import {
+  DEFAULT_SEEN_CAPACITY,
+  FileSeenStore,
+  SEEN_CAPACITY_PER_EXTRA_SOURCE,
+  SeenStore,
+  seenCapacityForSources
+} from './dedup'
 
 let dir: string
 let storePath: string
@@ -15,6 +21,27 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
+})
+
+describe('seenCapacityForSources（多源容量推导，ultrabrain 坑12）', () => {
+  it('单源恒 1000（含 1），与 v2 行为一致', () => {
+    expect(seenCapacityForSources(1)).toBe(DEFAULT_SEEN_CAPACITY)
+    expect(seenCapacityForSources(1)).toBe(1000)
+  })
+
+  it('多源线性扩容：1000 + 500 × (sourceCount - 1)', () => {
+    expect(seenCapacityForSources(2)).toBe(1500)
+    expect(seenCapacityForSources(3)).toBe(2000)
+    expect(seenCapacityForSources(5)).toBe(1000 + SEEN_CAPACITY_PER_EXTRA_SOURCE * 4)
+  })
+
+  it('垃圾输入（0 / 负数 / 非整数 / 非有限数）钳到单源基线或向下取整', () => {
+    expect(seenCapacityForSources(0)).toBe(1000) // max(0, -1) = 0
+    expect(seenCapacityForSources(-3)).toBe(1000)
+    expect(seenCapacityForSources(2.9)).toBe(1500) // floor(2.9)=2 → 1 个额外源
+    expect(seenCapacityForSources(Number.NaN)).toBe(1000) // 非有限数按单源兜底
+    expect(seenCapacityForSources(Number.POSITIVE_INFINITY)).toBe(1000)
+  })
 })
 
 describe('SeenStore（纯内存）', () => {

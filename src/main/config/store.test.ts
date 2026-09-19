@@ -212,11 +212,11 @@ describe('sanitizeConfig', () => {
     ).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
   })
 
-  it('sources：id slug 化（非法字符替换 -、trim、空则丢弃）、type 恒 nodeseek、enabled 布尔化、按 id 去重', () => {
+  it('sources：id slug 化（非法字符替换 -、trim、空则丢弃）、enabled 布尔化、按 id 去重', () => {
     const out = sanitizeConfig(
       cfg({
         sources: [
-          { id: ' nodeseek ', type: 'rss' as never, enabled: 1 as unknown as boolean },
+          { id: ' nodeseek ', type: 'nodeseek', enabled: 1 as unknown as boolean },
           { id: 'node_seek!', type: 'nodeseek', enabled: false },
           { id: 'nodeseek', type: 'nodeseek', enabled: true }, // 重复 id：保留首个
           { id: '   ', type: 'nodeseek', enabled: true }, // trim 后空：丢弃
@@ -229,6 +229,189 @@ describe('sanitizeConfig', () => {
     expect(out.sources).toEqual([
       { id: 'nodeseek', type: 'nodeseek', enabled: false }, // 首个：enabled=1 → false（强制布尔）
       { id: 'node_seek-', type: 'nodeseek', enabled: false }
+    ])
+  })
+
+  it('sources：v2ex 合法保留；未知 type 整项丢弃（v3 起不再洗成 nodeseek）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: 'v2ex', type: 'v2ex', enabled: true },
+          { id: 'mystery', type: 'discourse' as never, enabled: true },
+          { id: 'no-type', enabled: true } as unknown as never
+        ]
+      })
+    )
+    expect(out.sources).toEqual([{ id: 'v2ex', type: 'v2ex', enabled: true }])
+  })
+
+  it('sources rss：合法 url 保留（url/label trim），label 空则不落键', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          {
+            id: 'hn',
+            type: 'rss',
+            enabled: true,
+            url: '  https://hnrss.org/frontpage  ',
+            label: '  Hacker News  '
+          },
+          { id: 'blog', type: 'rss', enabled: false, url: 'http://example.com/feed.xml', label: '   ' }
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      { id: 'hn', type: 'rss', enabled: true, url: 'https://hnrss.org/frontpage', label: 'Hacker News' },
+      { id: 'blog', type: 'rss', enabled: false, url: 'http://example.com/feed.xml' } // 空 label 不落键
+    ])
+  })
+
+  it('sources rss：非法 url 整项丢弃（非字符串 / 解析失败 / 非 http(s) / 无 host）', () => {
+    const badUrls: unknown[] = [
+      undefined, // 缺 url
+      'not a url',
+      'ftp://example.com/feed',
+      'javascript:alert(1)',
+      'http://', // 无 host：new URL 抛
+      '   ', // trim 后空
+      42
+    ]
+    // 注：'https:///path' 不在列——WHATWG URL 会折叠多余斜杠解析出 host 'path'，
+    // 属"能 new URL 且有 host"的合法边角，按规格保留。
+    for (const url of badUrls) {
+      const out = sanitizeConfig(
+        cfg({
+          sources: [
+            { id: 'bad', type: 'rss', enabled: true, url: url as string },
+            // 垫底合法项：确认"整项丢弃"不是"全列表回默认"
+            { id: 'v2ex', type: 'v2ex', enabled: true }
+          ]
+        })
+      )
+      expect(out.sources).toEqual([{ id: 'v2ex', type: 'v2ex', enabled: true }])
+    }
+  })
+
+  it('sources rss：缺 id / id 空白时从 url host 派生建议 id（host slug 化）；id 以用户给的为准', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { type: 'rss', enabled: true, url: 'https://example.com/feed.xml' } as never, // 缺 id
+          { id: '   ', type: 'rss', enabled: true, url: 'http://other.org/rss' }, // id 空白：派生
+          { id: 'custom-id', type: 'rss', enabled: true, url: 'https://third.net/rss' } // 用户 id 优先
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      { id: 'example-com', type: 'rss', enabled: true, url: 'https://example.com/feed.xml' },
+      { id: 'other-org', type: 'rss', enabled: true, url: 'http://other.org/rss' },
+      { id: 'custom-id', type: 'rss', enabled: true, url: 'https://third.net/rss' }
+    ])
+  })
+
+  it('sources：id 全列表去重（跨类型），被丢弃的项不占 id', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: 'dup', type: 'rss', enabled: true, url: 'not-a-url' }, // 非法 url：丢弃，不占 id
+          { id: 'dup', type: 'v2ex', enabled: true }, // 同 id 仍可用（上一项没占住）
+          { id: 'dup', type: 'nodeseek', enabled: true }, // 真正的重复：丢弃
+          { id: 'nodeseek', type: 'nodeseek', enabled: true }
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      { id: 'dup', type: 'v2ex', enabled: true },
+      { id: 'nodeseek', type: 'nodeseek', enabled: true }
+    ])
+  })
+
+  it('sources filters：三列表各自 trim、去空、大小写不敏感去重（保留首现写法）、每列表截断 100', () => {
+    const many = Array.from({ length: 120 }, (_, i) => `cat-${i}`)
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          {
+            id: 'v2ex',
+            type: 'v2ex',
+            enabled: true,
+            filters: {
+              includeCategories: ['  Tech  ', 'tech', '', '  ', '\tGo\t'],
+              excludeCategories: ['广告', '广告', ' 广告 '],
+              blockedAuthors: many
+            }
+          }
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      {
+        id: 'v2ex',
+        type: 'v2ex',
+        enabled: true,
+        filters: {
+          includeCategories: ['Tech', 'Go'],
+          excludeCategories: ['广告'],
+          blockedAuthors: many.slice(0, 100) // 100 条封顶
+        }
+      }
+    ])
+  })
+
+  it('sources filters：非对象 / 清洗后全空 → 不落 filters 键（等价无过滤）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: 'a', type: 'v2ex', enabled: true, filters: 'garbage' as never },
+          { id: 'b', type: 'v2ex', enabled: true, filters: {} },
+          {
+            id: 'c',
+            type: 'v2ex',
+            enabled: true,
+            filters: { includeCategories: ['  ', ''], blockedAuthors: [] }
+          }
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      { id: 'a', type: 'v2ex', enabled: true },
+      { id: 'b', type: 'v2ex', enabled: true },
+      { id: 'c', type: 'v2ex', enabled: true }
+    ])
+    // 显式断言没有 filters 键（而非 filters: {}）
+    for (const s of out.sources) expect('filters' in s).toBe(false)
+  })
+
+  it('坑4 回归：save→load 往返不丢 filters/url/label（sanitize 重建对象的白名单完整性）', () => {
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        sources: [
+          { id: 'nodeseek', type: 'nodeseek', enabled: true, filters: { includeCategories: ['Trade'] } },
+          {
+            id: 'hn',
+            type: 'rss',
+            enabled: true,
+            url: 'https://hnrss.org/frontpage',
+            label: 'HN',
+            filters: { blockedAuthors: ['spam'], excludeCategories: ['meta'] }
+          },
+          { id: 'v2ex', type: 'v2ex', enabled: false }
+        ]
+      })
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.sources).toEqual([
+      { id: 'nodeseek', type: 'nodeseek', enabled: true, filters: { includeCategories: ['Trade'] } },
+      {
+        id: 'hn',
+        type: 'rss',
+        enabled: true,
+        url: 'https://hnrss.org/frontpage',
+        label: 'HN',
+        filters: { blockedAuthors: ['spam'], excludeCategories: ['meta'] }
+      },
+      { id: 'v2ex', type: 'v2ex', enabled: false }
     ])
   })
 
@@ -312,11 +495,11 @@ describe('ConfigStore', () => {
     expect(loaded.telegram.chatId).toBe('-100200')
     // 盘上是带 schemaVersion 的信封
     const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
-    expect(onDisk.schemaVersion).toBe(2)
+    expect(onDisk.schemaVersion).toBe(3)
     expect(onDisk.config.telegram.botToken).toBe('111:abc')
   })
 
-  it('v1 config 文件落盘后 load 出 v2：v1 字段保留 + sources/ai 补默认', async () => {
+  it('v1 config 文件落盘后 load 出 v3：v1 字段保留 + sources/ai 补默认', async () => {
     // v1 时代的盘上文件（无 sources/ai 字段）
     await writeFile(
       configPath,
@@ -346,10 +529,39 @@ describe('ConfigStore', () => {
     expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
     expect(loaded.ai).toEqual(DEFAULT_APP_CONFIG.ai)
 
-    // 保存回写的是 v2 信封（迁移完成后不再回落 v1）
+    // 保存回写的是 v3 信封（迁移完成后不再回落 v1/v2）
     new ConfigStore(configPath).save(loaded)
     const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
-    expect(onDisk.schemaVersion).toBe(2)
+    expect(onDisk.schemaVersion).toBe(3)
+  })
+
+  it('v2 config 文件落盘后 load 出 v3：sources 逐项映射为 nodeseek 形状，其余字段保留', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        config: {
+          pollIntervalSec: 45,
+          includeKeywords: ['vps'],
+          sources: [
+            { id: 'nodeseek', type: 'nodeseek', enabled: true },
+            { id: 'nodeseek-mirror', type: 'nodeseek', enabled: false }
+          ]
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.pollIntervalSec).toBe(45)
+    expect(loaded.includeKeywords).toEqual(['vps'])
+    // v2 sources（type 恒 nodeseek）映射后经 sanitize 全部保留
+    expect(loaded.sources).toEqual([
+      { id: 'nodeseek', type: 'nodeseek', enabled: true },
+      { id: 'nodeseek-mirror', type: 'nodeseek', enabled: false }
+    ])
+    // 再保存即落 v3
+    new ConfigStore(configPath).save(loaded)
+    expect(JSON.parse(await readFile(configPath, 'utf-8')).schemaVersion).toBe(3)
   })
 
   it('update：浅合并顶层字段，telegram 子对象整体替换', () => {
@@ -416,7 +628,7 @@ describe('ConfigStore', () => {
     expect((await readdir(dir)).some((f) => f.startsWith('config.json.corrupt-'))).toBe(true)
   })
 
-  it('盘上合法信封缺字段：合并默认值得到完整配置（v1 信封同样迁移到 v2）', async () => {
+  it('盘上合法信封缺字段：合并默认值得到完整配置（v1/v2 信封同样沿迁移链升到 v3）', async () => {
     await writeFile(
       configPath,
       JSON.stringify({ schemaVersion: 1, config: { pollIntervalSec: 45 } }),
@@ -466,10 +678,32 @@ describe('ConfigStore', () => {
     expect(loaded.ai.provider.model).toBe('m')
   })
 
-  it('盘上信封 schemaVersion 未知（3）：按损坏备份并回默认', async () => {
+  it('盘上 v3 信封（含 rss/v2ex 源）：原样加载后 sanitize 生效', async () => {
     await writeFile(
       configPath,
-      JSON.stringify({ schemaVersion: 3, config: { includeKeywords: ['vps'] } }),
+      JSON.stringify({
+        schemaVersion: 3,
+        config: {
+          sources: [
+            { id: 'hn', type: 'rss', enabled: true, url: 'https://hnrss.org/frontpage', label: 'HN' },
+            { id: 'bad', type: 'rss', enabled: true, url: 'ftp://nope' },
+            { id: 'v2ex', type: 'v2ex', enabled: false }
+          ]
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.sources).toEqual([
+      { id: 'hn', type: 'rss', enabled: true, url: 'https://hnrss.org/frontpage', label: 'HN' },
+      { id: 'v2ex', type: 'v2ex', enabled: false }
+    ]) // 非法 url 的 rss 在 sanitize 阶段被丢弃
+  })
+
+  it('盘上信封 schemaVersion 未知（4）：按损坏备份并回默认', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ schemaVersion: 4, config: { includeKeywords: ['vps'] } }),
       'utf-8'
     )
     const store = new ConfigStore(configPath)

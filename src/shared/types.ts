@@ -12,18 +12,74 @@
  * - AiConfig 增加 commentary（锐评开关，**默认开**——sanitize 侧唯一默认开的布尔）。
  * - HitRecord 增加可选 commentary：旧 hits/*.jsonl 行没有此字段，类型必须容忍缺失；
  *   新写入的记录一律给 string|null（生成失败/未启用时为 null），不再留 undefined。
+ *
+ * v3 变更（2026-09-19，多论坛化第二轮：config 契约）：
+ * - SourceType 从单一 'nodeseek' 扩为 'nodeseek' | 'rss' | 'v2ex'。
+ * - SourceConfig 改为按 type 判别的联合：rss 额外必带 url（合法 http(s)）、
+ *   可选 label；三种来源都可带可选 filters（per-source 过滤契约，本轮只定义
+ *   契约与 sanitize，引擎消费在下一轮）。
+ * - DEFAULT_APP_CONFIG.sources 不变（仍只有 nodeseek 一项，不带 filters）。
  */
 
-/** 论坛来源类型（v2 仅 nodeseek，联合类型留给未来论坛） */
-export type SourceType = 'nodeseek'
+/** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
+export type SourceType = 'nodeseek' | 'rss' | 'v2ex'
 
-/** 一个已配置的论坛来源 */
-export interface SourceConfig {
-  /** 稳定 slug；v2 恒为 'nodeseek'，与去重键前缀、状态键一致 */
-  id: string
-  type: SourceType
-  enabled: boolean
+/**
+ * per-source 过滤契约（v3 定义，引擎消费在下一轮）。
+ *
+ * 语义：
+ * - `includeCategories` 非空 = 分类白名单：帖子的分类**显示名或 slug** 命中任一
+ *   才算候选（大小写不敏感）；为空/缺失 = 不限分类。
+ * - `excludeCategories` = 分类黑名单：命中任一直接否决（与 include 同时给出时
+ *   exclude 优先，对齐全局 excludeKeywords 的一票否决风格）。
+ * - `blockedAuthors` = 作者黑名单：作者名命中任一（大小写不敏感）一票否决。
+ * - 所有匹配值为字面字符串（非正则/通配）。
+ */
+export interface SourceFilters {
+  /** 分类白名单（空 = 不限）；匹配分类显示名或 slug，大小写不敏感 */
+  includeCategories?: string[]
+  /** 分类黑名单；命中任一否决 */
+  excludeCategories?: string[]
+  /** 作者黑名单；命中任一一票否决 */
+  blockedAuthors?: string[]
 }
+
+/** NodeSeek 来源（SSR HTML 抓取，现有主路径） */
+export interface NodeseekSourceConfig {
+  /** 稳定 slug；与去重键前缀、状态键一致 */
+  id: string
+  type: 'nodeseek'
+  enabled: boolean
+  /** per-source 过滤（可选，见 SourceFilters 语义） */
+  filters?: SourceFilters
+}
+
+/** V2EX 来源 */
+export interface V2exSourceConfig {
+  /** 稳定 slug；与去重键前缀、状态键一致 */
+  id: string
+  type: 'v2ex'
+  enabled: boolean
+  /** per-source 过滤（可选，见 SourceFilters 语义） */
+  filters?: SourceFilters
+}
+
+/** 通用 RSS 来源 */
+export interface RssSourceConfig {
+  /** 稳定 slug；与去重键前缀、状态键一致。sanitize 保证合法 http(s) URL 且有 host */
+  id: string
+  type: 'rss'
+  enabled: boolean
+  /** RSS feed 地址（合法 http(s) URL，sanitize 非法则整项丢弃） */
+  url: string
+  /** 展示名（可选；sanitize trim、空则视为无） */
+  label?: string
+  /** per-source 过滤（可选，见 SourceFilters 语义） */
+  filters?: SourceFilters
+}
+
+/** 一个已配置的论坛来源（判别联合：按 type 分派，rss 额外带 url） */
+export type SourceConfig = NodeseekSourceConfig | V2exSourceConfig | RssSourceConfig
 
 /** OpenAI 兼容 LLM Provider 配置（DeepSeek / Kimi / GLM / OpenAI 等通用） */
 export interface AiProviderConfig {
@@ -121,7 +177,10 @@ export interface AppConfig {
   notifyEnabled: boolean
   /** 开机自启（Electron app.setLoginItemSettings） */
   launchAtLogin: boolean
-  /** 论坛来源列表（v2 仅 nodeseek 一项；关键词 v2 全局共享，per-source 覆盖留给 v3） */
+  /**
+   * 论坛来源列表（v3 判别联合，默认仍只有 nodeseek 一项；关键词仍全局共享，
+   * per-source 覆盖= filters 于 v3 引入契约，引擎消费在下一轮）
+   */
   sources: SourceConfig[]
   /** AI 能力配置（Provider 未配置时语义档自动降级为字面档） */
   ai: AiConfig

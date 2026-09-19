@@ -6,9 +6,9 @@
  * - 纯 JSON + `schemaVersion`，原子写（同目录 tmp + `renameSync`）。
  * - 损坏容错：读不出 / 非法 JSON / 迁移函数拒认 → 备份成 `{file}.corrupt-{ts}`
  *   后返回默认配置的深拷贝，绝不抛（ADR 3）。
- * - 盘上格式：`{ "schemaVersion": 2, "config": AppConfig }`（缩进 2 空格）。
- *   load 路径：JSON.parse → `migrateConfigEnvelope`（v1→v2，见 migrations.ts）→
- *   合并 DEFAULT → sanitize。
+ * - 盘上格式：`{ "schemaVersion": 3, "config": AppConfig }`（缩进 2 空格）。
+ *   load 路径：JSON.parse → `migrateConfigEnvelope`（v1/v2 → v3 链式，见
+ *   migrations.ts）→ 合并 DEFAULT → sanitize。
  *
  * 零 electron 依赖，可在 node 下单测与 headless 直跑（ADR 2）。
  */
@@ -20,8 +20,12 @@ import {
   type AppConfig,
   type AiConfig,
   type MatchMode,
+  type NodeseekSourceConfig,
   type ProxyScope,
-  type SourceConfig
+  type RssSourceConfig,
+  type SourceConfig,
+  type SourceFilters,
+  type V2exSourceConfig
 } from '../../shared/types'
 import { migrateConfigEnvelope } from './migrations'
 
@@ -30,7 +34,7 @@ export const MIN_POLL_INTERVAL_SEC = 15
 /** pollIntervalSec 非法（非数字 / NaN / Infinity）时的回退值 */
 export const FALLBACK_POLL_INTERVAL_SEC = 60
 
-const CONFIG_SCHEMA_VERSION = 2
+const CONFIG_SCHEMA_VERSION = 3
 // 与 http.ts 的 resolveDispatcherSpec 支持面保持一致（socks5h = 远端 DNS 解析）
 const PROXY_URL_PREFIXES = ['http://', 'https://', 'socks5://', 'socks5h://'] as const
 const PROXY_SCOPES: readonly ProxyScope[] = ['all', 'telegram-only']
@@ -46,16 +50,28 @@ const DEFAULT_REPORT_TIME_HHMM = '22:00'
 const TIME_HHMM_RE = /^\d{2}:\d{2}$/
 /** sources 的 id 只允许 slug 字符（与去重键前缀、状态键一致），其余替换为 '-' */
 const SOURCE_ID_ILLEGAL_RE = /[^\w-]/g
+/** per-source filters 每个列表的条数上限（超出截断，对齐 includeKeywords 清洗风格） */
+const SOURCE_FILTERS_MAX_ITEMS = 100
 
 /**
  * 清洗用户/盘上来的配置：永远返回全新对象（不改入参），且字段类型一定合法。
+ *
+ * **隐式 schema 白名单（ultrabrain 坑4）**：本函数逐字段显式重建对象，没有列进
+ * 重建的字段保存即丢——**types.ts 的 SourceConfig 等契约新增字段时，必须在同一
+ * commit 里补上这里的 sanitize 分支**（filters / label / url 即为本轮 v3 补的），
+ * 并同步补 store.test.ts 的往返用例。
+ *
  * - 关键词数组：trim、去空、去重（不区分大小写，保留首次出现的写法）。
  * - `pollIntervalSec`：非数字/NaN/Infinity → 60；否则钳到 ≥15。
  * - `proxyUrl`：trim；非空时必须以 `http://` `https://` `socks5://` `socks5h://` 开头（忽略大小写），否则置 ''。
  * - `proxyScope`：只认 'all' | 'telegram-only'，非法回退 'telegram-only'。
  * - `telegram.botToken` / `telegram.chatId`：trim。
- * - `sources`：非数组/空 → 默认单项 nodeseek；每项 id 规范成 slug（非法字符替换 '-'，
- *   空则丢弃该项）、type 恒 'nodeseek'、enabled 布尔化；按 id 去重（保留首个）。
+ * - `sources`（v3 判别联合，见 sanitizeSources）：非数组/空 → 默认单项 nodeseek；
+ *   nodeseek/v2ex 项 id 规范 slug（非法字符替换 '-'，空则丢弃）、enabled 布尔化、
+ *   filters 走 sanitizeFilters；rss 项同上且 **url 必须是合法 http(s) URL（能
+ *   new URL 且有 host），否则整项丢弃**，label trim 后为空视为无，缺 id 时可从
+ *   url host 派生建议 id（id 以用户给的为准）；未知 type 整项丢弃；按 id 全列表
+ *   去重（保留首个）。
  * - `ai.provider.baseUrl`：trim、去尾斜杠、必须 `http(s)://` 开头否则 ''；
  *   `apiKey` / `model` trim；`matchMode` 枚举非法回 'literal'；`interests` 每条 trim
  *   去空、单条 ≤500 字符截断、最多 20 条；`dailyReport.timeHHMM` 必须 HH:MM（时 0-23
@@ -94,7 +110,7 @@ export class ConfigStore {
    * - 文件缺失 → 默认配置深拷贝；
    * - 损坏（读失败 / 非法 JSON / 信封形状或版本被迁移函数拒认）→
    *   备份 `{file}.corrupt-{ts}` + 默认配置深拷贝，不抛；
-   * - 合法（v1 先迁移到 v2）→ 合并到默认值上再 sanitize（盘上缺字段也能得到
+   * - 合法（v1/v2 先沿迁移链升到 v3）→ 合并到默认值上再 sanitize（盘上缺字段也能得到
    *   完整合法的配置）。
    */
   load(): AppConfig {
@@ -164,7 +180,7 @@ export class ConfigStore {
     } catch {
       return this.backupCorruptAndDefault(raw)
     }
-    // v1 信封在这里迁移到 v2；形状不对（非对象/缺 config/未知版本）抛错 → 按损坏处理
+    // v1/v2 信封在这里沿迁移链升到 v3；形状不对（非对象/缺 config/未知版本）抛错 → 按损坏处理
     let migrated: AppConfig
     try {
       migrated = migrateConfigEnvelope(parsed)
@@ -231,6 +247,28 @@ function sanitizeToken(value: string | undefined): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+/** sanitize 视角下的原始 sources 项（未知数据，逐字段判型后再组装） */
+type RawSourceItem = {
+  id?: unknown
+  type?: unknown
+  enabled?: unknown
+  url?: unknown
+  label?: unknown
+  filters?: unknown
+}
+
+/**
+ * v3 判别联合清洗：按 type 分派重建（**每个字段都必须在重建对象里**，漏了就是
+ * 保存即丢——ultrabrain 坑4；新增字段必须同 commit 补 sanitize）。
+ *
+ * - 'nodeseek' / 'v2ex'：id 规范 slug（复用既有逻辑）、enabled 布尔化、filters
+ *   走 sanitizeFilters；缺 id / slug 后为空 → 丢弃。
+ * - 'rss'：同上，且 **url 必须是合法 http(s) URL（能 new URL 且有 host），否则
+ *   整项丢弃**；label trim、空则视为无（不落键）；缺 id（或 slug 后为空）时从
+ *   url host 派生建议 id（'example.com' → 'example-com'）——**id 以用户给的为准**。
+ * - 未知 type：整项丢弃（不洗成 nodeseek，v3 起类型白名单交给本函数）。
+ * - id 全列表去重（保留首个；被丢弃的项不占 id）。
+ */
 function sanitizeSources(list: SourceConfig[] | undefined): SourceConfig[] {
   if (!Array.isArray(list) || list.length === 0) {
     return structuredClone(DEFAULT_APP_CONFIG.sources)
@@ -239,15 +277,108 @@ function sanitizeSources(list: SourceConfig[] | undefined): SourceConfig[] {
   const seen = new Set<string>()
   for (const item of list) {
     if (typeof item !== 'object' || item === null) continue
-    const rawId = (item as Partial<SourceConfig>).id
-    if (typeof rawId !== 'string') continue
-    const id = rawId.trim().replace(SOURCE_ID_ILLEGAL_RE, '-')
-    if (id.length === 0 || seen.has(id)) continue
-    seen.add(id)
-    out.push({ id, type: 'nodeseek', enabled: item.enabled === true })
+    const raw = item as RawSourceItem
+    const enabled = raw.enabled === true
+
+    if (raw.type === 'rss') {
+      // url 先行：非法（非字符串/非 http(s)/解析失败/无 host）→ 整项丢弃
+      const url = typeof raw.url === 'string' ? raw.url.trim() : ''
+      const host = httpUrlHost(url)
+      if (host === null) continue
+      const given = typeof raw.id === 'string' ? slugifySourceId(raw.id) : ''
+      const id = given !== '' ? given : slugifySourceId(host) // 缺 id：从 url host 派生建议 id
+      if (id === '' || seen.has(id)) continue
+      seen.add(id)
+      const clean: RssSourceConfig = { id, type: 'rss', enabled, url }
+      const label = typeof raw.label === 'string' ? raw.label.trim() : ''
+      if (label !== '') clean.label = label
+      const filters = sanitizeFilters(raw.filters)
+      if (filters !== undefined) clean.filters = filters
+      out.push(clean)
+      continue
+    }
+
+    if (raw.type === 'nodeseek' || raw.type === 'v2ex') {
+      if (typeof raw.id !== 'string') continue
+      const id = slugifySourceId(raw.id)
+      if (id === '' || seen.has(id)) continue
+      seen.add(id)
+      const clean: NodeseekSourceConfig | V2exSourceConfig = { id, type: raw.type, enabled }
+      const filters = sanitizeFilters(raw.filters)
+      if (filters !== undefined) clean.filters = filters
+      out.push(clean)
+      continue
+    }
+
+    // 未知 type：整项丢弃
   }
   // 全部项非法（或去重后为空）→ 回默认单项，绝不落空列表（空列表 = 无来源可监控）
   return out.length > 0 ? out : structuredClone(DEFAULT_APP_CONFIG.sources)
+}
+
+/** id 规范：trim + 非法字符替换 '-'（slug 化后为空串表示"没给出可用 id"） */
+function slugifySourceId(rawId: string): string {
+  return rawId.trim().replace(SOURCE_ID_ILLEGAL_RE, '-')
+}
+
+/**
+ * url 是否为合法 http(s) URL：能 `new URL` 且协议 http/https 且有 host。
+ * 合法返回 hostname（URL 规范化小写），非法返回 null（调用方丢弃该项）。
+ */
+function httpUrlHost(url: string): string | null {
+  if (url.length === 0) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    if (parsed.host === '') return null
+    return parsed.hostname
+  } catch {
+    return null
+  }
+}
+
+/**
+ * per-source filters 清洗（v3 契约，引擎消费在下一轮）：
+ * 三个列表各自 trim、去空、去重（大小写不敏感、保留首次写法，对齐
+ * includeKeywords 清洗风格）、每列表上限 100 条（超出截断）。
+ * 非对象输入 / 清洗后三列表全空 → 返回 undefined（等价"无过滤"，不落空对象）。
+ */
+function sanitizeFilters(raw: unknown): SourceFilters | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const f = raw as { includeCategories?: unknown; excludeCategories?: unknown; blockedAuthors?: unknown }
+  const includeCategories = sanitizeFilterList(f.includeCategories)
+  const excludeCategories = sanitizeFilterList(f.excludeCategories)
+  const blockedAuthors = sanitizeFilterList(f.blockedAuthors)
+  if (
+    includeCategories.length === 0 &&
+    excludeCategories.length === 0 &&
+    blockedAuthors.length === 0
+  ) {
+    return undefined
+  }
+  const clean: SourceFilters = {}
+  if (includeCategories.length > 0) clean.includeCategories = includeCategories
+  if (excludeCategories.length > 0) clean.excludeCategories = excludeCategories
+  if (blockedAuthors.length > 0) clean.blockedAuthors = blockedAuthors
+  return clean
+}
+
+/** filter 列表清洗：trim、去空、大小写不敏感去重（保留首现写法）、截断到上限 */
+function sanitizeFilterList(list: unknown): string[] {
+  if (!Array.isArray(list)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (typeof item !== 'string') continue
+    const s = item.trim()
+    if (s.length === 0) continue
+    const key = s.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(s)
+    if (out.length >= SOURCE_FILTERS_MAX_ITEMS) break
+  }
+  return out
 }
 
 function sanitizeAi(ai: AiConfig | undefined): AiConfig {

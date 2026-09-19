@@ -3,8 +3,9 @@
  *
  * - 去重键 = `${sourceId}:${topic.id}`（v2 起带来源前缀；v1 时代的裸 NodeSeek
  *   帖子 ID 在 load 时前缀化为 `nodeseek:{id}`，见 NODESEEK_SEEN_KEY_PREFIX）。
- * - 内存态：`{id, addedAt}` 顺序队列，超容量时最老的条目被环形淘汰（默认 1000 条，
- *   防止常驻进程无限膨胀）。
+ * - 内存态：`{id, addedAt}` 顺序队列，超容量时最老的条目被环形淘汰（单源默认
+ *   1000 条防止常驻进程无限膨胀；多源按 `seenCapacityForSources` 扩容，防止
+ *   容量淘汰先于时间淘汰击穿——ultrabrain 坑12）。
  * - 持久化：纯 JSON，原子写（同目录 tmp + `rename`），损坏文件备份成
  *   `{file}.corrupt-{ts}` 后从空集开始，绝不抛出（ADR 3）。
  * - 盘上版本兼容：v1（`schemaVersion:1`，裸 id）与 v2（`schemaVersion:2`，带前缀
@@ -43,6 +44,26 @@ const SEEN_SCHEMA_VERSION = 2
 
 /** 默认去重集容量（ADR 8.5：环形淘汰上限 1000 条） */
 export const DEFAULT_SEEN_CAPACITY = 1000
+
+/**
+ * 每多一个来源追加的容量（ultrabrain 坑12：全局 1000 的环形淘汰在多源+翻页下
+ * 会被容量淘汰先于时间淘汰击穿 → 重复推送）。每源配 500 条富余。
+ */
+export const SEEN_CAPACITY_PER_EXTRA_SOURCE = 500
+
+/**
+ * 按来源数推导 seen 容量：`1000 + 500 × max(0, sourceCount - 1)`。
+ * 单源（含 0/负数/非整数等垃圾输入）恒 1000——与 v2 行为完全一致；
+ * 多源线性扩容，保证容量淘汰不先于时间淘汰（保留期默认 7 天）触发。
+ * 装配层（runtime.ts / headless.ts）在构造 FileSeenStore 时按
+ * `config.sources.length` 调用；构造参数本身仍允许显式容量覆盖（测试/特殊场景）。
+ */
+export function seenCapacityForSources(sourceCount: number): number {
+  // 非有限数（NaN/Infinity）按单源兜底——真实调用方传的是 sources.length，恒为非负整数
+  const n = Number.isFinite(sourceCount) ? Math.floor(sourceCount) : 1
+  const extra = Math.max(0, n - 1)
+  return DEFAULT_SEEN_CAPACITY + SEEN_CAPACITY_PER_EXTRA_SOURCE * extra
+}
 
 /** 默认保留期：超过 7 天未再遇到的 ID 视为过期，可被 prune 清理 */
 export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
