@@ -256,3 +256,27 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
   - **系统代理边界（如实写）**：桌面装配注入的 fallback 是 Electron net.fetch 的 FetchLike 包装——Chromium 网络栈不走 undici dispatcher，**ConfigStore 的 proxyUrl / proxyScope 对它不生效，代理跟随系统设置**（PAC / 系统代理）；证书库、HTTP 缓存、HSTS 均为 Chromium 会话语义。仅 desktop 装配层存在（import electron 不进监控内核，ADR 2）。
   - linux.do / LowEndTalk 桌面端实测**留待人工**（机制在、入口在，不做未验证的效果声称，真机验证后补记）。
 - **IPC 新通道四条**：`update:check` / `update:status` / `backup:export` / `backup:import`，失败一律收敛为返回值不向渲染进程抛（既有纪律）。
+
+---
+
+# 第九轮决策（2026-09-19，遥控与凭据，ultrabrain 裁定）
+
+**D18 遥控与凭据包（DEC-6 Telegram bot 双向遥控 / DEC-10 凭据字段级加密落盘；两者均为加法，schemaVersion 不 bump）**：
+
+- **DEC-6：BotCommandController（`src/main/notify/bot-commands.ts`，零 electron；desktop runtime 与 headless 同款接线）**——经 bot 的 getUpdates 长轮询接收指令、sendMessage 回复，手机上即可远程操作监控：
+  - **指令集**：`/status`（引擎运行/暂停 · 健康 · 下次轮询 · 累计命中 · 挂起待推条数 · AI 模式（含降级附注）的状态摘要）/ `/pause` / `/resume` / `/poll`（立即补一轮）/ `/help`。未知指令回复提示文案（区别于静默忽略的普通文本）；非 message 更新（edited_message / callback_query 等）与非指令文本一律忽略；群聊 `/cmd@botname` 剥 `@botname` 后缀后按裸指令匹配。
+  - **allowlist 硬闸**：`message.chat.id` 字符串精确比较（负数群 id 原样合法）；允许集 = 配置 `notify.remoteControl.allowedChatIds`（**上限 10**，sanitize trim / 去空 / 精确去重——不做大小写折叠，chat id 是数字串）∪ 主 Chat ID（getCredentials 的 chatId，**隐含允许**、每轮现读合并）。清单外会话**完全忽略不回复**——未授权会话得不到任何回声（连 /help 也不回），无法探测 bot 存活；仅 log warn（一分钟同消息去重）。
+  - **409 两个来源都要处理（坑8 第三条）**：启动先 `deleteWebhook`（drop_pending_updates=false，清掉历史 webhook 设置；失败仅 warn 不阻塞——webhook 本不存在时 Telegram 也返回 ok）；运行中 getUpdates 返回 409 =「bot 正被其他 getUpdates 消费者占用」（另一实例 / 用户自己的其他轮询工具）→ error 日志（同消息 5 分钟去重）+ 60s 退避重试，不崩不退出。
+  - **独立生命周期（坑8 第二条）**：/pause /resume 只翻转 engine 的 desired，**绝不停本监听循环**——暂停了才更需要 /resume 遥控回来（遥控与监控暂停状态正交）。stop 只发生在退出路径 / 配置失效：enabled 翻 false 或凭据失效由循环每轮现读配置自退（info 一条），翻 true 由装配方 alignRemoteControl 自举（桌面 applyConfigSideEffects 与 headless 热重载 rebuildDerived 两个对齐点——controller 无法自举发现开启）。就绪条件 = `enabled` 且第一个凭据齐备的 telegram 通道（botToken / chatId 均非空）。
+  - **长轮询绝不进推送队列（坑8 第一条）**：getUpdates 长轮询 **25s**（HTTP 超时 35s = 25+10s 网络余量），用自己的 post 直调 Telegram API（生产注入 tgClient）——**绝不进 TelegramNotifier 的 1050ms 串行队列**（一挂 25s 会把命中推送全部堵死）；遥控收发与推送通道互不阻塞。
+  - **offset 内存推进、不持久化**：重启从 0 重新拉（getUpdates 无 offset 返回最新一批，够用）；处理失败的更新也推进 offset（防毒丸更新死循环）；单条更新处理失败只 warn 不中断整轮。
+  - **接线边界**：headless 同款（env 凭据注入对 getCredentials 同样生效），`--once` 单轮模式**不接**（进程即退）；退出路径显式 stop（不留悬挂的 getUpdates 消费者）；渲染端设置卡「Telegram 遥控」（开关 + Chat ID 标签输入 + 独占提示，置于「推送策略」与「路由规则」之间）。
+  - **独占语义（如实写进文档）**：启用后本应用**独占**该 bot 的 getUpdates——其他工具轮询同一 bot 会互相 409，需要并行使用其他 getUpdates 工具（或给 bot 设 webhook）时请关闭遥控。
+- **DEC-10：凭据字段级 marker 加密（`src/main/config/secrets.ts` 内核 + `desktop/safe-storage-box.ts` 适配；Electron safeStorage = macOS Keychain / Windows DPAPI / Linux 密钥库）**：
+  - **字段表（单一事实源 CHANNEL_SECRET_FIELDS + apiKey 一处）**：`ai.provider.apiKey` 与 channels 的 `telegram.botToken` / `bark.deviceKey` / `webhook.secret`（ntfy 无敏感字段）。新增通道类型的敏感字段必须同 commit 补表（坑4 白名单纪律同款），否则该字段明文落盘。
+  - **坑10 顺序纪律**：读 = migrate → **decrypt** → sanitize；写 = sanitize → **encrypt** → serialize。两个方向 sanitize 看到的都只能是明文——密文（base64 可含会被 sanitize trim 掉的字符）绝不能进 sanitize。内存与 getConfig **恒明文**（this.config 存 sanitize 后的明文而非加密副本）——既有消费方（AiProvider / 各 Notifier / 渲染端）零改动。
+  - **盘上格式与软迁移**：敏感值 `enc:v1:` 前缀 + base64 密文；不带 marker 的值按明文兼容读——旧明文配置 / headless 写的明文盘直接可用，**下次保存时自动加密**（软迁移，无需迁移函数、不动 schemaVersion）。信封**不写** secretsEncrypted 标志：字段是否加密是每个值自带 marker 的**派生态**，落盘成独立标志会出现第二事实源（标志说加密了而字段是明文 / 反之）。
+  - **降级与失败语义**：safeStorage 不可用（Linux 无密钥库 / BasicText 模式 / isEncryptionAvailable 抛错）→ PlainSecretBox 明文落盘 + **一条** warn（createSafeStorageBox 每进程只调一次）；encrypt 单次失败（Keychain 被锁）→ 该字段明文落盘 + 进程内一条 error（flag 去重）；decrypt 失败（密钥轮换 / 密文损坏）→ 字段置 ''（按未配置处理）+ 整次 load 一条汇总 error。适配层是 desktop 唯一的 electron import 点，内核只见 SecretBox 接口（ADR 2）。
+  - **headless 互操作（坑10）**：headless 恒明文模式（显式注入 PlainSecretBox）——其 decrypt 对带 marker 的值返回 null → 字段按未配置处理：跨环境混用数据目录时凭据**干净地失效**（而不是把 base64 密文当 token 发出去），边界如实写进 README / usage。
+  - **备份导出仍为明文**：exportBackup 的 config 段**不走盘上 parse**（盘上密文绑定本机钥匙串，导出无用），改从 `rt.store.get()` 取**内存明文**——单一事实源（应用实际会加载到的内容）；导出件仍明文凭据 + 0o600 + 警告（R8 口径不变），导入端读回明文、下次 save 自动再加密。
+  - **不 bump schemaVersion（加法）**：marker 在值上不在信封上；旧版本读到密文值只是把密文串当凭据（鉴权失败，不会损坏文件、不触损坏备份路径）。
