@@ -40,6 +40,10 @@ export function createMainWindow(): BrowserWindow {
     }
   })
 
+  // 防御：应用内一律不开新窗口（window.open / target=_blank 全部拒绝）；
+  // 外链统一走 IPC openExternal 的 nodeseek.com 白名单
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
   // ADR 8.4：关窗进托盘（非退出路径）
   win.on('close', (event) => {
     if (!quitting) {

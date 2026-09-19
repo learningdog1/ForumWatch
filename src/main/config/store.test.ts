@@ -50,6 +50,13 @@ describe('sanitizeConfig', () => {
     expect(sanitizeConfig(cfg({ proxyUrl: 'socks5://127.0.0.1:1080' })).proxyUrl).toBe(
       'socks5://127.0.0.1:1080'
     )
+    // socks5h（远端 DNS）与 http.ts 的 dispatcher 支持面一致，不得被清空
+    expect(sanitizeConfig(cfg({ proxyUrl: 'socks5h://host:1080' })).proxyUrl).toBe(
+      'socks5h://host:1080'
+    )
+    expect(sanitizeConfig(cfg({ proxyUrl: 'SOCKS5H://host:1080' })).proxyUrl).toBe(
+      'SOCKS5H://host:1080'
+    )
     expect(sanitizeConfig(cfg({ proxyUrl: 'HTTPS://example.com:8443' })).proxyUrl).toBe(
       'HTTPS://example.com:8443'
     )
@@ -98,6 +105,24 @@ describe('ConfigStore', () => {
   it('get() 未 load 过会自动 load', () => {
     const store = new ConfigStore(configPath)
     expect(store.get()).toEqual(DEFAULT_APP_CONFIG)
+  })
+
+  it('get() 返回内部状态的深拷贝：外部 mutate 不影响 store', () => {
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        includeKeywords: ['vps'],
+        telegram: { botToken: 'secret-token', chatId: 'c1' }
+      })
+    )
+    const a = store.get()
+    a.includeKeywords.push('leak')
+    a.telegram.botToken = 'leak'
+    const b = store.get()
+    expect(b.includeKeywords).toEqual(['vps'])
+    expect(b.telegram.botToken).toBe('secret-token')
+    // save 的返回路径同样不受污染（update 内部走 get，一并验证）
+    expect(store.update({}).telegram.botToken).toBe('secret-token')
   })
 
   it('默认值 roundtrip：save 默认配置 → 重新 load 得回等价配置', () => {
@@ -173,6 +198,18 @@ describe('ConfigStore', () => {
     expect(backups).toHaveLength(1)
     expect(await readFile(join(dir, backups[0]!), 'utf-8')).toBe('{ 这不是 JSON !!!')
   })
+
+  it.skipIf(process.platform === 'win32')(
+    '损坏备份文件权限 0o600（darwin/linux）——备份含 bot token 等敏感信息',
+    async () => {
+      await writeFile(configPath, '{ 这不是 JSON !!!', 'utf-8')
+      new ConfigStore(configPath).load()
+      const files = await readdir(dir)
+      const backup = files.find((f) => f.startsWith('config.json.corrupt-'))
+      expect(backup).toBeDefined()
+      expect(statSync(join(dir, backup!)).mode & 0o777).toBe(0o600)
+    }
+  )
 
   it('合法 JSON 但外层形状不对：同样备份并回默认', async () => {
     await writeFile(configPath, JSON.stringify({ includeKeywords: ['vps'] }), 'utf-8')

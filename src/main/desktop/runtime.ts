@@ -10,7 +10,7 @@
  *
  * 配置热更新：engine 每轮 pollOnce 调 getConfig()（→ store.get()），IPC saveConfig
  * 落盘后 store 内存值即换新；网络副作用由 applyConfigSideEffects 同步（两个
- * client 的 setProxy + 开机自启）。
+ * client 的 setProxy——仅代理值变化时调用，避免无谓中断在途请求——+ 开机自启）。
  *
  * 生命周期：startup() = engine.start()（launch 即开始监控，desired 默认 running）；
  * shutdown() 在 app 的 before-quit 与 will-quit 之间调用（退出路径统一走这里）：
@@ -20,7 +20,7 @@ import { app } from 'electron'
 import { join } from 'node:path'
 import { ConfigStore } from '../config/store'
 import { createLogger, type Logger } from '../logger'
-import { HttpClient } from '../net/http'
+import { HttpClient, redactProxyUrl } from '../net/http'
 import { FileSeenStore } from '../monitor/dedup'
 import { MonitorEngine } from '../monitor/engine'
 import { PollScheduler } from '../monitor/poller'
@@ -41,6 +41,9 @@ export class DesktopRuntime {
   private readonly seen: FileSeenStore
   private readonly statusListeners = new Set<(s: EngineStatus) => void>()
   private readonly hitListeners = new Set<(h: HitRecord) => void>()
+  /** 上次已生效的代理（site/tg），applyConfigSideEffects 据此只在变化时 setProxy */
+  private lastSiteProxy: string | null = null
+  private lastTgProxy: string | null = null
   private shutdownStarted = false
 
   /** 由 initRuntime 创建（必须在 app.whenReady 之后）；不要直接 new */
@@ -52,12 +55,12 @@ export class DesktopRuntime {
     const initial = this.store.load()
 
     // 双 client（ADR 6 / headless 同款）：'telegram-only' → site 直连、tg 走代理
-    this.siteClient = createClientSafely(
-      initial.proxyScope === 'all' ? initial.proxyUrl : '',
-      this.logger,
-      'site'
-    )
+    const siteProxy = initial.proxyScope === 'all' ? initial.proxyUrl : ''
+    this.siteClient = createClientSafely(siteProxy, this.logger, 'site')
     this.tgClient = createClientSafely(initial.proxyUrl, this.logger, 'telegram')
+    // 构造参数即当前生效值：记录之，构造尾的 applyConfigSideEffects 不会重复 setProxy
+    this.lastSiteProxy = siteProxy
+    this.lastTgProxy = initial.proxyUrl
 
     const source = new HtmlSourceAdapter({
       fetchHtml: (url, init) => this.siteClient.get(url, init)
@@ -127,23 +130,31 @@ export class DesktopRuntime {
 
   /**
    * 配置副作用（保存配置后同步调用）：
-   * - 两个 HttpClient 的 setProxy（'telegram-only' → site 恒直连）；
+   * - 两个 HttpClient 的 setProxy（'telegram-only' → site 恒直连）——**仅代理值
+   *   变化时调用**：setProxy 会销毁重建 dispatcher、中断在途请求，保存无关配置
+   *   （如只改关键词）不应打断网络；
    * - 开机自启（app.setLoginItemSettings）。
    * 单项失败只记日志，不阻断其余项。
    */
   applyConfigSideEffects(cfg: AppConfig): void {
     const siteProxy = cfg.proxyScope === 'all' ? cfg.proxyUrl : ''
-    try {
-      this.siteClient.setProxy(siteProxy)
-    } catch (err) {
-      this.logger.error(`set site proxy failed (${siteProxy || 'direct'}): ${describe(err)}`)
+    if (siteProxy !== this.lastSiteProxy) {
+      try {
+        this.siteClient.setProxy(siteProxy)
+        this.lastSiteProxy = siteProxy
+      } catch (err) {
+        this.logger.error(`set site proxy failed (${redactProxyUrl(siteProxy) || 'direct'}): ${describe(err)}`)
+      }
     }
-    try {
-      this.tgClient.setProxy(cfg.proxyUrl)
-    } catch (err) {
-      this.logger.error(
-        `set telegram proxy failed (${cfg.proxyUrl || 'direct'}): ${describe(err)}`
-      )
+    if (cfg.proxyUrl !== this.lastTgProxy) {
+      try {
+        this.tgClient.setProxy(cfg.proxyUrl)
+        this.lastTgProxy = cfg.proxyUrl
+      } catch (err) {
+        this.logger.error(
+          `set telegram proxy failed (${redactProxyUrl(cfg.proxyUrl) || 'direct'}): ${describe(err)}`
+        )
+      }
     }
     try {
       // 值未变化时跳过：dev 下对未签名 Electron 调 setLoginItemSettings 会被
@@ -166,10 +177,9 @@ export class DesktopRuntime {
     } catch (err) {
       console.error(`[runtime] engine.pause failed: ${describe(err)}`)
     }
-    try {
-      await this.seen.flush()
-    } catch (err) {
-      console.error(`[runtime] seen flush failed: ${describe(err)}`)
+    // flush 不再向上抛（失败返回 false）——退出路径只补一条日志
+    if (!(await this.seen.flush())) {
+      console.error('[runtime] seen flush failed during shutdown')
     }
     this.siteClient.close()
     this.tgClient.close()
@@ -230,7 +240,7 @@ function createClientSafely(proxyUrl: string, logger: Logger, label: string): Ht
     return new HttpClient({ proxyUrl })
   } catch (err) {
     logger.error(
-      `invalid ${label} proxy url "${proxyUrl}", falling back to direct: ${describe(err)}`
+      `invalid ${label} proxy url "${redactProxyUrl(proxyUrl)}", falling back to direct: ${describe(err)}`
     )
     return new HttpClient()
   }

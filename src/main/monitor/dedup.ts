@@ -10,7 +10,7 @@
  * 零 electron 依赖，可在 node 下单测与 headless 直跑（ADR 2）。
  */
 import { randomInt } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
@@ -98,7 +98,7 @@ export class SeenStore {
    */
   static deserialize(raw: unknown, capacity: number = DEFAULT_SEEN_CAPACITY): SeenStore {
     const store = new SeenStore(capacity)
-    if (!isCorruptShape(raw)) {
+    if (!looksCorrupt(raw)) {
       for (const item of (raw as SeenStoreData).seen) {
         if (typeof item !== 'object' || item === null) continue
         const { id, addedAt } = item as Partial<SeenEntry>
@@ -122,7 +122,7 @@ export class SeenStore {
 }
 
 /** 整体形状校验：`{schemaVersion:1, seen: SeenEntry[]}` 之外的都算坏数据 */
-function isCorruptShape(raw: unknown): boolean {
+function looksCorrupt(raw: unknown): boolean {
   if (typeof raw !== 'object' || raw === null) return true
   const data = raw as Partial<SeenStoreData>
   return data.schemaVersion !== 1 || !Array.isArray(data.seen)
@@ -131,13 +131,15 @@ function isCorruptShape(raw: unknown): boolean {
 /**
  * 文件 backed 的去重集：内存读改 + 显式 `flush()` 落盘。
  * 调用方节奏：启动 `load()` → 每轮 `has()/add()` → 轮末 `flush()`
- * （flush 写失败只打日志，下一轮再试，进程不因此退出）。
+ * （flush 写失败返回 false 并打日志，下一轮再试，进程不因此退出）。
  */
 export class FileSeenStore {
   private readonly filePath: string
   private readonly capacity: number
   private readonly retentionMs: number
   private store: SeenStore
+  /** 本次 load 是否因文件存在但读不出有效内容而以空集开始（见 load） */
+  private corruptRebuilt = false
 
   constructor(
     filePath: string,
@@ -151,18 +153,30 @@ export class FileSeenStore {
   }
 
   /**
+   * 本次 load 是否发生"文件存在但损坏（或不可读）→ 备份后从空集重建"。
+   * 装配方据此强制补做基线（engine 会重置 baselineDone，ADR 8.9）：
+   * 空 seen × baselineDone=true 会把首页整页当新帖推送（单页 mini 风暴）。
+   */
+  get rebuiltFromCorrupt(): boolean {
+    return this.corruptRebuilt
+  }
+
+  /**
    * 同步从磁盘加载（保证 load 返回后 has/add 立即可用）：
    * - 文件缺失 = 空集（首启基线，配合"首轮只入集不推送"）；
    * - 文件存在但损坏（非法 JSON / schema 不认识 / 其他读失败）=
-   *   备份成 `{file}.corrupt-{ts}` 后从空集开始，不抛（ADR 3）。
+   *   备份成 `{file}.corrupt-{ts}` 后从空集开始，不抛（ADR 3），
+   *   并置 `rebuiltFromCorrupt = true`（ADR 8.9）。
    */
   load(): void {
+    this.corruptRebuilt = false
     if (!existsSync(this.filePath)) return
     let raw: string
     try {
       raw = readFileSync(this.filePath, 'utf-8')
     } catch (err) {
       console.error(`[dedup] cannot read seen store ${this.filePath}, starting empty:`, err)
+      this.corruptRebuilt = true
       return
     }
     let parsed: unknown
@@ -172,7 +186,7 @@ export class FileSeenStore {
       this.backupCorrupt(raw)
       return
     }
-    if (isCorruptShape(parsed)) {
+    if (looksCorrupt(parsed)) {
       this.backupCorrupt(raw)
       return
     }
@@ -181,9 +195,12 @@ export class FileSeenStore {
 
   /** 把损坏内容备份到 `{file}.corrupt-{ts}`；备份本身失败也只打日志 */
   private backupCorrupt(content: string): void {
+    this.corruptRebuilt = true
     const backupPath = `${this.filePath}.corrupt-${Date.now()}`
     try {
       writeFileSync(backupPath, content, 'utf-8')
+      // 与 config store 同款收紧：备份内容原样保留，权限 600
+      chmodSync(backupPath, 0o600)
       console.error(`[dedup] seen store corrupt, backed up to ${backupPath}; starting empty`)
     } catch (err) {
       console.error(`[dedup] seen store corrupt and backup to ${backupPath} failed:`, err)
@@ -209,18 +226,21 @@ export class FileSeenStore {
 
   /**
    * 原子落盘：同目录写 `{file}.tmp-{pid}-{rand}` 再 `rename`（ADR 3）。
-   * 写失败不抛，只 console.error——下一轮 flush 再试。
+   * 写失败不抛：返回 `false` 并 console.error——调用方（engine）据此告警，
+   * 下一轮 flush 再试。成功返回 `true`。
    */
-  async flush(): Promise<void> {
+  async flush(): Promise<boolean> {
     const payload = JSON.stringify(this.store.serialize())
     const tmpPath = `${this.filePath}.tmp-${process.pid}-${randomInt(0, 0xffffff).toString(36)}`
     try {
       await mkdir(dirname(this.filePath), { recursive: true })
       await writeFile(tmpPath, payload, 'utf-8')
       await rename(tmpPath, this.filePath)
+      return true
     } catch (err) {
       // 残留的 tmp 文件会在下次 flush 被正常流程覆盖/遗留无害，绝不向上抛
       console.error(`[dedup] flush failed (will retry next round):`, err)
+      return false
     }
   }
 }

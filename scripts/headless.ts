@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
-import { HttpClient } from '../src/main/net/http'
+import { HttpClient, redactProxyUrl } from '../src/main/net/http'
 import { FileSeenStore } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
 import { PollScheduler } from '../src/main/monitor/poller'
@@ -139,7 +139,7 @@ async function main(): Promise<number | null> {
     tgClient = new HttpClient({ proxyUrl: effective.proxyUrl })
   } catch (err) {
     logger.error(
-      `invalid proxy url "${effective.proxyUrl}": ${err instanceof Error ? err.message : String(err)}`
+      `invalid proxy url "${redactProxyUrl(effective.proxyUrl)}": ${err instanceof Error ? err.message : String(err)}`
     )
     logger.close()
     return 1
@@ -224,7 +224,7 @@ async function main(): Promise<number | null> {
   logger.info(
     `engine started (dir=${dir} interval=${effective.pollIntervalSec}s ` +
       `keywords=${effective.includeKeywords.length}in/${effective.excludeKeywords.length}out ` +
-      `proxy=${effective.proxyUrl === '' ? 'direct' : effective.proxyUrl} scope=${effective.proxyScope})`
+      `proxy=${redactProxyUrl(effective.proxyUrl) || 'direct'} scope=${effective.proxyScope})`
   )
 
   let stopping = false

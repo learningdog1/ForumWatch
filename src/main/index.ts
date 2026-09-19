@@ -45,8 +45,12 @@ if (!gotSingleInstanceLock) {
   // 已有实例在跑：立即退出（ADR 8.4 单实例）
   app.quit()
 } else {
-  // 二次启动：唤起已有实例的主窗口
-  app.on('second-instance', () => showMainWindow())
+  // 二次启动：唤起已有实例的主窗口。second-instance 可能早于 whenReady 到达
+  // （此时 runtime/窗口尚未装配），非 ready 一律排队到 ready 之后再显示。
+  app.on('second-instance', () => {
+    if (app.isReady()) showMainWindow()
+    else void app.whenReady().then(() => showMainWindow())
+  })
 
   if (process.platform === 'darwin') {
     // ADR 8.3：托盘常驻形态隐藏 Dock 图标——不进 Cmd+Tab / Dock 是预期行为，

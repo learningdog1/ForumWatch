@@ -4,7 +4,7 @@
  *
  * 前端校验只提示不拦截（与主进程 sanitize 对齐）：
  * - 轮询间隔 <15 → 红字"最低 15 秒…"（sanitize 会钳到 15）
- * - 代理非 http(s):// 或 socks5:// 前缀 → 红字提醒（sanitize 会置空）
+ * - 代理非 http(s):// 或 socks5(h):// 前缀 → 红字提醒（sanitize 会置空）
  *
  * "发送测试消息"用的是**已保存**配置：表单 dirty 时先提示保存而非直接发送。
  * dirty 状态通过 onDirtyChange 上报给外壳（离开 tab 前的行内提示用）。
@@ -29,7 +29,7 @@ interface Draft {
 
 type Msg = { kind: 'ok' | 'err' | 'warn' | 'pending' | 'muted'; text: string }
 
-const PROXY_SCHEME_RE = /^(https?|socks5):\/\//i
+const PROXY_SCHEME_RE = /^(https?|socks5h?):\/\//i
 
 function toDraft(c: AppConfig): Draft {
   return {
@@ -287,7 +287,7 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
           hint={
             proxySchemeBad ? (
               <span className="err">
-                需以 http://、https:// 或 socks5:// 开头；当前值保存时会被清空，请修正
+                需以 http://、https://、socks5:// 或 socks5h:// 开头；当前值保存时会被清空，请修正
               </span>
             ) : (
               <span>留空表示直连。</span>

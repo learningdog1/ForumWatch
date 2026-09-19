@@ -2,8 +2,10 @@
  * Telegram Bot 推送（ADR 8.6）。
  *
  * - 网络 post 由外部注入（FetchLike，生产传 HttpClient 封装），本模块零直接网络依赖。
- * - 限流：内部串行队列，两次实际发送间隔 >= 1050ms（官方限制约 1 msg/s，留余量）。
- * - 429：读响应体 parameters.retry_after，等 (retry_after + 0.5)s 后重试。
+ * - 限流：内部串行队列，两次实际发送间隔 >= 1050ms。放弃 20 msg/min 全局限流——
+ *   1050ms 间隔 + 尊重 429 的 retry_after 已满足个人监控量级（每轮命中个位数）。
+ * - 429：读响应体 parameters.retry_after，等 (min(retry_after, 60) + 0.5)s 后重试
+ *   （封顶 60s：过大的 retry_after 不允许长时间阻塞轮询线程上的后续推送）。
  * - 其他失败（网络异常 / 非 2xx 非 429）：共 3 次尝试，间隔 1s / 2s，仍失败抛 TelegramError
  *   （message 带最后一次响应 body 前 200 字符）。
  * - now / sleep 可注入：单测用假时钟，不真睡。
@@ -51,6 +53,8 @@ export function formatHitMessage(topic: Topic, matchedKeywords: string[]): strin
 const MAX_ATTEMPTS = 3
 /** Telegram 单 chat 限 ~1 msg/s，取 1050ms 留余量 */
 const MIN_SEND_INTERVAL_MS = 1050
+/** 429 retry_after 的等待封顶（秒）：过大的值不得长时间阻塞后续推送 */
+const MAX_RETRY_AFTER_SEC = 60
 
 /** 从 429 响应体里解析 parameters.retry_after；无/非法则 undefined */
 function parseRetryAfterSec(body: string): number | undefined {
@@ -151,8 +155,9 @@ export class TelegramNotifier {
         const retryAfter = parseRetryAfterSec(res.body)
         lastRetryAfterSec = retryAfter
         lastDetail = `HTTP 429 (retry_after=${retryAfter ?? 'unknown'}s): ${res.body}`
-        // 尊重服务端指示；无 retry_after 时退化为常规退避
-        delayBeforeNext = retryAfter !== undefined ? (retryAfter + 0.5) * 1000 : attempt * 1000
+        // 尊重服务端指示但封顶 60s；无 retry_after 时退化为常规退避
+        delayBeforeNext =
+          retryAfter !== undefined ? (Math.min(retryAfter, MAX_RETRY_AFTER_SEC) + 0.5) * 1000 : attempt * 1000
         continue
       }
 

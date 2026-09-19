@@ -98,6 +98,19 @@ export function resolveDispatcherSpec(proxyUrl: string): DispatcherSpec {
   }
 }
 
+/**
+ * 日志脱敏：把 URL 中 `//user:pass@` 形式的凭据替换为 `//***@`。
+ * 代理 URL 可能带代理账号密码，绝不能原样进日志/console（任何输出代理 URL 的
+ * 地方都必须先过这个函数）。无凭据、空串或任意非法输入原样返回——脱敏失败
+ * 不挡日志，但也不产生错误输出。
+ */
+export function redactProxyUrl(url: string): string {
+  if (typeof url !== 'string' || url === '') return url
+  // 只匹配 authority 段（`//` 到第一个 `/` `?` `#` 之前）里带 `@` 的部分，
+  // 路径/查询里的 `@` 不会被误伤。
+  return url.replace(/\/\/[^/?#]*@/, '//***@')
+}
+
 /** 按 spec 创建 dispatcher；direct 返回 null（undici fetch 不传 dispatcher 即用默认直连） */
 function createDispatcher(spec: DispatcherSpec): Dispatcher | null {
   switch (spec.kind) {

@@ -129,12 +129,25 @@ describe('TelegramNotifier', () => {
     expect(body.text).toBe('✅ NodeSeek Monitor 测试消息')
   })
 
-  it('429 后按 retry_after+0.5s 等待并重试成功', async () => {
+  it('429 后按 min(retry_after, 60)+0.5s 等待并重试成功', async () => {
     const h = makeHarness((i) => (i === 0 ? tooManyRes : okRes))
     await h.notifier.sendTest()
 
     expect(h.calls.length).toBe(2)
-    expect(h.sleeps).toEqual([3500]) // (3 + 0.5) * 1000
+    expect(h.sleeps).toEqual([3500]) // (min(3, 60) + 0.5) * 1000
+  })
+
+  it('429 retry_after 过大（如 300s）：等待封顶 60s，不长时间阻塞', async () => {
+    const hugeRetry: HttpResponse = {
+      status: 429,
+      headers: {},
+      body: '{"ok":false,"error_code":429,"parameters":{"retry_after":300}}'
+    }
+    const h = makeHarness((i) => (i === 0 ? hugeRetry : okRes))
+    await h.notifier.sendTest()
+
+    expect(h.calls.length).toBe(2)
+    expect(h.sleeps).toEqual([60500]) // (min(300, 60) + 0.5) * 1000
   })
 
   it('连续 3 次非 429 失败 → TelegramError，含 body 前 200 字符与 1s/2s 退避', async () => {

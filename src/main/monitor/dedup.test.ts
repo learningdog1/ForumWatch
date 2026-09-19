@@ -1,4 +1,5 @@
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -184,6 +185,41 @@ describe('FileSeenStore（文件 backed）', () => {
     expect(await readFile(join(dir, backups[0]!), 'utf-8')).toBe('{ this is not json !!!')
   })
 
+  it('rebuiltFromCorrupt：损坏/缺文件/健康文件三种 load 的标志位', async () => {
+    // 缺文件：不是损坏重建
+    const missing = new FileSeenStore(join(dir, 'nope.json'))
+    missing.load()
+    expect(missing.rebuiltFromCorrupt).toBe(false)
+
+    // 健康文件：不是损坏重建
+    const healthy = new FileSeenStore(storePath)
+    healthy.add('a')
+    await healthy.flush()
+    const reloaded = new FileSeenStore(storePath)
+    reloaded.load()
+    expect(reloaded.rebuiltFromCorrupt).toBe(false)
+    expect(reloaded.size()).toBe(1)
+
+    // 损坏文件：是损坏重建
+    await writeFile(storePath, '{ corrupt !!!', 'utf-8')
+    const corrupt = new FileSeenStore(storePath)
+    corrupt.load()
+    expect(corrupt.rebuiltFromCorrupt).toBe(true)
+    expect(corrupt.size()).toBe(0)
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    '损坏备份文件权限 0o600（darwin/linux）',
+    async () => {
+      await writeFile(storePath, '{ this is not json !!!', 'utf-8')
+      new FileSeenStore(storePath).load()
+      const files = await readdir(dir)
+      const backup = files.find((f) => f.startsWith('state.json.corrupt-'))
+      expect(backup).toBeDefined()
+      expect(statSync(join(dir, backup!)).mode & 0o777).toBe(0o600)
+    }
+  )
+
   it('合法 JSON 但 schema 不认识：同样备份并从空开始', async () => {
     await writeFile(storePath, JSON.stringify({ schemaVersion: 99, seen: [{ id: 'x', addedAt: 1 }] }), 'utf-8')
     const s = new FileSeenStore(storePath)
@@ -200,6 +236,18 @@ describe('FileSeenStore（文件 backed）', () => {
     const files = await readdir(dir)
     expect(files.some((f) => f.includes('.tmp-'))).toBe(false)
     expect(files).toContain('state.json')
+  })
+
+  it('flush 返回值：成功 true；写失败（父路径被同名文件挡住）false 且不抛', async () => {
+    const good = new FileSeenStore(storePath)
+    good.add('a')
+    await expect(good.flush()).resolves.toBe(true)
+
+    // dirname 是一个普通文件 → mkdir 失败 → flush 返回 false
+    await writeFile(join(dir, 'blocker'), 'x', 'utf-8')
+    const bad = new FileSeenStore(join(dir, 'blocker', 'seen.json'))
+    bad.add('a')
+    await expect(bad.flush()).resolves.toBe(false)
   })
 
   it('prune 清理超过保留期的旧条目（文件里预置老时间戳）', async () => {

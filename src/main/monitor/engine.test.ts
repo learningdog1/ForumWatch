@@ -3,7 +3,7 @@
  * FileEngineState（tmpdir）、scheduler 用真实 PollScheduler（fake timers）、
  * matchTopic 用真实现。
  */
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
@@ -13,7 +13,7 @@ import { FileSeenStore } from './dedup'
 import { FileEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
 import { TelegramError } from '../notify/telegram'
-import { createLogger } from '../logger'
+import { createLogger, type Logger } from '../logger'
 import { DEFAULT_APP_CONFIG, type AppConfig, type Topic } from '../../shared/types'
 
 let dir: string
@@ -52,13 +52,23 @@ interface Harness {
   seen: FileSeenStore
   state: FileEngineState
   config: AppConfig
+  logger: Logger
   /** 已触发的 pollOnce promise（start/resume 间接触发时用它 drain） */
   ticks: Promise<void>[]
   onHit: Mock
   onStatus: Mock
 }
 
-function build(opts: { config?: Partial<AppConfig>; impl?: () => Promise<Topic[]> } = {}): Harness {
+function build(
+  opts: {
+    config?: Partial<AppConfig>
+    impl?: () => Promise<Topic[]>
+    /** 覆盖 getConfig（F7：注入抛错版本） */
+    getConfig?: () => AppConfig
+    /** 覆盖 seen 文件路径（F9：指向不可写路径让 flush 失败） */
+    seenPath?: string
+  } = {}
+): Harness {
   const config: AppConfig = {
     ...structuredClone(DEFAULT_APP_CONFIG),
     includeKeywords: ['羊毛'],
@@ -67,7 +77,8 @@ function build(opts: { config?: Partial<AppConfig>; impl?: () => Promise<Topic[]
     ...opts.config
   }
 
-  const seen = new FileSeenStore(join(dir, 'seen.json'))
+  const logger = createLogger() // 纯内存 logger
+  const seen = new FileSeenStore(opts.seenPath ?? join(dir, 'seen.json'))
   seen.load()
   const state = new FileEngineState(join(dir, 'state.json'))
   state.load()
@@ -76,7 +87,6 @@ function build(opts: { config?: Partial<AppConfig>; impl?: () => Promise<Topic[]
   const sendTest = vi.fn(async () => {})
   const onHit = vi.fn()
   const onStatus = vi.fn()
-  const logger = createLogger() // 纯内存 logger
   const ticks: Promise<void>[] = []
 
   const fetchLatest = vi.fn(opts.impl ?? (async () => [] as Topic[]))
@@ -99,14 +109,27 @@ function build(opts: { config?: Partial<AppConfig>; impl?: () => Promise<Topic[]
     seen,
     state,
     notifier: { sendHit, sendTest },
-    getConfig: () => config,
+    getConfig: opts.getConfig ?? (() => config),
     scheduler,
     logger,
     onHit,
     onStatus
   })
 
-  return { engine, scheduler, fetchLatest, sendHit, sendTest, seen, state, config, ticks, onHit, onStatus }
+  return {
+    engine,
+    scheduler,
+    fetchLatest,
+    sendHit,
+    sendTest,
+    seen,
+    state,
+    config,
+    logger,
+    ticks,
+    onHit,
+    onStatus
+  }
 }
 
 describe('首启基线（防通知风暴）', () => {
@@ -150,6 +173,53 @@ describe('首启基线（防通知风暴）', () => {
     expect(h.sendHit).not.toHaveBeenCalled() // 补做基线，不是推送
     expect(h.seen.has('1')).toBe(true)
     expect(h.state.get().baselineDone).toBe(true)
+  })
+
+  it('seen 损坏重建 + baselineDone=true → 强制补基线（ADR 8.9）：首轮无 sendHit、全部入集', async () => {
+    // 第一个引擎完成基线：state.baselineDone=true，seen 已落盘
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce()
+    expect(h.state.get().baselineDone).toBe(true)
+
+    // seen.json 损坏 → FileSeenStore 重建（rebuiltFromCorrupt=true）
+    await writeFile(join(dir, 'seen.json'), '{ corrupt !!!', 'utf-8')
+    const seen2 = new FileSeenStore(join(dir, 'seen.json'))
+    seen2.load()
+    expect(seen2.rebuiltFromCorrupt).toBe(true)
+
+    // 新引擎装配（state 仍是 baselineDone=true）：构造时重置为 false 并 warn
+    const engine2 = new MonitorEngine({
+      source: { name: 'fake', fetchLatest: h.fetchLatest },
+      seen: seen2,
+      state: h.state,
+      notifier: { sendHit: h.sendHit, sendTest: h.sendTest },
+      getConfig: () => h.config,
+      scheduler: h.scheduler,
+      logger: h.logger
+    })
+    expect(h.state.get().baselineDone).toBe(false)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'warn' && e.msg.includes('seen store rebuilt'))
+    ).toBe(true)
+
+    // 首轮按基线处理：整页只入集不推送
+    h.fetchLatest.mockImplementation(async () => [topic('1'), topic('2', { title: '羊毛' })])
+    await engine2.pollOnce()
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.onHit).not.toHaveBeenCalled()
+    expect(seen2.has('1')).toBe(true)
+    expect(seen2.has('2')).toBe(true)
+    expect(h.state.get().baselineDone).toBe(true)
+  })
+
+  it('seen 损坏重建但 baselineDone=false：无需重置，行为不变（首启基线照做）', async () => {
+    await writeFile(join(dir, 'seen.json'), '{ corrupt !!!', 'utf-8')
+    const h = build({ impl: async () => [topic('1', { title: '羊毛' })] })
+    expect(h.seen.rebuiltFromCorrupt).toBe(true)
+    expect(h.state.get().baselineDone).toBe(false)
+    await h.engine.pollOnce() // 基线
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.seen.has('1')).toBe(true)
   })
 })
 
@@ -227,6 +297,10 @@ describe('正常轮', () => {
     expect(hits[1].notifyError).toBeNull()
     expect(h.engine.getStatus().health).toBe('ok') // 推送失败 ≠ 轮询失败
     expect(h.engine.getStatus().totalHits).toBe(3)
+    // ADR 8.10：真实失败的 2 不入去重集（下轮重试）；成功的 3/4 入集
+    expect(h.seen.has('2')).toBe(false)
+    expect(h.seen.has('3')).toBe(true)
+    expect(h.seen.has('4')).toBe(true)
   })
 
   it('notifyEnabled=false：命中不推送，notifiedAt/notifyError 均为 null（静音态）', async () => {
@@ -241,6 +315,8 @@ describe('正常轮', () => {
     expect(hits[0].notifiedAt).toBeNull()
     expect(hits[0].notifyError).toBeNull()
     expect(h.engine.getStatus().totalHits).toBe(1)
+    // 静音是用户主动行为：照常入集，不进入重试
+    expect(h.seen.has('2')).toBe(true)
   })
 
   it('telegram 未配置：同静音态，不调用 sendHit', async () => {
@@ -277,6 +353,80 @@ describe('正常轮', () => {
     const h = build()
     await h.engine.sendTestNotification()
     expect(h.sendTest).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('推送失败重试（ADR 8.10）', () => {
+  it('失败不入集 → 下轮重试成功后入集，全程只 emit 两次（失败一次 + 成功一次）', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed after 3 attempts'))
+
+    // 第 1 轮：真实推送失败 → 不入集，emit 失败态一次
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('2')).toBe(false)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    let hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(1)
+    expect(hits[0].notifyError).toContain('telegram send failed')
+    expect(hits[0].notifiedAt).toBeNull()
+
+    // 第 2 轮：同帖仍在首页 → 重试成功 → 入集，emit 最终态一次
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.seen.has('2')).toBe(true)
+    expect(h.onHit).toHaveBeenCalledTimes(2) // 失败一次 + 成功一次
+    hits = h.engine.getRecentHits()
+    expect(hits).toHaveLength(2)
+    expect(hits[1].notifiedAt).not.toBeNull()
+    expect(hits[1].notifyError).toBeNull()
+
+    // 第 3 轮：已入集，不再处理
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.onHit).toHaveBeenCalledTimes(2)
+  })
+
+  it('连续多轮同失败态：只 emit/log 一次，不刷屏；失败原因变化才再 emit', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    h.sendHit.mockRejectedValue(new TelegramError('telegram send failed'))
+
+    await h.engine.pollOnce() // 首次失败：emit 1 次
+    await h.engine.pollOnce() // 同失败态：不再 emit
+    await h.engine.pollOnce() // 同失败态：不再 emit
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).toHaveBeenCalledTimes(3) // 但每轮都真重试了
+    expect(h.seen.has('2')).toBe(false) // 始终不入集
+
+    // 失败原因变化（不同失败态）：再 emit 一次
+    h.sendHit.mockRejectedValue(new TelegramError('different failure'))
+    await h.engine.pollOnce()
+    expect(h.onHit).toHaveBeenCalledTimes(2)
+  })
+
+  it('待重试的帖子转为静音（notifyEnabled=false）：入集并 emit 静音最终态，不再重试', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce() // 失败：1 次 emit
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+
+    h.config.notifyEnabled = false
+    await h.engine.pollOnce() // 静音最终态：emit 1 次并入集
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 静音轮不调用 sendHit
+    expect(h.seen.has('2')).toBe(true)
+    expect(h.onHit).toHaveBeenCalledTimes(2)
+    const last = h.onHit.mock.calls[h.onHit.mock.calls.length - 1]![0] as {
+      notifiedAt: string | null
+      notifyError: string | null
+    }
+    expect(last.notifiedAt).toBeNull()
+    expect(last.notifyError).toBeNull()
   })
 })
 
@@ -331,6 +481,58 @@ describe('失败与健康流转', () => {
     expect(h.seen.size()).toBe(2)
     expect(h.state.get().baselineDone).toBe(true)
     expect(h.state.get().totalHits).toBe(0)
+  })
+
+  it('getConfig 抛错也走失败收尾：health=backoff、lastError 记录、按上次间隔退避', async () => {
+    const h = build({
+      impl: async () => [topic('1')],
+      getConfig: () => {
+        throw new Error('config store broken')
+      }
+    })
+    await h.engine.pollOnce()
+    const st = h.engine.getStatus()
+    expect(st.health).toBe('backoff')
+    expect(st.lastError).toContain('config store broken')
+    expect(st.consecutiveFailures).toBe(1)
+  })
+
+  it('getConfig 抛错时退避基数用最近一次成功的间隔（默认 60s）', async () => {
+    const cfg30: AppConfig = {
+      ...structuredClone(DEFAULT_APP_CONFIG),
+      includeKeywords: ['羊毛'],
+      pollIntervalSec: 30,
+      telegram: { botToken: 'T', chatId: 'C' }
+    }
+    let broken = false
+    const h = build({
+      impl: async () => [topic('1')],
+      getConfig: () => {
+        if (broken) throw new Error('config store broken')
+        return cfg30
+      }
+    })
+    const spy = vi.spyOn(h.scheduler, 'setIntervalSec')
+    await h.engine.pollOnce() // 基线成功，lastIntervalSec=30
+    broken = true
+    await h.engine.pollOnce() // getConfig 抛错
+    expect(h.engine.getStatus().health).toBe('backoff')
+    expect(spy).toHaveBeenLastCalledWith(computeBackoffMs(1, 30_000) / 1000)
+  })
+
+  it('seen flush 失败：logger.warn 提示重启后可能重复，不影响本轮健康判定', async () => {
+    // 用同名文件挡住 seen.json 的父目录，mkdir 失败 → flush 返回 false
+    await writeFile(join(dir, 'blocker'), 'x', 'utf-8')
+    const h = build({ impl: async () => [topic('1')], seenPath: join(dir, 'blocker', 'seen.json') })
+    await h.engine.pollOnce() // 基线轮，flush 失败
+    const st = h.engine.getStatus()
+    expect(st.health).toBe('ok') // flush 失败 ≠ 轮询失败
+    expect(
+      h.logger
+        .getRecent()
+        .some((e) => e.level === 'warn' && e.msg.includes('seen flush failed'))
+    ).toBe(true)
+    expect(h.state.get().baselineDone).toBe(true)
   })
 })
 

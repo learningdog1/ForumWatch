@@ -47,7 +47,7 @@ export interface AppConfig {
   excludeKeywords: string[]
   /** 轮询间隔秒数，下限 15 */
   pollIntervalSec: number
-  /** 代理 URL：'' 表示直连；支持 http:// https:// socks5:// */
+  /** 代理 URL：'' 表示直连；支持 http:// https:// socks5:// socks5h:// */
   proxyUrl: string
   proxyScope: ProxyScope
   telegram: TelegramConfig

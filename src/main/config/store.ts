@@ -21,7 +21,8 @@ export const MIN_POLL_INTERVAL_SEC = 15
 export const FALLBACK_POLL_INTERVAL_SEC = 60
 
 const CONFIG_SCHEMA_VERSION = 1
-const PROXY_URL_PREFIXES = ['http://', 'https://', 'socks5://'] as const
+// 与 http.ts 的 resolveDispatcherSpec 支持面保持一致（socks5h = 远端 DNS 解析）
+const PROXY_URL_PREFIXES = ['http://', 'https://', 'socks5://', 'socks5h://'] as const
 const PROXY_SCOPES: readonly ProxyScope[] = ['all', 'telegram-only']
 
 /** 盘上 JSON 的外层形状 */
@@ -34,7 +35,7 @@ interface ConfigFileEnvelope {
  * 清洗用户/盘上来的配置：永远返回全新对象（不改入参），且字段类型一定合法。
  * - 关键词数组：trim、去空、去重（不区分大小写，保留首次出现的写法）。
  * - `pollIntervalSec`：非数字/NaN/Infinity → 60；否则钳到 ≥15。
- * - `proxyUrl`：trim；非空时必须以 `http://` `https://` `socks5://` 开头（忽略大小写），否则置 ''。
+ * - `proxyUrl`：trim；非空时必须以 `http://` `https://` `socks5://` `socks5h://` 开头（忽略大小写），否则置 ''。
  * - `proxyScope`：只认 'all' | 'telegram-only'，非法回退 'telegram-only'。
  * - `telegram.botToken` / `telegram.chatId`：trim。
  */
@@ -77,7 +78,7 @@ export class ConfigStore {
 
   /** 取当前配置；未 load 过则先 load。返回深拷贝，调用方改动不会污染内部状态。 */
   get(): AppConfig {
-    return this.config ?? this.load()
+    return structuredClone(this.config ?? this.load())
   }
 
   /**
@@ -151,6 +152,8 @@ export class ConfigStore {
     const backupPath = `${this.filePath}.corrupt-${Date.now()}`
     try {
       writeFileSync(backupPath, content, 'utf-8')
+      // 备份内容含 bot token 等敏感信息：权限与主文件一致收紧到 600
+      chmodSync(backupPath, 0o600)
       console.error(`[config] config file corrupt, backed up to ${backupPath}; using defaults`)
     } catch (err) {
       console.error(`[config] config file corrupt and backup to ${backupPath} failed:`, err)

@@ -56,11 +56,11 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
 
   ipcMain.handle(IPC.getConfig, () => rt.store.get())
 
-  // ConfigStore.save 写盘失败会向上抛（磁盘/权限等）——catch 转 {ok:false, error}
+  // store.update（浅合并 + sanitize + 原子落盘）——渲染端漏字段时按合并语义
+  // 保留现有值，不会意外清空关键词等未提交字段；写盘失败向上抛 → catch 转 {ok:false}
   ipcMain.handle(IPC.saveConfig, (_event, cfg: unknown): SaveConfigResult => {
     try {
-      rt.store.save(cfg as AppConfig)
-      const effective = rt.store.get()
+      const effective = rt.store.update(cfg as Partial<AppConfig>)
       rt.applyConfigSideEffects(effective)
       return { ok: true, config: effective }
     } catch (err) {

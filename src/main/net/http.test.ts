@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import http from 'node:http'
 import { once } from 'node:events'
 import type { AddressInfo } from 'node:net'
-import { HttpClient, resolveDispatcherSpec } from './http'
+import { HttpClient, redactProxyUrl, resolveDispatcherSpec } from './http'
 
 let server: http.Server
 let baseUrl: string
@@ -76,6 +76,37 @@ function flattenError(e: unknown): string {
   }
   return s
 }
+
+describe('redactProxyUrl（日志脱敏）', () => {
+  it('带 user:pass 凭据：凭据替换为 ***，scheme/host/port 保留', () => {
+    expect(redactProxyUrl('http://user:pass@127.0.0.1:7890')).toBe('http://***@127.0.0.1:7890')
+    expect(redactProxyUrl('socks5h://alice:s3cret@host:1080')).toBe('socks5h://***@host:1080')
+    expect(redactProxyUrl('socks5://bob%40x:p%40ss@proxy.example.com')).toBe(
+      'socks5://***@proxy.example.com'
+    )
+  })
+
+  it('只有 user 没有 pass 的凭据同样脱敏', () => {
+    expect(redactProxyUrl('http://user@proxy.example.com:8080')).toBe(
+      'http://***@proxy.example.com:8080'
+    )
+  })
+
+  it('无凭据：原样返回', () => {
+    expect(redactProxyUrl('http://127.0.0.1:7890')).toBe('http://127.0.0.1:7890')
+    expect(redactProxyUrl('socks5h://host:1080')).toBe('socks5h://host:1080')
+  })
+
+  it('空串/非法输入：原样返回不抛', () => {
+    expect(redactProxyUrl('')).toBe('')
+    expect(redactProxyUrl('garbage')).toBe('garbage')
+    expect(redactProxyUrl('http://')).toBe('http://')
+  })
+
+  it('路径/查询里的 @ 不被误伤', () => {
+    expect(redactProxyUrl('http://host/p@a/th?q=u@v')).toBe('http://host/p@a/th?q=u@v')
+  })
+})
 
 describe('resolveDispatcherSpec（纯函数）', () => {
   it('空串 / 空白 = 直连', () => {
