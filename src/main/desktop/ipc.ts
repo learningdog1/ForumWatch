@@ -18,6 +18,8 @@ import {
   type AiTestResult,
   type DailyReportListResult,
   type EngineControlResult,
+  type MatchTestRequest,
+  type MatchTestResult,
   type OpenExternalResult,
   type SaveConfigResult
 } from '../../shared/ipc'
@@ -26,11 +28,14 @@ import type {
   DailyReportInfo,
   EngineStatus,
   HitRecord,
-  LogEntry
+  LogEntry,
+  Topic
 } from '../../shared/types'
 import type { DesktopRuntime } from './runtime'
 import { allowedExternalDomains, isHostAllowed } from '../monitor/sources/registry'
 import { formatLocalDate } from '../monitor/hits-store'
+import { normalizeTitle } from '../monitor/similarity'
+import { runMatchTest, type SemanticTestInput } from '../monitor/testbench'
 
 /** 主→渲染事件推送接口（runtime 把 engine onStatus/onHit / 日报广播转发给它） */
 export interface EventBroadcaster {
@@ -186,4 +191,105 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
   ipcMain.handle(IPC.listDailyReports, (): DailyReportListResult => ({
     dates: rt.reportService.listReportDays()
   }))
+
+  // ---- 匹配测试台（R5-P2c） -----------------------------------------------
+
+  /**
+   * invoke(MatchTestRequest) → MatchTestResult：按已保存配置对单个标题跑一遍
+   * 判定管线（testbench.runMatchTest 纯函数）。只读诊断：不写 seen / hits、
+   * 不推送、不动引擎状态。永不向渲染进程抛异常（参数非法也返回 block 结果）。
+   *
+   * 数据面：
+   * - filters：sourceId 给则取该 source 的 config.filters（无则 undefined）；
+   * - recentPushedTitles：hitsStore.readRecent(2) 里 notifiedAt 非空的行，
+   *   标题 normalizeTitle 后跳过空串（isSimilarToAny 的契约：窗口须传已归一串；
+   *   这里不做 48h 时间过滤——测试台想看"与近期推过的东西"是否相似，宽一点
+   *   更有诊断价值，2 天读取面本身已界定范围）；
+   * - semantic：useAi=true 且 provider 三项齐备时**真调一次** evaluator（单帖
+   *   一批，消耗一次 LLM 调用——注意这不走 engine 的每日 300 计数器，engine.ts
+   *   不可改；失败/未决/AI 未配置/兴趣为空都收敛为 {skipped}，语义阶段按 skip
+   *   展示原因，绝不炸整次测试。
+   */
+  ipcMain.handle(IPC.matchTest, async (_event, req: unknown): Promise<MatchTestResult> => {
+    const raw = (typeof req === 'object' && req !== null ? req : {}) as Partial<MatchTestRequest>
+    const title = typeof raw.title === 'string' ? raw.title.trim() : ''
+    if (title === '') {
+      return {
+        wouldPush: false,
+        stages: [
+          { stage: 'input', label: '输入', outcome: 'block', detail: '参数无效：需要非空 title' }
+        ]
+      }
+    }
+    const sourceId =
+      typeof raw.sourceId === 'string' && raw.sourceId !== '' ? raw.sourceId : undefined
+    const useAi = raw.useAi === true
+    const category = typeof raw.category === 'string' ? raw.category.trim() : ''
+    const author = typeof raw.author === 'string' ? raw.author.trim() : ''
+
+    const cfg: AppConfig = rt.store.get()
+    const filters = sourceId !== undefined
+      ? cfg.sources.find((s) => s.id === sourceId)?.filters
+      : undefined
+
+    let recentPushedTitles: string[] = []
+    try {
+      const recent = await rt.hitsStore.readRecent(2)
+      recentPushedTitles = recent
+        .filter((h) => h.notifiedAt !== null && h.notifiedAt !== '')
+        .map((h) => normalizeTitle(h.topic.title))
+        .filter((t) => t !== '')
+    } catch {
+      recentPushedTitles = [] // 读取失败按空窗处理（测试面不炸）
+    }
+
+    let semantic: SemanticTestInput | undefined
+    if (!useAi) {
+      semantic = undefined
+    } else {
+      const p = cfg.ai.provider
+      const configured =
+        p.baseUrl.trim() !== '' && p.apiKey.trim() !== '' && p.model.trim() !== ''
+      if (!configured) {
+        semantic = { skipped: 'AI 未配置（Base URL / API Key / 模型名不齐）' }
+      } else if (cfg.ai.interests.length === 0) {
+        // evaluator 对空兴趣会快速全 miss 不调 API；直接说明原因更清楚
+        semantic = { skipped: '兴趣描述为空：语义档永不命中（未调 AI）' }
+      } else {
+        const topic: Topic = {
+          id: 'testbench',
+          sourceId: sourceId ?? 'testbench',
+          title,
+          url: '',
+          author,
+          category,
+          // 用户给的分类同时按显示名与 slug 两种口径参与匹配（测试台拿不到真实 slug）
+          categorySlug: category,
+          pinned: false,
+          lastActiveAt: null
+        }
+        try {
+          const verdicts = await rt.semanticEvaluator.evaluate([topic], cfg.ai.interests)
+          const verdict = verdicts.get(`${topic.sourceId}:${topic.id}`)
+          semantic =
+            verdict === undefined
+              ? { skipped: 'AI 未给出该帖的裁决（未决）' }
+              : { hit: verdict.hit, score: verdict.score, reason: verdict.reason }
+        } catch (err) {
+          semantic = {
+            skipped: `AI 评估失败：${err instanceof Error ? err.message : String(err)}`
+          }
+        }
+      }
+    }
+
+    return runMatchTest({
+      title,
+      filters,
+      cfg,
+      recentPushedTitles,
+      semantic,
+      topic: { category, categorySlug: category, author }
+    })
+  })
 }

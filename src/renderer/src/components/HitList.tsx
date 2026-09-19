@@ -1,9 +1,9 @@
 /**
  * 最近命中列表：时间 · 来源徽标 · 分类徽标 · 标题（openExternal，仅已配置
- * 来源的域会被主进程放行）· 命中方式徽标（字面/语义）· 命中词 chips 或
- * AI 判定理由（语义命中时 matchedKeywords 恒为空，改展示 semanticReason 斜体
- * 小字）· 锐评行（commentary 非空时，💬 前缀 + ai-reason 同款斜体小字；旧
- * hits/*.jsonl 行无该字段，?? null 归一后不展示）· 推送状态（✓已推送 / ✗推送失败[hover 见原因] / −静音[hover 见说明]）。
+ * 来源的域会被主进程放行）· 命中方式徽标（字面/语义/规则）· 命中词 chips、
+ * AI 判定理由或命中规则名 · 锐评行（commentary 非空时，💬 前缀 + ai-reason
+ * 同款斜体小字；旧 hits/*.jsonl 行无该字段，?? null 归一后不展示）· 推送状态
+ * （✓已推送 / ✗推送失败[hover 见原因] / −静音[hover 见说明]）。
  * 时间取 notifiedAt（推送时间）；静音/失败命中没有推送时间，退而取帖子 lastActiveAt。
  */
 import type { HitRecord } from '@shared/types'
@@ -50,7 +50,11 @@ function CommentaryLine(props: { commentary: string | null }) {
   )
 }
 
-/** 命中方式区：字面 → 命中词 chips；语义 → AI 理由（斜体小字）；锐评（有则附同区域） */
+/**
+ * 命中方式区：字面 → 命中词 chips；语义 → AI 理由（斜体小字）；规则（R5-P2c）→
+ * 规则徽标 + 命中规则名（对齐 semanticReason 的展示位；matchedRule 为旧记录
+ * 可选字段，?? null 归一后空则只显徽标）；锐评（有则附同区域）。
+ */
 function MatchInfo(props: { hit: HitRecord }) {
   const { hit } = props
   const commentary = hit.commentary ?? null
@@ -61,6 +65,30 @@ function MatchInfo(props: { hit: HitRecord }) {
         {hit.semanticReason != null && (
           <span className="ai-reason" title={hit.semanticReason}>
             AI: {hit.semanticReason}
+          </span>
+        )}
+        <CommentaryLine commentary={commentary} />
+      </span>
+    )
+  }
+  if (hit.matchedBy === 'rule') {
+    // 旧 hits/*.jsonl 行无 matchedRule 字段（可选），缺失等价"非规则命中时的空"
+    const matchedRule = hit.matchedRule ?? null
+    return (
+      <span className="hit-how rule">
+        {/* 结构化命中通道：绿色描边与字面（中性）/语义（AI 紫）区分，色值走令牌 */}
+        <span
+          className="how-badge"
+          style={{
+            borderColor: 'color-mix(in srgb, var(--ok) 45%, transparent)',
+            color: 'var(--ok)'
+          }}
+        >
+          规则
+        </span>
+        {matchedRule != null && matchedRule !== '' && (
+          <span className="ai-reason" title={`命中规则：${matchedRule}`}>
+            {matchedRule}
           </span>
         )}
         <CommentaryLine commentary={commentary} />

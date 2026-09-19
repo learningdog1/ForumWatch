@@ -9,14 +9,17 @@
  *
  * 保存走 AppConfig v2 全量透传：sources 与 ai 段都由本页表单构建
  * （ai 段来自 AI 模型/监控模式/每日总结三张卡，sources 来自「来源」卡——
- * SourceCard 组件内管启停/增删/预设，回写 draft.sources）。
- * "发送测试消息 / 测试连接"用的都是**已保存**配置：表单 dirty 时先提示保存
- * 而非直接发送。dirty 状态通过 onDirtyChange 上报给外壳。
+ *  SourceCard 组件内管启停/增删/预设/分类与作者过滤，回写 draft.sources）；
+ *  priceRules / similarity（R5-P2c）分别来自「价格规则」「相似降噪」卡。
+ * "发送测试消息 / 测试连接 / 匹配测试台"用的都是**已保存**配置：表单 dirty 时先
+ * 提示保存而非直接发送。dirty 状态通过 onDirtyChange 上报给外壳。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { AppConfig, MatchMode, ProxyScope, SourceConfig } from '@shared/types'
+import type { AppConfig, MatchMode, PriceRuleConfig, ProxyScope, SourceConfig } from '@shared/types'
 import { Field } from '../components/Field'
 import { KeywordTagInput } from '../components/KeywordTagInput'
+import { MatchTestCard } from '../components/MatchTestCard'
+import { RulesCard } from '../components/RulesCard'
 import { SourceCard } from '../components/SourceCard'
 import { IconBolt, IconEye, IconEyeOff, IconSend } from '../components/icons'
 import { formatClock } from '../lib/time'
@@ -40,6 +43,13 @@ interface Draft {
   dailyEnabled: boolean
   dailyTime: string
   commentaryEnabled: boolean
+  /** 价格规则（R5-P2c 起由本页「价格规则」卡管理） */
+  priceRules: PriceRuleConfig[]
+  /** 相似降噪（「相似降噪」卡） */
+  similarityEnabled: boolean
+  similarityThreshold: number
+  /** 语义置信度阈值（「监控模式」卡滑杆；0 = 不过滤） */
+  aiSemanticThreshold: number
 }
 
 type Msg = { kind: 'ok' | 'err' | 'warn' | 'pending' | 'muted'; text: string }
@@ -81,7 +91,11 @@ function toDraft(c: AppConfig): Draft {
     interests: [...c.ai.interests],
     dailyEnabled: c.ai.dailyReport.enabled,
     dailyTime: c.ai.dailyReport.timeHHMM,
-    commentaryEnabled: c.ai.commentary.enabled
+    commentaryEnabled: c.ai.commentary.enabled,
+    priceRules: c.priceRules.map((r) => ({ ...r })),
+    similarityEnabled: c.similarity.enabled,
+    similarityThreshold: c.similarity.threshold,
+    aiSemanticThreshold: c.ai.semanticThreshold
   }
 }
 
@@ -164,6 +178,11 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
         telegram: { botToken: draft.botToken.trim(), chatId: draft.chatId.trim() },
         notifyEnabled: draft.notifyEnabled,
         launchAtLogin: draft.launchAtLogin,
+        priceRules: draft.priceRules,
+        similarity: {
+          enabled: draft.similarityEnabled,
+          threshold: draft.similarityThreshold
+        },
         ai: {
           provider: {
             baseUrl: draft.aiBaseUrl.trim(),
@@ -172,6 +191,8 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
           },
           matchMode: draft.matchMode,
           interests: draft.interests,
+          // 语义置信度阈值（第五轮 / R5-P2c：「监控模式」卡的滑杆）
+          semanticThreshold: draft.aiSemanticThreshold,
           dailyReport: { enabled: draft.dailyEnabled, timeHHMM: draft.dailyTime },
           // 锐评开关（本页「AI 模型」卡的「推送锐评」控件）
           commentary: { enabled: draft.commentaryEnabled }
@@ -288,6 +309,10 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
           />
         </Field>
       </section>
+
+      <RulesCard rules={draft.priceRules} onChange={(priceRules) => patch({ priceRules })} />
+
+      <MatchTestCard sources={draft.sources} dirty={dirty} />
 
       <section className="card">
         <div className="card-head">
@@ -479,6 +504,85 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
             value={draft.interests}
             onChange={(v) => patch({ interests: v })}
           />
+        </Field>
+        <Field
+          label="语义置信度阈值"
+          hint={
+            <span>
+              AI 判定相关（hit）后还需置信度 score ≥ 此值才推送。默认 0 = 不过滤；
+              调高可减少误报，但可能漏报（低置信的真命中会被拦下）。仅影响语义/
+              叠加模式的 AI 档，字面与价格规则命中不受影响。
+            </span>
+          }
+        >
+          <div className="input-row">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={draft.aiSemanticThreshold}
+              onChange={(e) => patch({ aiSemanticThreshold: Number(e.target.value) })}
+              style={{ flex: '1 1 160px', accentColor: 'var(--accent)' }}
+              aria-label="语义置信度阈值"
+            />
+            <span className="feedback muted num">
+              {draft.aiSemanticThreshold.toFixed(2)}
+              {draft.aiSemanticThreshold === 0 ? '（不过滤）' : ''}
+            </span>
+          </div>
+        </Field>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <span className="card-title">相似降噪</span>
+          <span className="card-title-aux">48 小时窗口</span>
+        </div>
+        <Field
+          label="开关"
+          hint={
+            <span>
+              命中推送前与近 48 小时已推送的标题比对相似度，相似则不再推。只抑制
+              <strong>装饰级</strong>转发变体（加标签 / emoji / 全角半角 / 大小写等）；
+              换词改写的重复帖抑制不了（相似度不够），那是 AI 语义通道的取舍。
+            </span>
+          }
+        >
+          <div className="switch-row">
+            <button
+              type="button"
+              role="switch"
+              className="switch"
+              aria-checked={draft.similarityEnabled}
+              aria-label="相似降噪"
+              onClick={() => patch({ similarityEnabled: !draft.similarityEnabled })}
+            />
+            <span className="feedback muted">{draft.similarityEnabled ? '开启' : '关闭'}</span>
+          </div>
+        </Field>
+        <Field
+          label="相似阈值"
+          hint={
+            <span>
+              标题归一化后按 3-gram Jaccard 相似度 ≥ 阈值判为相似。调低拦得更狠
+              （可能误杀正常新帖），调高只拦几乎相同的标题。默认 0.72。
+            </span>
+          }
+        >
+          <div className="input-row">
+            <input
+              type="range"
+              min={0.5}
+              max={0.95}
+              step={0.01}
+              value={draft.similarityThreshold}
+              onChange={(e) => patch({ similarityThreshold: Number(e.target.value) })}
+              style={{ flex: '1 1 160px', accentColor: 'var(--accent)' }}
+              aria-label="相似阈值"
+            />
+            <span className="feedback muted num">{draft.similarityThreshold.toFixed(2)}</span>
+          </div>
         </Field>
       </section>
 

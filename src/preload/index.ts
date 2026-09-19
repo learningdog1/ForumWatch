@@ -5,7 +5,7 @@
  * 组件时调用。
  */
 import { contextBridge, ipcRenderer } from 'electron'
-import { IPC, type DesktopApi } from '../shared/ipc'
+import { IPC, type DesktopApi, type MatchTestRequest } from '../shared/ipc'
 import type { DailyReportInfo, EngineStatus, HitRecord, LogEntry } from '../shared/types'
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
@@ -31,6 +31,8 @@ const api: DesktopApi = {
   getDailyReport: (dateLocal) => ipcRenderer.invoke(IPC.getDailyReport, dateLocal),
   generateDailyReport: () => ipcRenderer.invoke(IPC.generateDailyReport),
   listDailyReports: () => ipcRenderer.invoke(IPC.listDailyReports),
+  // 匹配测试台（R5-P2c）：主进程按已保存配置跑判定管线，返回逐阶段 trace
+  matchTest: (req: MatchTestRequest) => ipcRenderer.invoke(IPC.matchTest, req),
   onStatus: (callback) => subscribe<EngineStatus>(IPC.evStatus, callback),
   onHit: (callback) => subscribe<HitRecord>(IPC.evHit, callback),
   onLog: (callback) => subscribe<LogEntry>(IPC.evLog, callback),

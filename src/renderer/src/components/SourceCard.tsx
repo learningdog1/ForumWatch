@@ -1,20 +1,22 @@
 /**
  * 「来源」卡片（R4-W4，从 Settings 拆出的新卡片）：
  * - 来源列表：类型徽标（NodeSeek/V2EX/RSS）+ 名称（rss 显示 label 或 host）+
- *   url + 启停开关 + 删除按钮。默认 nodeseek 来源不可删除（至少保留一个来源，
- *   列表删空 sanitize 会回默认——UI 侧直接禁删更清晰）。
+ *   url + 「过滤」展开（R5-P2c：分类白/黑名单 + 作者黑名单，写回该 source 的
+ *   filters 字段）+ 启停开关 + 删除按钮。默认 nodeseek 来源不可删除（至少保留
+ *   一个来源，列表删空 sanitize 会回默认——UI 侧直接禁删更清晰）。
  * - 添加：三个预设（V2EX / Linux.do / LowEndTalk，见 lib/presets.ts；已添加的
  *   按 id 匹配置灰）+ 自定义 RSS（url 前端校验 http(s) 红字反馈；id 从 host
  *   slug 化生成、冲突加 -2/-3 后缀）。
  * - 状态收在组件内；修改经 onChange 回写 Settings 的 draft config sources 字段，
- *   走既有「保存设置」链路（无新 IPC）。
- * - filters（分类/作者过滤）UI 本轮不做（R5），只留结构预留（尾部提示行）。
+ *   走既有「保存设置」链路（无新 IPC）。三列表全空时 filters 不落键（undefined，
+ *   对齐主进程 sanitize 的落键规则，避免保存后出现假 dirty）。
  *
  * 判别联合读取收窄：type === 'rss' 才访问 url / label（@shared/types v3）。
  */
 import { useState } from 'react'
-import type { RssSourceConfig, SourceConfig } from '@shared/types'
+import type { RssSourceConfig, SourceConfig, SourceFilters } from '@shared/types'
 import { Field } from './Field'
+import { KeywordTagInput } from './KeywordTagInput'
 import { IconBroadcast, IconX } from './icons'
 import { SOURCE_PRESETS, httpUrlHost, presetAdded, slugFromHost, uniqueSourceId } from '../lib/presets'
 import type { SourcePreset } from '../lib/presets'
@@ -52,6 +54,8 @@ export function SourceCard(props: {
   const [customUrl, setCustomUrl] = useState('')
   const [customLabel, setCustomLabel] = useState('')
   const [addError, setAddError] = useState<string | null>(null)
+  // 当前展开「过滤」面板的来源 id（一次只展开一个，收拢列表高度）
+  const [expandedFilters, setExpandedFilters] = useState<string | null>(null)
 
   const urlTrim = customUrl.trim()
   const urlBad = urlTrim !== '' && httpUrlHost(urlTrim) === null
@@ -74,6 +78,35 @@ export function SourceCard(props: {
 
   function remove(id: string): void {
     onChange(sources.filter((s) => s.id !== id))
+    if (expandedFilters === id) setExpandedFilters(null)
+  }
+
+  /** 过滤条目计数（按钮角标用） */
+  function filterCount(s: SourceConfig): number {
+    const f = s.filters
+    if (f === undefined) return 0
+    return (f.includeCategories?.length ?? 0) + (f.excludeCategories?.length ?? 0) + (f.blockedAuthors?.length ?? 0)
+  }
+
+  /**
+   * 写回某来源的 filters 字段：三列表全空时不落键（undefined）——对齐主进程
+   * sanitize 的落键规则（清洗后全空 → 无 filters 对象），保存往返不产生假 dirty。
+   */
+  function patchFilters(id: string, patch: Partial<SourceFilters>): void {
+    onChange(
+      sources.map((s) => {
+        if (s.id !== id) return s
+        const merged: SourceFilters = { ...(s.filters ?? {}), ...patch }
+        const empty =
+          (merged.includeCategories ?? []).length === 0 &&
+          (merged.excludeCategories ?? []).length === 0 &&
+          (merged.blockedAuthors ?? []).length === 0
+        const copy = { ...s }
+        if (empty) delete copy.filters
+        else copy.filters = merged
+        return copy
+      })
+    )
   }
 
   function addPreset(preset: SourcePreset): void {
@@ -111,7 +144,7 @@ export function SourceCard(props: {
         hint={
           <span>
             启停即时进入 draft、点「保存设置」生效；停用的来源不抓取也不进外链白名单。
-            至少保留一个来源。
+            至少保留一个来源。每行「过滤」配置该来源的分类 / 作者过滤（被滤帖不推送不评估）。
           </span>
         }
       >
@@ -122,37 +155,97 @@ export function SourceCard(props: {
             sources.map((s) => {
               const name = displayName(s)
               const url = displayUrl(s)
+              const filters = s.filters
+              const filtersOpen = expandedFilters === s.id
+              const fCount = filterCount(s)
               return (
-                <div className="hit" key={s.id}>
-                  <span className="src-badge" title={`类型：${typeBadge(s)}`}>
-                    {typeBadge(s)}
-                  </span>
-                  {name !== null && <span className="src-name">{name}</span>}
-                  <span className="ai-reason" title={url}>
-                    {url}
-                  </span>
-                  <span className="src-last switch-row">
-                    <button
-                      type="button"
-                      role="switch"
-                      className="switch"
-                      aria-checked={s.enabled}
-                      aria-label={`${s.enabled ? '停用' : '启用'}来源 ${name ?? typeBadge(s)}`}
-                      title={s.enabled ? '点击停用该来源' : '点击启用该来源'}
-                      onClick={() => toggle(s.id)}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-danger"
-                      disabled={!canRemove(s)}
-                      title={removeTitle(s)}
-                      aria-label={`删除来源 ${name ?? typeBadge(s)}`}
-                      onClick={() => remove(s.id)}
+                <div key={s.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <div className="hit" style={{ borderBottom: filtersOpen ? 0 : undefined }}>
+                    <span className="src-badge" title={`类型：${typeBadge(s)}`}>
+                      {typeBadge(s)}
+                    </span>
+                    {name !== null && <span className="src-name">{name}</span>}
+                    <span className="ai-reason" title={url}>
+                      {url}
+                    </span>
+                    <span className="src-last switch-row">
+                      <button
+                        type="button"
+                        className={`btn${filtersOpen ? ' active' : ''}`}
+                        title={
+                          fCount > 0
+                            ? `分类 / 作者过滤（已配 ${fCount} 条）——点击${filtersOpen ? '收起' : '编辑'}`
+                            : `配置该来源的分类 / 作者过滤（当前未配置）`
+                        }
+                        aria-expanded={filtersOpen}
+                        onClick={() => setExpandedFilters(filtersOpen ? null : s.id)}
+                      >
+                        过滤{fCount > 0 ? ` ${fCount}` : ''}
+                      </button>
+                      <button
+                        type="button"
+                        role="switch"
+                        className="switch"
+                        aria-checked={s.enabled}
+                        aria-label={`${s.enabled ? '停用' : '启用'}来源 ${name ?? typeBadge(s)}`}
+                        title={s.enabled ? '点击停用该来源' : '点击启用该来源'}
+                        onClick={() => toggle(s.id)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        disabled={!canRemove(s)}
+                        title={removeTitle(s)}
+                        aria-label={`删除来源 ${name ?? typeBadge(s)}`}
+                        onClick={() => remove(s.id)}
+                      >
+                        <IconX size={14} />
+                        删除
+                      </button>
+                    </span>
+                  </div>
+                  {filtersOpen && (
+                    <div
+                      style={{
+                        padding: 'var(--space-2) var(--space-3) var(--space-3)',
+                        background: 'var(--card-alt)'
+                      }}
                     >
-                      <IconX size={14} />
-                      删除
-                    </button>
-                  </span>
+                      <Field
+                        label="分类白名单"
+                        hint="非空时只放行命中分类的帖子：匹配分类显示名或 slug（如 交易 / trade），不区分大小写。"
+                      >
+                        <KeywordTagInput
+                          label="分类白名单"
+                          placeholder="如：交易 / trade"
+                          value={filters?.includeCategories ?? []}
+                          onChange={(v) => patchFilters(s.id, { includeCategories: v })}
+                        />
+                      </Field>
+                      <Field
+                        label="分类黑名单"
+                        hint="分类命中任一条直接滤掉（与白名单并存时黑名单优先）。"
+                      >
+                        <KeywordTagInput
+                          label="分类黑名单"
+                          placeholder="如：闲聊 / chat"
+                          value={filters?.excludeCategories ?? []}
+                          onChange={(v) => patchFilters(s.id, { excludeCategories: v })}
+                        />
+                      </Field>
+                      <Field
+                        label="作者黑名单"
+                        hint="作者命中任一一票否决（不区分大小写）；被滤掉的帖子入去重集、不推送不评估。"
+                      >
+                        <KeywordTagInput
+                          label="作者黑名单"
+                          placeholder="如：某营销号"
+                          value={filters?.blockedAuthors ?? []}
+                          onChange={(v) => patchFilters(s.id, { blockedAuthors: v })}
+                        />
+                      </Field>
+                    </div>
+                  )}
                 </div>
               )
             })
@@ -236,8 +329,6 @@ export function SourceCard(props: {
           {addError !== null && <span className="feedback err">{addError}</span>}
         </div>
       </Field>
-      {/* 结构预留：per-source filters（分类/作者过滤）UI 属 R5，本轮不渲染控件 */}
-      <div className="notice muted-notice">按来源的分类 / 作者过滤将在后续版本开放。</div>
     </section>
   )
 }

@@ -52,6 +52,13 @@ export const IPC = {
   generateDailyReport: 'report:generate',
   /** invoke() → { dates: string[] }；已有日报的日期列表（本地时区，新→旧） */
   listDailyReports: 'report:list',
+  /**
+   * invoke(MatchTestRequest) → MatchTestResult（R5-P2c 匹配测试台）：按**已保存**
+   * 配置对新标题跑一遍判定管线，返回逐阶段 trace 与 wouldPush。只读诊断——
+   * 不写 seen、不产生 HitRecord、不推送。useAi=true 时真调一次语义评估
+   * （单帖一批，消耗一次 LLM 调用；失败不炸，语义阶段按 skip 展示错误原因）。
+   */
+  matchTest: 'match:test',
   /** 主进程 push EngineStatus */
   evStatus: 'event:status',
   /** 主进程 push HitRecord */
@@ -81,6 +88,48 @@ export type AiTestResult = { ok: true } | { ok: false; error: string }
 export type DailyReportListResult = { dates: string[] }
 
 /**
+ * 匹配测试台（R5-P2c）的结果契约。类型定义在契约层是因为 tsconfig.web 的
+ * composite 边界不允许 shared 反向 type-import src/main；内核实现
+ * （src/main/monitor/testbench.ts）从这里导入并再导出，语义注释在那边。
+ */
+export interface MatchStageResult {
+  /** 阶段标识（source-filters / exclude / rules / literal / similarity / semantic） */
+  stage: string
+  /** 阶段展示名（中文） */
+  label: string
+  /**
+   * pass=评估且放行/命中；block=评估且一票否决（或语义未命中）；
+   * skip=未评估（管线已死 / 规则短路 / 语义未提供）；info=评估但无命中也无否决。
+   */
+  outcome: 'pass' | 'block' | 'skip' | 'info'
+  /** 人读细节（命中词 / 提取结果 / 阈值比较等） */
+  detail: string
+}
+
+/** 匹配测试台总结果：wouldPush + 按引擎管线顺序的阶段明细 */
+export interface MatchTestResult {
+  /** 按当前配置，这个标题若为新帖是否会推送 */
+  wouldPush: boolean
+  stages: MatchStageResult[]
+}
+
+/**
+ * match:test 请求：title 必填（非空，主进程侧 trim 校验）；
+ * sourceId 给则带上该来源的 per-source 过滤参与判定；
+ * useAi=true 且 AI 已配置时真调一次语义评估（消耗一次 LLM 调用）；
+ * category / author 为可选的帖子元数据（per-source 过滤判定输入，缺省按空处理）。
+ */
+export interface MatchTestRequest {
+  title: string
+  sourceId?: string
+  useAi?: boolean
+  /** 帖子分类（显示名或 slug 均可；同一值同时按两种口径参与匹配） */
+  category?: string
+  /** 帖子作者 */
+  author?: string
+}
+
+/**
  * preload（contextIsolation）暴露给渲染进程的白名单 API。
  * onStatus / onHit / onLog / onDailyReport 返回取消订阅函数（组件卸载时调用）。
  */
@@ -96,6 +145,8 @@ export interface DesktopApi {
   getDailyReport(dateLocal?: string): Promise<DailyReportInfo>
   generateDailyReport(): Promise<EngineControlResult>
   listDailyReports(): Promise<DailyReportListResult>
+  /** 匹配测试台（R5-P2c）：只读诊断，永不 reject（参数非法也返回 block 结果） */
+  matchTest(req: MatchTestRequest): Promise<MatchTestResult>
   onStatus(callback: (s: EngineStatus) => void): () => void
   onHit(callback: (h: HitRecord) => void): () => void
   onLog(callback: (e: LogEntry) => void): () => void
