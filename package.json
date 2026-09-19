@@ -16,7 +16,7 @@
     "icons": "tsx scripts/gen-icons.ts",
     "dist": "electron-vite build && electron-builder",
     "dist:mac": "electron-vite build && electron-builder --mac",
-    "dist:win": "electron-vite build && electron-builder --win nsis"
+    "dist:win": "electron-vite build && electron-builder --win nsis --x64"
   },
   "dependencies": {
     "cheerio": "^1.2.0",
