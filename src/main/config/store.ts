@@ -21,6 +21,9 @@ import {
   type AiConfig,
   type MatchMode,
   type NodeseekSourceConfig,
+  type PriceCurrency,
+  type PriceCycle,
+  type PriceRuleConfig,
   type ProxyScope,
   type RssSourceConfig,
   type SourceConfig,
@@ -48,17 +51,26 @@ const AI_INTERESTS_MAX_CHARS = 500
 /** timeHHMM 非法时的回退值 */
 const DEFAULT_REPORT_TIME_HHMM = '22:00'
 const TIME_HHMM_RE = /^\d{2}:\d{2}$/
-/** sources 的 id 只允许 slug 字符（与去重键前缀、状态键一致），其余替换为 '-' */
+/** sources / priceRules 的 id 只允许 slug 字符（与去重键前缀、状态键一致），其余替换为 '-' */
 const SOURCE_ID_ILLEGAL_RE = /[^\w-]/g
 /** per-source filters 每个列表的条数上限（超出截断，对齐 includeKeywords 清洗风格） */
 const SOURCE_FILTERS_MAX_ITEMS = 100
+/** 价格规则条数上限（第五轮；超出截断） */
+const PRICE_RULES_MAX_ITEMS = 20
+/** 单条价格规则 keywords 的条数上限（超出截断） */
+const PRICE_RULE_KEYWORDS_MAX_ITEMS = 20
+const PRICE_CYCLES: readonly PriceCycle[] = ['yearly', 'monthly', 'any']
+const PRICE_CURRENCIES: readonly PriceCurrency[] = ['CNY', 'USD', 'any']
+/** similarity.threshold 非法（非数字 / NaN / Infinity）时的回退值 */
+const DEFAULT_SIMILARITY_THRESHOLD = 0.72
 
 /**
  * 清洗用户/盘上来的配置：永远返回全新对象（不改入参），且字段类型一定合法。
  *
  * **隐式 schema 白名单（ultrabrain 坑4）**：本函数逐字段显式重建对象，没有列进
- * 重建的字段保存即丢——**types.ts 的 SourceConfig 等契约新增字段时，必须在同一
- * commit 里补上这里的 sanitize 分支**（filters / label / url 即为本轮 v3 补的），
+ * 重建的字段保存即丢——**types.ts 的契约新增字段时，必须在同一
+ * commit 里补上这里的 sanitize 分支**（v3 的 filters / label / url、第五轮的
+ * priceRules / similarity / ai.semanticThreshold 都是这么补的），
  * 并同步补 store.test.ts 的往返用例。
  *
  * - 关键词数组：trim、去空、去重（不区分大小写，保留首次出现的写法）。
@@ -72,11 +84,20 @@ const SOURCE_FILTERS_MAX_ITEMS = 100
  *   new URL 且有 host），否则整项丢弃**，label trim 后为空视为无，缺 id 时可从
  *   url host 派生建议 id（id 以用户给的为准）；未知 type 整项丢弃；按 id 全列表
  *   去重（保留首个）。
+ * - `priceRules`（第五轮，见 sanitizePriceRules）：非数组 → []（空列表 = 无规则，
+ *   合法状态）；整条非对象/无可用 id 丢弃；id slug 化去重、enabled 布尔化、
+ *   cycle/currency 枚举非法（含缺失）回 'any'、label trim 空则不落键、
+ *   maxPrice/minTrafficGB 非有限正数丢字段、keywords trim/去空/大小写不敏感
+ *   去重/上限 20（清洗后空不落键）；列表上限 20 条。
+ * - `similarity`（第五轮，见 sanitizeSimilarity）：enabled **默认开**（`!== false`，
+ *   与 commentary.enabled 并列的两个默认开布尔）；threshold 非法回 0.72、钳到
+ *   [0,1] 保留两位小数。
  * - `ai.provider.baseUrl`：trim、去尾斜杠、必须 `http(s)://` 开头否则 ''；
  *   `apiKey` / `model` trim；`matchMode` 枚举非法回 'literal'；`interests` 每条 trim
- *   去空、单条 ≤500 字符截断、最多 20 条；`dailyReport.timeHHMM` 必须 HH:MM（时 0-23
+ *   去空、单条 ≤500 字符截断、最多 20 条；`semanticThreshold` 非法回 0（默认 =
+ *   行为不变）、钳到 [0,1]；`dailyReport.timeHHMM` 必须 HH:MM（时 0-23
  *   分 0-59）否则回 '22:00'，`enabled` 强制布尔；`commentary.enabled` 缺失/非法 →
- *   true（**唯一默认开的布尔**，方向与其余布尔相反，见 sanitizeAi）。
+ *   true（**默认开的布尔**之一，方向与其余布尔相反，见 sanitizeAi）。
  */
 export function sanitizeConfig(cfg: AppConfig): AppConfig {
   const src = (typeof cfg === 'object' && cfg !== null ? cfg : {}) as Partial<AppConfig>
@@ -93,6 +114,8 @@ export function sanitizeConfig(cfg: AppConfig): AppConfig {
     notifyEnabled: src.notifyEnabled === true,
     launchAtLogin: src.launchAtLogin === true,
     sources: sanitizeSources(src.sources),
+    priceRules: sanitizePriceRules(src.priceRules),
+    similarity: sanitizeSimilarity(src.similarity),
     ai: sanitizeAi(src.ai)
   }
 }
@@ -363,8 +386,11 @@ function sanitizeFilters(raw: unknown): SourceFilters | undefined {
   return clean
 }
 
-/** filter 列表清洗：trim、去空、大小写不敏感去重（保留首现写法）、截断到上限 */
-function sanitizeFilterList(list: unknown): string[] {
+/**
+ * filter 列表清洗：trim、去空、大小写不敏感去重（保留首现写法）、截断到上限
+ * （默认 filters 的 100 条；priceRules.keywords 复用本函数，上限 20）。
+ */
+function sanitizeFilterList(list: unknown, maxItems: number = SOURCE_FILTERS_MAX_ITEMS): string[] {
   if (!Array.isArray(list)) return []
   const out: string[] = []
   const seen = new Set<string>()
@@ -376,9 +402,96 @@ function sanitizeFilterList(list: unknown): string[] {
     if (seen.has(key)) continue
     seen.add(key)
     out.push(s)
-    if (out.length >= SOURCE_FILTERS_MAX_ITEMS) break
+    if (out.length >= maxItems) break
   }
   return out
+}
+
+/** sanitize 视角下的原始 priceRules 项（未知数据，逐字段判型后再组装） */
+type RawPriceRuleItem = {
+  id?: unknown
+  label?: unknown
+  enabled?: unknown
+  cycle?: unknown
+  currency?: unknown
+  maxPrice?: unknown
+  minTrafficGB?: unknown
+  keywords?: unknown
+}
+
+/**
+ * 结构化价格规则清洗（第五轮契约，引擎消费在 R5 后续包）：
+ * - 非数组 → []（默认值；与 sources 不同，空列表是合法状态 = 无规则，不回默认）。
+ * - 整条非对象 / id 非字符串 / id slug 化后为空 → 整条丢弃；slug 后按 id 去重
+ *   （保留首个；被丢弃的项不占 id，对齐 sanitizeSources）。
+ * - enabled 布尔化（`=== true`，缺省 false）；cycle / currency 枚举非法（含缺失）
+ *   回 'any'——'any' 即"不过滤"，落键与缺省语义等价，统一物化。
+ * - label trim、空则不落键。
+ * - maxPrice / minTrafficGB 非有限正数（0 / 负数 / NaN / Infinity / 非数字）→
+ *   丢弃该字段（键不落）。
+ * - keywords trim、去空、大小写不敏感去重（保留首现写法）、上限 20；清洗后空
+ *   数组不落键（等价"不限关键词"）。
+ * - 列表上限 20 条（超出截断，按清洗后顺序）。
+ */
+function sanitizePriceRules(list: PriceRuleConfig[] | undefined): PriceRuleConfig[] {
+  if (!Array.isArray(list)) return []
+  const out: PriceRuleConfig[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (out.length >= PRICE_RULES_MAX_ITEMS) break
+    if (typeof item !== 'object' || item === null) continue
+    const raw = item as RawPriceRuleItem
+    if (typeof raw.id !== 'string') continue
+    const id = slugifySourceId(raw.id)
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    const clean: PriceRuleConfig = {
+      id,
+      enabled: raw.enabled === true,
+      cycle: PRICE_CYCLES.includes(raw.cycle as PriceCycle) ? (raw.cycle as PriceCycle) : 'any',
+      currency: PRICE_CURRENCIES.includes(raw.currency as PriceCurrency)
+        ? (raw.currency as PriceCurrency)
+        : 'any'
+    }
+    const label = typeof raw.label === 'string' ? raw.label.trim() : ''
+    if (label !== '') clean.label = label
+    if (isPositiveFiniteNumber(raw.maxPrice)) clean.maxPrice = raw.maxPrice
+    if (isPositiveFiniteNumber(raw.minTrafficGB)) clean.minTrafficGB = raw.minTrafficGB
+    const keywords = sanitizeFilterList(raw.keywords, PRICE_RULE_KEYWORDS_MAX_ITEMS)
+    if (keywords.length > 0) clean.keywords = keywords
+    out.push(clean)
+  }
+  return out
+}
+
+/** 相似帖降噪清洗（第五轮）：enabled **默认开**（`!== false`，与 ai.commentary.enabled
+ * 同方向——旧配置缺失该字段时不能静默关掉降噪）；threshold 非法回 0.72，否则钳到
+ * [0,1] 并保留两位小数。 */
+function sanitizeSimilarity(similarity: AppConfig['similarity'] | undefined): AppConfig['similarity'] {
+  const raw =
+    typeof similarity === 'object' && similarity !== null
+      ? (similarity as { enabled?: unknown; threshold?: unknown })
+      : {}
+  return {
+    enabled: raw.enabled !== false,
+    threshold: clamp01(raw.threshold, DEFAULT_SIMILARITY_THRESHOLD, true)
+  }
+}
+
+/** 有限正数判定（maxPrice / minTrafficGB 清洗用：0 / 负数 / NaN / Infinity 均否） */
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+/**
+ * 0-1 阈值清洗：非法（非数字 / NaN / Infinity）回 fallback，否则钳到 [0,1]；
+ * round2 = true 时保留两位小数（similarity.threshold 的口径；ai.semanticThreshold
+ * 不取整，按第五轮规格区分）。
+ */
+function clamp01(value: unknown, fallback: number, round2 = false): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  const clamped = Math.min(1, Math.max(0, value))
+  return round2 ? Math.round(clamped * 100) / 100 : clamped
 }
 
 function sanitizeAi(ai: AiConfig | undefined): AiConfig {
@@ -392,15 +505,19 @@ function sanitizeAi(ai: AiConfig | undefined): AiConfig {
       ? (ai?.matchMode as MatchMode)
       : 'literal',
     interests: sanitizeInterests(ai?.interests),
+    // 语义置信度阈值（第五轮）：默认 0 = 行为不变（不过滤）；非法回 0、钳到 [0,1]
+    semanticThreshold: clamp01(ai?.semanticThreshold, 0),
     dailyReport: {
       enabled: ai?.dailyReport?.enabled === true,
       timeHHMM: sanitizeTimeHHMM(ai?.dailyReport?.timeHHMM)
     },
-    // AI 锐评开关——全文件**唯一默认开的布尔**：必须写 `!== false`（缺失/非法 → true），
-    // 与本文件其余布尔（dailyReport.enabled / notifyEnabled / launchAtLogin /
-    // sources[].enabled 均为 `=== true`，缺省 false）方向相反。
+    // AI 锐评开关——**默认开的布尔**（与 similarity.enabled 并列，本文件仅此两个）：
+    // 必须写 `!== false`（缺失/非法 → true），与本文件其余布尔（dailyReport.enabled /
+    // notifyEnabled / launchAtLogin / sources[].enabled / priceRules[].enabled 均为
+    // `=== true`，缺省 false）方向相反。
     // 原因：锐评是第三轮新增字段，全体旧配置文件（v1 迁移件与早期 v2）都没有它，
     // 若"风格统一"改成 `=== true`，会把所有老用户的锐评静默关掉。改向前先想清楚。
+    // （similarity.enabled 第五轮加入同一方向：旧配置缺失时同样不能静默关掉降噪。）
     commentary: {
       enabled: ai?.commentary?.enabled !== false
     }

@@ -9,7 +9,8 @@
  * - HitRecord 增加 matchedBy（literal/semantic）与 AI 判定理由。
  *
  * 第三轮变更（2026-09-19，AI 锐评）：
- * - AiConfig 增加 commentary（锐评开关，**默认开**——sanitize 侧唯一默认开的布尔）。
+ * - AiConfig 增加 commentary（锐评开关，**默认开**——当时是唯一默认开的布尔；
+ *   第五轮 similarity.enabled 加入后，默认开布尔共两个，见 AppConfig.similarity）。
  * - HitRecord 增加可选 commentary：旧 hits/*.jsonl 行没有此字段，类型必须容忍缺失；
  *   新写入的记录一律给 string|null（生成失败/未启用时为 null），不再留 undefined。
  *
@@ -19,6 +20,16 @@
  *   可选 label；三种来源都可带可选 filters（per-source 过滤契约，本轮只定义
  *   契约与 sanitize，引擎消费在下一轮）。
  * - DEFAULT_APP_CONFIG.sources 不变（仍只有 nodeseek 一项，不带 filters）。
+ *
+ * 第五轮变更（2026-09-19，R5：价格规则 + 相似帖降噪 + 语义置信度）：
+ * - 全部为**加法字段**，不 bump schemaVersion（commentary.enabled 先例）。
+ * - AppConfig 增加 priceRules（PriceRuleConfig[]，默认 []；规则命中即第三种命中
+ *   方式 matchedBy='rule'）与 similarity（相似帖降噪，**默认开**，阈值 0.72；
+ *   48h 对比窗口是引擎侧常量，不进配置）。
+ * - ai 增加 semanticThreshold（默认 0 = 行为不变；0-1 置信度阈值）。
+ * - HitRecord.matchedBy 扩为 literal|semantic|rule；新增可选 matchedRule
+ *   （旧 hits/*.jsonl 行容忍缺失，对齐 commentary 的三态注释风格）。
+ * - SourceStatus 增加可选 page2Fetches（DEC-8 第 2 页补抓观测面，旧快照缺失=0）。
  */
 
 /** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
@@ -97,6 +108,11 @@ export interface AiConfig {
   matchMode: MatchMode
   /** 自然语言兴趣描述（语义监控用；为空时语义档永不命中——镜像字面档防风暴规则） */
   interests: string[]
+  /**
+   * 语义命中置信度阈值（第五轮）：AI 评估给出的置信度低于此值不判命中。
+   * 默认 0 = 行为不变（不过滤）；取值 [0,1]，sanitize 非法回 0、越界钳制。
+   */
+  semanticThreshold: number
   /** AI 每日总结 */
   dailyReport: {
     enabled: boolean
@@ -105,12 +121,37 @@ export interface AiConfig {
   }
   /**
    * AI 锐评（第三轮）：命中帖推送前让 LLM 附一句点评。
-   * 配置里恒存在（默认/ sanitize 保证）；enabled 是全配置**唯一默认开**的布尔
-   * （见 store.ts sanitizeAi 的书写约定），UI 侧直接读 cfg.ai.commentary.enabled。
+   * 配置里恒存在（默认/ sanitize 保证）；enabled 是**默认开的布尔**之一
+   * （另一个是 similarity.enabled，见 store.ts sanitizeAi / sanitizeSimilarity
+   * 的书写约定），UI 侧直接读 cfg.ai.commentary.enabled。
    */
   commentary: {
     enabled: boolean
   }
+}
+
+/** 价格周期 */
+export type PriceCycle = 'yearly' | 'monthly' | 'any'
+/** 币种（'any' 不过滤币种） */
+export type PriceCurrency = 'CNY' | 'USD' | 'any'
+/**
+ * 一条结构化价格规则（第五轮契约，引擎消费在 R5 后续包）：
+ * 条件之间 AND；命中即作为第三种命中方式（matchedBy='rule'）。
+ */
+export interface PriceRuleConfig {
+  /** 规则 id（slug 化、全列表去重，见 store.ts sanitizePriceRules） */
+  id: string
+  /** 展示名（可选；sanitize trim、空则不落键） */
+  label?: string
+  enabled: boolean
+  cycle: PriceCycle
+  /** 标题提取出的价格上限（数值；与币种配合） */
+  maxPrice?: number
+  currency?: PriceCurrency
+  /** 标题提取出的流量下限（GB） */
+  minTrafficGB?: number
+  /** 标题需包含任一关键词（空=不限）——AND 前置条件 */
+  keywords?: string[]
 }
 
 /** 一条论坛帖子（从来源帖子列表解析出的字段） */
@@ -133,15 +174,21 @@ export interface Topic {
   lastActiveAt: string | null
 }
 
-/** 命中记录：一个新帖命中（字面或语义）并（尝试）推送 */
+/** 命中记录：一个新帖命中（字面、语义或价格规则）并（尝试）推送 */
 export interface HitRecord {
   topic: Topic
   /** 字面命中的包含词；matchedBy='semantic' 时为空数组 */
   matchedKeywords: string[]
-  /** 命中方式 */
-  matchedBy: 'literal' | 'semantic'
+  /** 命中方式（第五轮起三档：字面 / 语义 / 价格规则） */
+  matchedBy: 'literal' | 'semantic' | 'rule'
   /** AI 的一句话判定理由（matchedBy='semantic' 时给出，可能为 null） */
   semanticReason: string | null
+  /**
+   * 命中的价格规则 id/label（matchedBy='rule' 时给出）。**可选**：旧 hits/*.jsonl
+   * 行没有此字段，消费方必须容忍 undefined（等价"非规则命中"）；新写入的记录一律给
+   * string|null——非规则命中时为 null，规则命中时为规则的 id（无 label）或 label。
+   */
+  matchedRule?: string | null
   /**
    * AI 锐评正文（第三轮）。**可选**：旧 hits/*.jsonl 行没有此字段，消费方必须容忍
    * undefined（等价于"无锐评"）；新写入的记录一律给 string|null——生成失败/未启用/
@@ -182,6 +229,22 @@ export interface AppConfig {
    * per-source 覆盖= filters 于 v3 引入契约，引擎消费在下一轮）
    */
   sources: SourceConfig[]
+  /**
+   * 结构化价格规则（第五轮，见 PriceRuleConfig）：标题提取的价格/流量条件全部
+   * 满足即命中，作为第三种命中方式（matchedBy='rule'）。默认 [] = 无规则；
+   * 引擎消费在 R5 后续包，本轮只定契约与 sanitize。
+   */
+  priceRules: PriceRuleConfig[]
+  /**
+   * 相似帖降噪（第五轮）：命中推送前与近窗内已推送帖比对标题相似度，视为相似
+   * 则不再推（降重复推送噪音）。**默认开**（与 ai.commentary.enabled 并列的两个
+   * 默认开布尔之一）；48h 对比窗口是引擎侧常量（不进配置）。threshold ∈ [0,1]，
+   * sanitize 非法回 0.72、钳到 [0,1] 保留两位小数。
+   */
+  similarity: {
+    enabled: boolean
+    threshold: number
+  }
   /** AI 能力配置（Provider 未配置时语义档自动降级为字面档） */
   ai: AiConfig
 }
@@ -196,10 +259,13 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   notifyEnabled: true,
   launchAtLogin: false,
   sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }],
+  priceRules: [],
+  similarity: { enabled: true, threshold: 0.72 },
   ai: {
     provider: { baseUrl: '', apiKey: '', model: '' },
     matchMode: 'literal',
     interests: [],
+    semanticThreshold: 0,
     dailyReport: { enabled: false, timeHHMM: '22:00' },
     commentary: { enabled: true }
   }
@@ -219,6 +285,11 @@ export interface SourceStatus {
   consecutiveFailures: number
   /** 退避截止时刻 ISO；null 表示无退避 */
   cooldownUntil: string | null
+  /**
+   * 第 2 页补抓累计次数（第五轮，DEC-8 观测面：首页 0 新帖时补抓下一页的执行
+   * 面数）。**可选**：旧状态快照没有此字段，消费方容忍缺失（等价 0）。
+   */
+  page2Fetches?: number
 }
 
 /** AI 运行态（语义评估管线的观测面） */

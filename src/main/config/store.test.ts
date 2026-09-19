@@ -90,6 +90,8 @@ describe('sanitizeConfig', () => {
     expect(out.telegram).not.toBe(input.telegram)
     expect(out.ai).not.toBe(input.ai)
     expect(out.sources).not.toBe(input.sources)
+    expect(out.priceRules).not.toBe(input.priceRules)
+    expect(out.similarity).not.toBe(input.similarity)
   })
 
   it('ai.baseUrl：trim、去尾斜杠、必须 http(s):// 开头否则置空', () => {
@@ -179,7 +181,7 @@ describe('sanitizeConfig', () => {
     expect(out.ai.dailyReport).toEqual({ enabled: true, timeHHMM: '08:30' })
   })
 
-  it('ai.commentary：唯一默认开的布尔——缺失（旧 v2 配置）→ true，显式 false 保留，非法值 → true', () => {
+  it('ai.commentary：默认开的布尔（与 similarity.enabled 并列）——缺失（旧 v2 配置）→ true，显式 false 保留，非法值 → true', () => {
     // 第三轮之前的 v2 配置：ai 段没有 commentary 字段
     const legacyAi = {
       provider: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk', model: 'm' },
@@ -198,6 +200,158 @@ describe('sanitizeConfig', () => {
     expect(enabledOf(true)).toBe(true) // 显式 true 保留
     expect(enabledOf({ enabled: true })).toBe(true)
     expect(enabledOf({ enabled: false })).toBe(false) // 唯一能关掉的方式：显式布尔 false
+  })
+
+  it('ai.semanticThreshold：非法回 0（默认=行为不变），钳到 [0,1]（不取整）', () => {
+    const thrOf = (t: unknown) =>
+      sanitizeConfig(cfg({ ai: { ...cfg().ai, semanticThreshold: t as number } })).ai
+        .semanticThreshold
+    expect(thrOf(0)).toBe(0)
+    expect(thrOf(0.65)).toBe(0.65)
+    expect(thrOf(0.6789)).toBe(0.6789) // 不保留两位小数（与 similarity.threshold 口径区分）
+    expect(thrOf(1)).toBe(1)
+    expect(thrOf(1.2)).toBe(1)
+    expect(thrOf(-0.3)).toBe(0)
+    expect(thrOf(Number.NaN)).toBe(0)
+    expect(thrOf(Number.POSITIVE_INFINITY)).toBe(0)
+    expect(thrOf(undefined)).toBe(0) // 旧配置缺失 → 默认 0
+    expect(thrOf('0.9' as unknown as number)).toBe(0)
+  })
+
+  it('similarity.enabled：默认开的布尔——缺失（旧配置）→ true，显式 false 保留，非法 → true', () => {
+    const enabledOf = (c: unknown) => sanitizeConfig(cfg({ similarity: c as never })).similarity.enabled
+    expect(enabledOf(undefined)).toBe(true) // 旧配置缺失 similarity 段 → 默认开
+    expect(enabledOf(null)).toBe(true)
+    expect(enabledOf('garbage')).toBe(true)
+    expect(enabledOf({})).toBe(true) // 段在但缺 enabled
+    expect(enabledOf({ enabled: 1 })).toBe(true) // 非布尔 → true（!== false 方向）
+    expect(enabledOf({ enabled: true })).toBe(true)
+    expect(enabledOf({ enabled: false })).toBe(false) // 唯一能关掉的方式：显式布尔 false
+  })
+
+  it('similarity.threshold：非法回 0.72，钳到 [0,1] 并保留两位小数', () => {
+    const thrOf = (t: unknown) =>
+      sanitizeConfig(cfg({ similarity: { enabled: true, threshold: t as number } })).similarity
+        .threshold
+    expect(thrOf(0.72)).toBe(0.72)
+    expect(thrOf(0.5)).toBe(0.5)
+    expect(thrOf(0)).toBe(0)
+    expect(thrOf(1)).toBe(1)
+    expect(thrOf(1.5)).toBe(1) // 越界钳制
+    expect(thrOf(-0.2)).toBe(0)
+    expect(thrOf(0.769)).toBe(0.77) // 保留两位小数
+    expect(thrOf(0.999)).toBe(1) // 0.999 四舍五入到 1.00（仍在 [0,1]）
+    expect(thrOf(Number.NaN)).toBe(0.72)
+    expect(thrOf(Number.POSITIVE_INFINITY)).toBe(0.72)
+    expect(thrOf('0.8' as unknown as number)).toBe(0.72)
+    expect(thrOf(undefined)).toBe(0.72)
+  })
+
+  it('priceRules：非数组 → []（空列表=无规则，是合法状态，不回默认）', () => {
+    expect(sanitizeConfig(cfg({ priceRules: undefined as unknown as [] })).priceRules).toEqual([])
+    expect(sanitizeConfig(cfg({ priceRules: 'garbage' as unknown as [] })).priceRules).toEqual([])
+  })
+
+  it('priceRules：整条清洗全分支（非对象/无可用 id 丢弃、slug 化去重、enabled 布尔化、枚举回 any、label 空不落键、非法数值丢字段、keywords 清洗后空不落键）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        priceRules: [
+          null as unknown as never, // 非对象：整条丢弃
+          'junk' as unknown as never, // 非对象：整条丢弃
+          { cycle: 'yearly' } as unknown as never, // 缺 id：丢弃
+          { id: 42 as unknown as string, cycle: 'yearly' } as unknown as never, // id 非字符串：丢弃
+          {
+            id: ' cheap-vps ', // trim 后 slug 化
+            enabled: 1 as unknown as boolean,
+            cycle: 'weeKLY' as never, // 枚举大小写敏感：非法回 'any'
+            currency: 'usd' as never, // 同上
+            label: '  便宜年付 VPS  ',
+            maxPrice: 0, // 非正数：丢字段
+            minTrafficGB: -5, // 非正数：丢字段
+            keywords: ['  VPS  ', 'vps', '', '  ', '大流量']
+          },
+          { id: 'cheap-vps', cycle: 'monthly' }, // slug 后重复 id：保留首个
+          {
+            id: 'traffic_rule!', // slug 化：'!' → '-'
+            enabled: true,
+            cycle: 'monthly',
+            currency: 'CNY',
+            maxPrice: Number.NaN, // 丢字段
+            minTrafficGB: Number.POSITIVE_INFINITY, // 丢字段
+            keywords: ['   ', ''] // 清洗后空：不落键
+          },
+          {
+            id: 'ok',
+            enabled: true,
+            cycle: 'yearly',
+            currency: 'USD',
+            maxPrice: 99.9,
+            minTrafficGB: 0.5,
+            label: '   ' // trim 后空：不落键
+          }
+        ] as unknown as AppConfig['priceRules']
+      })
+    )
+    expect(out.priceRules).toEqual([
+      {
+        id: 'cheap-vps',
+        enabled: false, // enabled=1 → false（=== true 强制布尔）
+        cycle: 'any',
+        currency: 'any',
+        label: '便宜年付 VPS',
+        keywords: ['VPS', '大流量']
+      },
+      { id: 'traffic_rule-', enabled: true, cycle: 'monthly', currency: 'CNY' },
+      {
+        id: 'ok',
+        enabled: true,
+        cycle: 'yearly',
+        currency: 'USD',
+        maxPrice: 99.9,
+        minTrafficGB: 0.5
+      }
+    ])
+    // 显式断言"丢字段"是不落键（而非 0/null），对齐 filters 的断言风格
+    expect('maxPrice' in out.priceRules[0]!).toBe(false)
+    expect('minTrafficGB' in out.priceRules[0]!).toBe(false)
+    expect('keywords' in out.priceRules[1]!).toBe(false)
+    expect('label' in out.priceRules[2]!).toBe(false)
+  })
+
+  it('priceRules：列表上限 20 条（超出截断，按清洗后顺序）', () => {
+    const rules = Array.from({ length: 25 }, (_, i) => ({
+      id: `rule-${i}`,
+      enabled: true,
+      cycle: 'any' as const
+    }))
+    const out = sanitizeConfig(cfg({ priceRules: rules }))
+    expect(out.priceRules).toHaveLength(20)
+    expect(out.priceRules[0]!.id).toBe('rule-0')
+    expect(out.priceRules[19]!.id).toBe('rule-19') // rule-20..24 被裁掉
+  })
+
+  it('priceRules keywords：trim、去空、大小写不敏感去重（保留首现写法）、上限 20', () => {
+    const kws = [
+      '  vps  ',
+      'VPS', // 大小写不敏感去重
+      '',
+      '  ',
+      '\t大流量\t',
+      ...Array.from({ length: 25 }, (_, i) => `kw-${i}`)
+    ]
+    const out = sanitizeConfig(cfg({ priceRules: [{ id: 'r1', enabled: true, cycle: 'any', keywords: kws }] }))
+    const keywords = out.priceRules[0]!.keywords!
+    expect(keywords).toHaveLength(20)
+    expect(keywords[0]).toBe('vps')
+    expect(keywords[1]).toBe('大流量')
+    expect(keywords[19]).toBe('kw-17') // 20 条封顶：kw-18..24 被裁掉
+  })
+
+  it('第五轮新字段默认值：priceRules=[]、similarity={enabled:true,threshold:0.72}、ai.semanticThreshold=0', () => {
+    const out = sanitizeConfig(cfg())
+    expect(out.priceRules).toEqual([])
+    expect(out.similarity).toEqual({ enabled: true, threshold: 0.72 })
+    expect(out.ai.semanticThreshold).toBe(0)
   })
 
   it('sources：非数组/空数组 → 默认单项 nodeseek', () => {
@@ -413,6 +567,43 @@ describe('sanitizeConfig', () => {
       },
       { id: 'v2ex', type: 'v2ex', enabled: false }
     ])
+  })
+
+  it('坑4 回归：save→load 往返不丢 priceRules/similarity/ai.semanticThreshold（sanitize 白名单完整性）', () => {
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        priceRules: [
+          {
+            id: 'cheap-yearly',
+            label: '便宜年付',
+            enabled: true,
+            cycle: 'yearly',
+            currency: 'CNY',
+            maxPrice: 100,
+            minTrafficGB: 50,
+            keywords: ['vps']
+          }
+        ],
+        similarity: { enabled: false, threshold: 0.85 },
+        ai: { ...cfg().ai, semanticThreshold: 0.6 }
+      })
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.priceRules).toEqual([
+      {
+        id: 'cheap-yearly',
+        label: '便宜年付',
+        enabled: true,
+        cycle: 'yearly',
+        currency: 'CNY',
+        maxPrice: 100,
+        minTrafficGB: 50,
+        keywords: ['vps']
+      }
+    ])
+    expect(loaded.similarity).toEqual({ enabled: false, threshold: 0.85 })
+    expect(loaded.ai.semanticThreshold).toBe(0.6)
   })
 
   it('sources 全部项非法：回默认单项（绝不落空列表）', () => {
@@ -676,6 +867,32 @@ describe('ConfigStore', () => {
     expect(loaded.ai.commentary).toEqual({ enabled: true }) // 新增字段缺失 → 默认开
     expect(loaded.ai.matchMode).toBe('semantic')
     expect(loaded.ai.provider.model).toBe('m')
+  })
+
+  it('旧 v3 盘上 config（无第五轮新字段）：load 后补默认——priceRules=[]、similarity 默认开、semanticThreshold=0', async () => {
+    // 第五轮之前的 v3 信封：没有 priceRules / similarity / ai.semanticThreshold
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 3,
+        config: {
+          pollIntervalSec: 45,
+          ai: {
+            provider: { baseUrl: '', apiKey: '', model: '' },
+            matchMode: 'literal',
+            interests: [],
+            dailyReport: { enabled: false, timeHHMM: '22:00' },
+            commentary: { enabled: true }
+          }
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.pollIntervalSec).toBe(45) // 既有字段不受影响
+    expect(loaded.priceRules).toEqual([]) // 新增字段缺失 → 默认（空规则）
+    expect(loaded.similarity).toEqual({ enabled: true, threshold: 0.72 }) // 缺失 → 默认开
+    expect(loaded.ai.semanticThreshold).toBe(0) // 缺失 → 默认 0（行为不变）
   })
 
   it('盘上 v3 信封（含 rss/v2ex 源）：原样加载后 sanitize 生效', async () => {

@@ -34,5 +34,11 @@ export interface SourceAdapter {
    * 非数值/非单调，不受影响）。
    */
   readonly creationOrderedIds?: boolean
-  fetchLatest(): Promise<Topic[]>
+  /**
+   * 抓取最新帖子列表（第五轮起，DEC-8：可选 `opts.pages` 请求补抓后续页）。
+   * - opts 缺省 / pages 缺省 = 仅第 1 页（既有行为不变）。
+   * - 第 2 页起的补抓语义由 R5-P2a 在各 adapter 实现，本轮只定契约：现有零参
+   *   实现不改签名也满足本接口（参数更少的方法可赋给参数更多的签名）。
+   */
+  fetchLatest(opts?: { pages?: number }): Promise<Topic[]>
 }
