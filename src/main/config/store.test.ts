@@ -211,9 +211,16 @@ describe('sanitizeConfig', () => {
     )
     expect(
       sanitizeConfig(
-        cfg({ notify: { mode: 'digest' as const, digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '22:30', endHHMM: '07:15' } } })
+        cfg({
+          notify: {
+            mode: 'digest' as const,
+            digestIntervalMin: 30,
+            quietHours: { enabled: true, startHHMM: '22:30', endHHMM: '07:15' },
+            remoteControl: { enabled: false, allowedChatIds: [] }
+          }
+        })
       ).notify
-    ).toEqual({ mode: 'digest', digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '22:30', endHHMM: '07:15' } })
+    ).toEqual({ mode: 'digest', digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '22:30', endHHMM: '07:15' }, remoteControl: { enabled: false, allowedChatIds: [] } })
 
     const modeOf = (m: unknown) =>
       sanitizeConfig(cfg({ notify: { ...cfg().notify, mode: m as never } })).notify.mode
@@ -245,6 +252,31 @@ describe('sanitizeConfig', () => {
       startHHMM: '23:00',
       endHHMM: '08:00'
     })
+  })
+
+  it('notify.remoteControl：enabled 布尔化（默认关）、allowedChatIds trim/去空/精确去重/上限 10（R9-W1）', () => {
+    const rcOf = (patch: Record<string, unknown>) =>
+      sanitizeConfig(
+        cfg({ notify: { ...cfg().notify, remoteControl: patch as never } })
+      ).notify.remoteControl
+    // 缺失/非法 → 默认关 + 空清单
+    expect(rcOf({})).toEqual({ enabled: false, allowedChatIds: [] })
+    expect(rcOf({ enabled: 1, allowedChatIds: 'x' as never })).toEqual({
+      enabled: false,
+      allowedChatIds: []
+    })
+    // trim、去空、精确去重（负数群 id 原样保留，不做大小写折叠）
+    expect(
+      rcOf({
+        enabled: true,
+        allowedChatIds: [' 100200 ', '', '   ', '-100999', '100200', 42 as never, null as never]
+      })
+    ).toEqual({ enabled: true, allowedChatIds: ['100200', '-100999'] })
+    // 上限 10：超出截断
+    expect(
+      rcOf({ enabled: true, allowedChatIds: Array.from({ length: 15 }, (_, i) => String(i)) })
+        .allowedChatIds
+    ).toHaveLength(10)
   })
 
   it('routing：非数组 → []；悬挂 sourceId/ruleId 剔字段、matchedBy 枚举过滤、when 全空整条弃、channelIds 过滤后空整条弃（DEC-7）', () => {
@@ -317,7 +349,12 @@ describe('sanitizeConfig', () => {
           { id: 'ntfy-1', type: 'ntfy', enabled: true, topic: 'forumwatch' },
           { id: 'hook', type: 'webhook', enabled: true, url: 'https://example.com/hook', secret: 's' }
         ],
-        notify: { mode: 'digest', digestIntervalMin: 30, quietHours: { enabled: true, startHHMM: '23:30', endHHMM: '07:00' } },
+        notify: {
+          mode: 'digest',
+          digestIntervalMin: 30,
+          quietHours: { enabled: true, startHHMM: '23:30', endHHMM: '07:00' },
+          remoteControl: { enabled: true, allowedChatIds: ['-100999', '100200'] }
+        },
         routing: [
           { id: 'route-1', when: { matchedBy: ['literal'] }, channelIds: ['tg-main'] }
         ]
@@ -333,7 +370,8 @@ describe('sanitizeConfig', () => {
     expect(loaded.notify).toEqual({
       mode: 'digest',
       digestIntervalMin: 30,
-      quietHours: { enabled: true, startHHMM: '23:30', endHHMM: '07:00' }
+      quietHours: { enabled: true, startHHMM: '23:30', endHHMM: '07:00' },
+      remoteControl: { enabled: true, allowedChatIds: ['-100999', '100200'] }
     })
     expect(loaded.routing).toEqual([
       { id: 'route-1', when: { matchedBy: ['literal'] }, channelIds: ['tg-main'] }

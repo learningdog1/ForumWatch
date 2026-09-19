@@ -2830,7 +2830,12 @@ function similarityWindowSize(engine: MonitorEngine): number {
 
 /** quiet-hours 打开的完整 notify 覆盖段（默认 23:00-08:00，instant 模式） */
 function quietOn(startHHMM = '23:00', endHHMM = '08:00'): AppConfig['notify'] {
-  return { mode: 'instant', digestIntervalMin: 15, quietHours: { enabled: true, startHHMM, endHHMM } }
+  return {
+    mode: 'instant',
+    digestIntervalMin: 15,
+    quietHours: { enabled: true, startHHMM, endHHMM },
+    remoteControl: { enabled: false, allowedChatIds: [] }
+  }
 }
 
 /** digest 模式的完整 notify 覆盖段 */
@@ -2838,7 +2843,8 @@ function digestCfg(intervalMin = 15, quietEnabled = false): AppConfig['notify'] 
   return {
     mode: 'digest',
     digestIntervalMin: intervalMin,
-    quietHours: { enabled: quietEnabled, startHHMM: '23:00', endHHMM: '08:00' }
+    quietHours: { enabled: quietEnabled, startHHMM: '23:00', endHHMM: '08:00' },
+    remoteControl: { enabled: false, allowedChatIds: [] }
   }
 }
 

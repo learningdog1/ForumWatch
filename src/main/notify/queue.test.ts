@@ -22,7 +22,8 @@ function notifyCfg(overrides: Partial<NotifyConfig> = {}): NotifyConfig {
   const base: NotifyConfig = {
     mode: 'instant',
     digestIntervalMin: 15,
-    quietHours: { enabled: false, startHHMM: '23:00', endHHMM: '08:00' }
+    quietHours: { enabled: false, startHHMM: '23:00', endHHMM: '08:00' },
+    remoteControl: { enabled: false, allowedChatIds: [] }
   }
   return {
     ...base,

@@ -69,6 +69,8 @@ const CHANNELS_MAX_ITEMS = 8
 const ROUTING_RULES_MAX_ITEMS = 20
 /** digest 间隔非法（非数字 / NaN / Infinity）时的回退值（分钟） */
 const DEFAULT_DIGEST_INTERVAL_MIN = 15
+/** Telegram 遥控允许 Chat ID 清单上限（R9-W1；超出截断） */
+const REMOTE_CONTROL_MAX_CHAT_IDS = 10
 /** 免打扰时段缺省回退（第六轮；与 DEFAULT_APP_CONFIG.notify.quietHours 对齐） */
 const DEFAULT_QUIET_START_HHMM = '23:00'
 const DEFAULT_QUIET_END_HHMM = '08:00'
@@ -103,7 +105,9 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.72
  *   新形状（读侧兼容由 migrations.normalizeLegacyChannels 负责）。
  * - `notify`（第六轮，见 sanitizeNotify）：mode 只认 'instant'|'digest' 非法回
  *   'instant'；digestIntervalMin 非法回 15、钳 [1,120]；quietHours.enabled 布尔化、
- *   startHHMM/endHHMM 格式非法分别回 '23:00'/'08:00'（复用 timeHHMM 校验口径）。
+ *   startHHMM/endHHMM 格式非法分别回 '23:00'/'08:00'（复用 timeHHMM 校验口径）；
+ *   remoteControl（R9-W1）enabled 布尔化（默认关）、allowedChatIds trim/去空/
+ *   精确去重/上限 10。
  * - `routing`（第六轮，见 sanitizeRouting）：非数组 → []（空=不路由，合法状态）；
  *   上限 20 条；when.sourceId 悬挂（不在 sources）剔字段、matchedBy 枚举过滤
  *   （清洗后空不落键）、ruleId 悬挂（不在 priceRules）剔字段；when 清洗后全空
@@ -599,10 +603,13 @@ function sanitizeChannels(list: ChannelConfig[] | undefined): ChannelConfig[] {
 }
 
 /**
- * 推送策略清洗（第六轮契约；digest/免打扰由 W1-queue 消费，当前仅落契约）：
+ * 推送策略清洗（第六轮契约；digest/免打扰由 W1-queue 消费，当前仅落契约；
+ * R9-W1 增 remoteControl）：
  * mode 枚举非法回 'instant'；digestIntervalMin 非法回 15、钳到 [1,120]；
  * quietHours.enabled 布尔化，startHHMM/endHHMM 格式非法（复用 timeHHMM 口径）
- * 分别回 '23:00' / '08:00'。
+ * 分别回 '23:00' / '08:00'；remoteControl.enabled 布尔化（`=== true`，默认关），
+ * allowedChatIds 每条 trim、去空、**精确去重**（chat id 是数字串，负数群 id 合法，
+ * 不做大小写折叠）、上限 10 条（超出截断）。
  */
 function sanitizeNotify(notify: AppConfig['notify'] | undefined): AppConfig['notify'] {
   const raw =
@@ -611,10 +618,15 @@ function sanitizeNotify(notify: AppConfig['notify'] | undefined): AppConfig['not
           mode?: unknown
           digestIntervalMin?: unknown
           quietHours?: { enabled?: unknown; startHHMM?: unknown; endHHMM?: unknown }
+          remoteControl?: { enabled?: unknown; allowedChatIds?: unknown }
         })
       : {}
   const qh =
     typeof raw.quietHours === 'object' && raw.quietHours !== null ? raw.quietHours : {}
+  const rc =
+    typeof raw.remoteControl === 'object' && raw.remoteControl !== null
+      ? raw.remoteControl
+      : {}
   return {
     mode: NOTIFY_MODES.includes(raw.mode as NotifyConfig['mode'])
       ? (raw.mode as NotifyConfig['mode'])
@@ -624,8 +636,30 @@ function sanitizeNotify(notify: AppConfig['notify'] | undefined): AppConfig['not
       enabled: qh.enabled === true,
       startHHMM: sanitizeTimeHHMM(qh.startHHMM as string | undefined, DEFAULT_QUIET_START_HHMM),
       endHHMM: sanitizeTimeHHMM(qh.endHHMM as string | undefined, DEFAULT_QUIET_END_HHMM)
+    },
+    remoteControl: {
+      enabled: rc.enabled === true,
+      allowedChatIds: sanitizeChatIdList(rc.allowedChatIds)
     }
   }
+}
+
+/**
+ * Telegram 遥控允许 Chat ID 清单（R9-W1）：trim、去空、精确去重（保留首现写法；
+ * 不做大小写折叠——chat id 本就是数字串，主 chatId 的隐含允许在 controller 侧
+ * 现读凭据时合并）、上限 10 条。
+ */
+function sanitizeChatIdList(list: unknown): string[] {
+  if (!Array.isArray(list)) return []
+  const out: string[] = []
+  for (const item of list) {
+    if (typeof item !== 'string') continue
+    const s = item.trim()
+    if (s.length === 0 || out.includes(s)) continue
+    out.push(s)
+    if (out.length >= REMOTE_CONTROL_MAX_CHAT_IDS) break
+  }
+  return out
 }
 
 /** digest 间隔清洗：非法（非数字 / NaN / Infinity）回 15，否则钳到 [1,120] 分钟 */
