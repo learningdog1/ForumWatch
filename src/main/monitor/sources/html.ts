@@ -8,7 +8,8 @@
  */
 
 import * as cheerio from 'cheerio'
-import { ChallengeError, type SourceAdapter } from '../types'
+import type { SourceAdapter } from '../types'
+import { assertNotChallenged } from './challenge'
 import type { FetchLike } from '../../net/http-types'
 import type { Topic } from '../../../shared/types'
 
@@ -115,13 +116,8 @@ export class HtmlSourceAdapter implements SourceAdapter {
       timeoutMs: REQUEST_TIMEOUT_MS
     })
 
-    // 挑战双信号，任一命中即 ChallengeError（ADR 5）
-    const mitigated = res.headers['cf-mitigated'] ?? ''
-    if (res.status === 403 || mitigated.toLowerCase().includes('challenge')) {
-      throw new ChallengeError(
-        `nodeseek challenge: status=${res.status} cf-mitigated=${mitigated || '(none)'}`
-      )
-    }
+    // 挑战双信号，任一命中即 ChallengeError（ADR 5；检测逻辑抽至 challenge.ts 共享）
+    assertNotChallenged(res.status, res.headers)
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`nodeseek homepage request failed: HTTP ${res.status}`)
     }
