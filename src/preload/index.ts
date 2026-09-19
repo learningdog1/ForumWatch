@@ -48,6 +48,12 @@ const api: DesktopApi = {
   getStats: (days) => ipcRenderer.invoke(IPC.getStats, days),
   // 命中反馈（R7-W4，DEC-5）：👍/👎/undo 落 FileFeedbackStore
   hitFeedback: (req: HitFeedbackRequest) => ipcRenderer.invoke(IPC.hitFeedback, req),
+  // 更新检查（R8-B/E1）：手动 force check（返回本次三态）/ 最近一次结果缓存
+  checkUpdate: () => ipcRenderer.invoke(IPC.checkUpdate),
+  getUpdateStatus: () => ipcRenderer.invoke(IPC.getUpdateStatus),
+  // 备份导出/导入（R8-B/E4）：dialog + 打包内核都在主进程，preload 只透传
+  exportBackup: () => ipcRenderer.invoke(IPC.exportBackup),
+  importBackup: () => ipcRenderer.invoke(IPC.importBackup),
   onStatus: (callback) => subscribe<EngineStatus>(IPC.evStatus, callback),
   onHit: (callback) => subscribe<HitRecord>(IPC.evHit, callback),
   onLog: (callback) => subscribe<LogEntry>(IPC.evLog, callback),

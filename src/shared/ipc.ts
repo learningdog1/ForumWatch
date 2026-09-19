@@ -141,6 +141,27 @@ export const IPC = {
    * direction='undo' 幂等撤销（键不存在也 ok）。
    */
   hitFeedback: 'hit:feedback',
+  /**
+   * invoke() → UpdateCheckStatus（R8-B/E1）：手动 force check——真发一次
+   * GitHub Releases latest 请求并返回**本次**结果（有新版/已最新/失败三态
+   * 如实回传；网络/解析失败不抛，收敛为 state:'error'）。
+   */
+  checkUpdate: 'update:check',
+  /** invoke() → UpdateCheckStatus：最近一次检查的缓存（手动或定时；从未检查 = state:'idle'） */
+  getUpdateStatus: 'update:status',
+  /**
+   * invoke() → BackupExportResult（R8-B/E4）：showSaveDialog（默认名
+   * forumwatch-backup-YYYYMMDD.json）→ 读 userData 四文件 parse → packBackup
+   * → 写所选路径（0o600：**含明文凭据**）。用户取消 → {ok:false, error:'已取消导出'}。
+   */
+  exportBackup: 'backup:export',
+  /**
+   * invoke() → BackupImportResult（R8-B/E4）：showOpenDialog → unpackBackup 验包
+   * → restorePlan（seen 无效则删 seen.json + state 全员 baselineDone 重置，ADR 8.9）
+   * → config/seen/state/feedback 按段原子写回 userData。成功恒
+   * {ok:true, needsRestart:true}——内存里的旧配置/seen/状态不热换，重启生效。
+   */
+  importBackup: 'backup:import',
   /** 主进程 push EngineStatus */
   evStatus: 'event:status',
   /** 主进程 push HitRecord */
@@ -300,6 +321,41 @@ export interface HitFeedbackRequest {
 export type HitFeedbackResult = { ok: true } | { ok: false; error: string }
 
 /**
+ * 更新检查状态（R8-B/E1；checkUpdate 返回本次结果 / getUpdateStatus 返回缓存）。
+ * state 语义：
+ * - 'idle'：从未检查过（应用刚启动、15s 定时首轮未到且未手动查）；
+ * - 'available'：有新版（latest > current，downloadUrl 为发布页）；
+ * - 'up-to-date'：已最新（latest ≤ current）；
+ * - 'error'：上次检查失败（网络 / 非 2xx / 载荷解析；error 人读）。
+ * current 在任何 state 都带（idle 也带——「关于」卡的版本号展示不依赖检查）。
+ */
+export interface UpdateCheckStatus {
+  state: 'idle' | 'available' | 'up-to-date' | 'error'
+  /** 当前应用版本（app.getVersion()） */
+  current: string
+  /** 本次/上次检查时刻（ISO）；idle 为 null */
+  checkedAt: string | null
+  /** 最新 release 的 tag（available / up-to-date 带回） */
+  latest?: string
+  /** 发布页地址（仅 available；openExternal 白名单已合并 github.com） */
+  downloadUrl?: string
+  /** 失败原因（仅 error；人读，可直显） */
+  error?: string
+}
+
+/** exportBackup 返回：成功带导出路径；取消/读写失败带错误消息 */
+export type BackupExportResult = { ok: true; path: string } | { ok: false; error: string }
+
+/**
+ * importBackup 返回：成功恒带 needsRestart（四段已原子写回 userData，但内存里
+ * 的配置 / seen / 引擎状态仍是旧值——不热换，重启后生效）；验包不过 / 写盘
+ * 失败带错误消息。
+ */
+export type BackupImportResult =
+  | { ok: true; needsRestart: true }
+  | { ok: false; error: string }
+
+/**
  * preload（contextIsolation）暴露给渲染进程的白名单 API。
  * onStatus / onHit / onLog / onDailyReport 返回取消订阅函数（组件卸载时调用）。
  */
@@ -330,6 +386,23 @@ export interface DesktopApi {
    * 失败返回 {ok:false}（写盘失败等），永不 reject。
    */
   hitFeedback(req: HitFeedbackRequest): Promise<HitFeedbackResult>
+  /**
+   * 更新检查（R8-B/E1）：手动 force check（真发一次请求），返回本次三态结果；
+   * 失败收敛为 state:'error'，永不 reject。
+   */
+  checkUpdate(): Promise<UpdateCheckStatus>
+  /** 更新检查（R8-B/E1）：最近一次结果缓存；从未检查返回 state:'idle' */
+  getUpdateStatus(): Promise<UpdateCheckStatus>
+  /**
+   * 备份导出（R8-B/E4）：弹保存对话框 → 打包 config/seen/state/feedback 四段写
+   * 所选路径（文件含明文凭据）。取消返回 {ok:false}；永不 reject。
+   */
+  exportBackup(): Promise<BackupExportResult>
+  /**
+   * 备份导入（R8-B/E4）：弹打开对话框 → 验包 → 按方案写回 userData 四段；
+   * 成功恒 needsRestart:true（重启生效）。取消/验包失败返回 {ok:false}；永不 reject。
+   */
+  importBackup(): Promise<BackupImportResult>
   onStatus(callback: (s: EngineStatus) => void): () => void
   onHit(callback: (h: HitRecord) => void): () => void
   onLog(callback: (e: LogEntry) => void): () => void

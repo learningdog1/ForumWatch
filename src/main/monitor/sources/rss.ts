@@ -11,12 +11,22 @@
  * - 挑战检测双信号走共享 challenge.ts（403 或 cf-mitigated: challenge → ChallengeError）。
  * - **0 条 ≠ 无新帖**：解析出 0 条视为 feed 改版或被拦的首表现象，抛错走普通失败退避。
  * - 非 2xx（非 403）抛带状态码的 Error；网络异常/超时原样上抛；坏 XML 抛解析错误。
+ *
+ * Cloudflare B 计划（R8-A 任务二，E3）：构造 opts 传入 `fallbackFetchFn` 时启用
+ * **双 fetch 降级**——主 fetch 抛 ChallengeError 后，用 fallbackFetchFn（装配方
+ * 注入的浏览器网络栈 fetch，desktop 为 Electron net.fetch）**重发同一请求**：
+ * - fallback 成功 → 正常返回（降级对 engine 透明）；
+ * - fallback 也抛 ChallengeError → 抛 **fallback 的** ChallengeError（状态照旧
+ *   challenged，走既有挑战退避）；
+ * - fallback 抛普通错误（网络断/超时等）→ 抛**原** ChallengeError——保守取挑战
+ *   这个更准确的诊断，避免"换栈后网络不通"掩盖"确实被拦"的事实。
+ * 未传 fallbackFetchFn 时行为与本特性引入前完全一致（挑战直接上抛）。
  */
 
 import * as cheerio from 'cheerio'
 import type { Cheerio } from 'cheerio'
 import type { Element } from 'domhandler'
-import type { SourceAdapter } from '../types'
+import { ChallengeError, type SourceAdapter } from '../types'
 import { assertNotChallenged } from './challenge'
 import type { FetchLike } from '../../net/http-types'
 import type { Topic } from '../../../shared/types'
@@ -221,6 +231,19 @@ export interface RssSourceOptions {
   label?: string
   /** HTTP 注入（与 html adapter 的 fetchHtml 同款 FetchLike，装配层统一传 undici 封装） */
   fetchFn: FetchLike
+  /**
+   * 浏览器网络栈降级 fetch（R8-A 任务二，E3 Cloudflare B 计划；可选）：
+   * 主 fetch 抛 ChallengeError 时用它**重发同一请求**（语义见文件头注释）。
+   * 传入时实例的 browserStackFallback 能力声明置 true。装配方注入的典型实现是
+   * Electron net.fetch 的 FetchLike 包装（Chromium 网络栈/系统代理，TLS 指纹与
+   * undici 不同——正是 B 计划的意义所在）。
+   */
+  fallbackFetchFn?: FetchLike
+  /**
+   * 最小日志面（可选）：降级重试时记一条 info（观测 B 计划命中频率）。
+   * 不传则降级照常发生，只是无日志。
+   */
+  log?: { info(msg: string): void }
 }
 
 export class RssSourceAdapter implements SourceAdapter {
@@ -230,20 +253,58 @@ export class RssSourceAdapter implements SourceAdapter {
   // 数值，更不保证随创建单调递增（feed 常按“最近活跃”排序、guid 形态千差万别）。
   // 声明 true 会误启 engine 的 maxSeenTopicId 阈值过滤（W3）——保守走“不过滤”路径
   // （types.ts 契约：未声明的来源完全不走该过滤）。
+  /**
+   * E3 能力声明（types.ts 契约）：仅在构造传入 fallbackFetchFn 时置 true；
+   * engine 不消费，纯观测/文档。用声明合并而非恒定字段——未降级的实例保持
+   * `browserStackFallback === undefined`（与 creationOrderedIds 同款“缺省即无”语义）。
+   */
+  readonly browserStackFallback?: true
 
   private readonly url: string
   private readonly fetchFn: FetchLike
+  private readonly fallbackFetchFn: FetchLike | undefined
+  private readonly log: { info(msg: string): void } | undefined
 
   constructor(options: RssSourceOptions) {
     this.id = options.id
     this.url = options.url
     this.name = options.label ?? hostOf(options.url)
     this.fetchFn = options.fetchFn
+    this.fallbackFetchFn = options.fallbackFetchFn
+    this.log = options.log
+    if (options.fallbackFetchFn !== undefined) this.browserStackFallback = true
   }
 
   async fetchLatest(): Promise<Topic[]> {
+    try {
+      return await this.fetchOnce(this.fetchFn)
+    } catch (err) {
+      // B 计划入口：仅主 fetch 的 **ChallengeError** 走降级；普通错误（网络断/
+      // 超时/5xx/解析错）与无 fallbackFetchFn 的实例保持原行为，直接上抛
+      if (!(err instanceof ChallengeError) || this.fallbackFetchFn === undefined) throw err
+      this.log?.info(
+        `rss source ${this.id} (${this.name}): primary fetch challenged, retrying via browser stack`
+      )
+      try {
+        return await this.fetchOnce(this.fallbackFetchFn)
+      } catch (fallbackErr) {
+        if (fallbackErr instanceof ChallengeError) {
+          // 换栈仍被拦：抛 fallback 的 ChallengeError（状态照旧 challenged）
+          throw fallbackErr
+        }
+        // fallback 普通错误：保守抛原挑战错误——挑战是更准确的诊断
+        throw err
+      }
+    }
+  }
+
+  /**
+   * 用给定 fetch 发一次请求并走完整防护管线（挑战检测 → 非 2xx → 解析 → 0 条）。
+   * 主/降级 fetch 共用同一函数保证「重发同一请求」：同 URL、同 headers、同超时。
+   */
+  private async fetchOnce(fetchFn: FetchLike): Promise<Topic[]> {
     // fetchFn reject（网络错误 / 超时 abort）原样上抛，不吞不改
-    const res = await this.fetchFn(this.url, {
+    const res = await fetchFn(this.url, {
       method: 'GET',
       headers: { ...BROWSER_HEADERS },
       timeoutMs: REQUEST_TIMEOUT_MS

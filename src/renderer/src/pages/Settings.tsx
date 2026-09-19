@@ -11,10 +11,15 @@
  * （ai 段来自 AI 模型/监控模式/每日总结三张卡，sources 来自「来源」卡——
  *  SourceCard 组件内管启停/增删/预设/分类与作者过滤，回写 draft.sources）；
  *  priceRules / similarity（R5-P2c）分别来自「价格规则」「相似降噪」卡；
- *  channels / notify / routing（R6-W4）来自「推送通道 / 推送策略 / 路由规则」卡。
+ *  channels / notify / routing（R6-W4）来自「推送通道 / 推送策略 / 路由规则」卡
+ *  （notify.remoteControl 遥控段由紧随其后的「Telegram 遥控」卡编辑，R9-W1）。
  * "发送测试消息 / 测试连接 / 匹配测试台"用的都是**已保存**配置：表单 dirty 时先
  * 提示保存而非直接发送（测试消息 R6-W4 起广播全部就绪通道）。dirty 状态通过
  * onDirtyChange 上报给外壳。
+ *
+ * 页尾两张**非表单**卡（R8-B，不进 draft / dirty）：「数据」备份导出/导入 +
+ * 「关于」版本与更新检查——它们操作的是 userData 文件与 GitHub Releases，
+ * 与表单保存流程无关。
  */
 import { useEffect, useRef, useState } from 'react'
 import type {
@@ -29,10 +34,13 @@ import type {
 } from '@shared/types'
 import { ChannelsCard } from '../components/ChannelsCard'
 import { isChannelReadyUi } from '../components/ChannelsCard'
+import { AboutCard } from '../components/AboutCard'
+import { DataCard } from '../components/DataCard'
 import { Field } from '../components/Field'
 import { KeywordTagInput } from '../components/KeywordTagInput'
 import { MatchTestCard } from '../components/MatchTestCard'
 import { NotifyCard } from '../components/NotifyCard'
+import { RemoteControlCard } from '../components/RemoteControlCard'
 import { RulesCard } from '../components/RulesCard'
 import { RoutingCard } from '../components/RoutingCard'
 import { SourceCard } from '../components/SourceCard'
@@ -109,7 +117,12 @@ function toDraft(c: AppConfig): Draft {
     channels: c.channels.map((ch) => ({ ...ch })),
     notify: {
       ...c.notify,
-      quietHours: { ...c.notify.quietHours }
+      quietHours: { ...c.notify.quietHours },
+      // R9-W1：遥控段深拷贝（allowedChatIds 数组独立于 saved）
+      remoteControl: {
+        ...c.notify.remoteControl,
+        allowedChatIds: [...c.notify.remoteControl.allowedChatIds]
+      }
     },
     routing: c.routing.map((r) => ({
       ...r,
@@ -366,6 +379,11 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
       />
 
       <NotifyCard notify={draft.notify} onChange={(notify) => patch({ notify })} />
+
+      <RemoteControlCard
+        rc={draft.notify.remoteControl}
+        onChange={(rc) => patch({ notify: { ...draft.notify, remoteControl: rc } })}
+      />
 
       <RoutingCard
         routing={draft.routing}
@@ -764,6 +782,10 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
           </div>
         </Field>
       </section>
+
+      <DataCard />
+
+      <AboutCard />
 
       <div className="savebar">
         <button

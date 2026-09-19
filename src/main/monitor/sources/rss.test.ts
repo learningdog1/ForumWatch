@@ -384,3 +384,176 @@ describe('RssSourceAdapter', () => {
     await expect(adapter.fetchLatest()).rejects.toBe(boom)
   })
 })
+
+describe('RssSourceAdapter：Cloudflare B 计划（双 fetch 降级，R8-A 任务二）', () => {
+  /** 主 fetch 403（无 challenge 头）——挑战形态一 */
+  function challengeFetch(): ReturnType<typeof vi.fn> {
+    return vi.fn(
+      async (_url: string, _init?: HttpRequestInit): Promise<HttpResponse> =>
+        makeResponse({ status: 403, body: '' })
+    )
+  }
+
+  it('主 fetch 挑战 + fallback 成功 → 正常返回 topics；重发同一请求；记 info 日志', async () => {
+    const primary = challengeFetch()
+    const fallback = okFetch() // 200 + DISCOURSE_RSS
+    const logs: string[] = []
+    const adapter = new RssSourceAdapter({
+      id: 'linuxdo',
+      url: FEED_URL,
+      fetchFn: primary,
+      fallbackFetchFn: fallback,
+      log: { info: (msg) => logs.push(msg) }
+    })
+
+    const topics = await adapter.fetchLatest()
+    expect(topics).toHaveLength(3) // 与无降级的成功路径同款产出
+    expect(primary).toHaveBeenCalledTimes(1)
+    expect(fallback).toHaveBeenCalledTimes(1)
+
+    // 「重发同一请求」：URL / method / headers / 超时与主请求完全一致
+    const [pUrl, pInit] = primary.mock.calls[0]
+    const [fUrl, fInit] = fallback.mock.calls[0]
+    expect(fUrl).toBe(pUrl)
+    expect(fUrl).toBe(FEED_URL)
+    expect(fInit?.method).toBe(pInit?.method)
+    expect(fInit?.timeoutMs).toBe(pInit?.timeoutMs)
+    expect(fInit?.headers).toEqual(pInit?.headers)
+
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toContain('primary fetch challenged, retrying via browser stack')
+    expect(logs[0]).toContain('linuxdo')
+  })
+
+  it('能力声明：传 fallbackFetchFn → browserStackFallback === true；不传 → undefined', () => {
+    const withFallback = new RssSourceAdapter({
+      id: 'x',
+      url: FEED_URL,
+      fetchFn: okFetch(),
+      fallbackFetchFn: okFetch()
+    })
+    expect(withFallback.browserStackFallback).toBe(true)
+
+    const plain = new RssSourceAdapter({ id: 'x', url: FEED_URL, fetchFn: okFetch() })
+    expect(plain.browserStackFallback).toBeUndefined()
+  })
+
+  it('双挑战 → 抛 fallback 的 ChallengeError（状态照旧 challenged）', async () => {
+    const primary = challengeFetch()
+    // fallback 用挑战形态二（200 + cf-mitigated 头）：错误消息可区分来源
+    const fallback = vi.fn(
+      async (_url: string, _init?: HttpRequestInit): Promise<HttpResponse> =>
+        makeResponse({ headers: { 'cf-mitigated': 'challenge' }, body: '' })
+    )
+    const adapter = new RssSourceAdapter({
+      id: 'x',
+      url: FEED_URL,
+      fetchFn: primary,
+      fallbackFetchFn: fallback
+    })
+
+    const error: unknown = await adapter.fetchLatest().then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(ChallengeError)
+    // status=200（fallback 响应的形态）证明抛的是 fallback 的错误，不是主 fetch 的 403
+    expect(error instanceof Error && error.message).toContain('status=200')
+    expect(error instanceof Error && error.message).toContain('cf-mitigated=challenge')
+  })
+
+  it('fallback 普通错误（网络 reject）→ 抛原 ChallengeError（保守：挑战是更准确的诊断）', async () => {
+    const primary = challengeFetch()
+    const offline = new Error('browser stack offline')
+    const fallback = vi.fn(
+      async (_url: string, _init?: HttpRequestInit): Promise<HttpResponse> => {
+        throw offline
+      }
+    )
+    const adapter = new RssSourceAdapter({
+      id: 'x',
+      url: FEED_URL,
+      fetchFn: primary,
+      fallbackFetchFn: fallback
+    })
+
+    const error: unknown = await adapter.fetchLatest().then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(ChallengeError) // 挑战，不是 offline
+    expect(error).not.toBe(offline)
+    expect(error instanceof Error && error.message).toContain('status=403') // 主 fetch 的挑战
+  })
+
+  it('fallback 非 2xx（500，非挑战）→ 同样抛原 ChallengeError', async () => {
+    const primary = challengeFetch()
+    const fallback = vi.fn(
+      async (_url: string, _init?: HttpRequestInit): Promise<HttpResponse> =>
+        makeResponse({ status: 500, body: 'oops' })
+    )
+    const adapter = new RssSourceAdapter({
+      id: 'x',
+      url: FEED_URL,
+      fetchFn: primary,
+      fallbackFetchFn: fallback
+    })
+    const error: unknown = await adapter.fetchLatest().then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(ChallengeError)
+    expect(error instanceof Error && error.message).toContain('status=403')
+  })
+
+  it('无 fallbackFetchFn → 原行为：挑战直接上抛，不降级', async () => {
+    const primary = challengeFetch()
+    const adapter = new RssSourceAdapter({ id: 'x', url: FEED_URL, fetchFn: primary })
+    await expect(adapter.fetchLatest()).rejects.toThrow(ChallengeError)
+    expect(primary).toHaveBeenCalledTimes(1)
+  })
+
+  it('主 fetch 普通错误（非挑战）→ 不走 fallback，原样上抛', async () => {
+    const primary = vi.fn(
+      async (_url: string, _init?: HttpRequestInit): Promise<HttpResponse> =>
+        makeResponse({ status: 500, body: 'oops' })
+    )
+    const fallback = okFetch()
+    const adapter = new RssSourceAdapter({
+      id: 'x',
+      url: FEED_URL,
+      fetchFn: primary,
+      fallbackFetchFn: fallback
+    })
+    const error: unknown = await adapter.fetchLatest().then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(ChallengeError)
+    expect(error instanceof Error && error.message).toContain('500')
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
+  it('fallback 200 但解析 0 条（普通错误）→ 抛原 ChallengeError；0 条告警在 fallback 路径同样执行', async () => {
+    const primary = challengeFetch()
+    const fallback = okFetch(
+      '<?xml version="1.0"?><rss version="2.0"><channel><title>empty</title></channel></rss>'
+    )
+    const adapter = new RssSourceAdapter({
+      id: 'x',
+      url: FEED_URL,
+      fetchFn: primary,
+      fallbackFetchFn: fallback
+    })
+    // fallback 响应走完整防护管线（0 条 → 抛错），但它是普通错误：保守语义下
+    // 抛**原** ChallengeError（挑战是更准确的诊断——换栈拿到 200 却解析不出
+    // 条目，常见形态恰是 CF 的 JS/interstitial 挑战页）
+    const error: unknown = await adapter.fetchLatest().then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(ChallengeError)
+    expect(error instanceof Error && error.message).toContain('status=403')
+  })
+})

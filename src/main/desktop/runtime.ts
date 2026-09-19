@@ -29,11 +29,33 @@
  * emitStatus 里检测 desired paused→running 翻转即 void runReportTick()（F6，
  * 暂停跨过 timeHHMM 的补偿路径）。
  *
- * 生命周期：startup() = engine.start()（launch 即开始监控，desired 默认 running）；
- * shutdown() 在 app 的 before-quit 与 will-quit 之间调用（退出路径统一走这里）：
- * engine.pause → 停日报定时器 → seen flush → clients close → logger close。
+ * 生命周期：startup() = engine.start()（launch 即开始监控，desired 默认 running）+
+ * 起 watchdog；shutdown() 在 app 的 before-quit 与 will-quit 之间调用（退出路径统一
+ * 走这里）：engine.pause → 停 watchdog/日报定时器 → seen flush → clients close →
+ * logger close。
+ *
+ * 引擎看门狗（R8-A 任务一，E2）：EngineWatchdog 旁路观察 nextPollAt 超期
+ * （desired=running 且 now > nextPollAt + max(interval*2, 90s)）并强制 runNow
+ * 自愈。观察面经既有状态广播通道下发：emitStatus 在快照对象上附加 watchdog 字段
+ * 再发（engine 不写该字段——status 是 engine 的事实源，watchdog 是 runtime 侧
+ * 旁路观测；注意 IPC 的 getStatus 拉取路径直读 engine.getStatus()，不带该字段，
+ * 广播/拉取两条路径的差异由渲染端按可选字段容忍）。暂停不触发由 watchdog 自身
+ * 按 desired 判定，无需随 pause/resume 启停。headless 装配暂不接（后续包重构时补）。
+ *
+ * RSS 降级 fetch（R8-A 任务二，E3 Cloudflare B 计划）：每个 RssSourceAdapter 注入
+ * fallbackFetchFn = Electron net.fetch 的 FetchLike 包装（Chromium 网络栈/系统代理，
+ * TLS 指纹与 undici 不同——被 CF 拦的 linux.do/LET 形态 RSS 换栈重发；主 fetch 被
+ * 挑战才触发，降级在 adapter 内部完成，engine 不感知）。net.fetch 不走 undici
+ * dispatcher：ConfigStore 的 proxyUrl/proxyScope 对它不生效（用系统代理），行为
+ * 差异见 createBrowserStackFetch 注释。
+ *
+ * Telegram 遥控（R9-W1，DEC-6）：BotCommandController 在 engine 之后构造
+ * （getEnabled/getCredentials 现读 store，post 走 tgClient，pause/resume/runNow
+ * 直绑 engine）；startup 时 enabled 即 start；applyConfigSideEffects 里按
+ * enabled × telegram 凭据就绪对齐 start/stop；shutdown 显式 stop（坑8 三条
+ * 接线纪律见 notify/bot-commands.ts 文件头）。
  */
-import { app } from 'electron'
+import { app, net } from 'electron'
 import { join } from 'node:path'
 import { ConfigStore } from '../config/store'
 import { createLogger, type Logger } from '../logger'
@@ -58,10 +80,17 @@ import { BarkNotifier } from '../notify/bark'
 import { NtfyNotifier } from '../notify/ntfy'
 import { WebhookNotifier } from '../notify/webhook'
 import { CompositeNotifier } from '../notify/composite'
-import { isChannelReady, type HitMessageInput, type Notifier } from '../notify/types'
-import type { FetchLike } from '../net/http-types'
+import { BotCommandController } from '../notify/bot-commands'
+import {
+  isChannelReady,
+  telegramCredentialsOf,
+  type HitMessageInput,
+  type Notifier
+} from '../notify/types'
+import type { FetchLike, HttpRequestInit, HttpResponse } from '../net/http-types'
 import type { AppConfig, ChannelConfig, EngineStatus, HitRecord } from '../../shared/types'
 import type { EventBroadcaster } from './ipc'
+import { EngineWatchdog } from './watchdog'
 
 /** 日报定时器 sleep 下限：即使 nextCheckAt 很近也至少 60s 一查（防空转） */
 const REPORT_TIMER_MIN_SLEEP_MS = 60_000
@@ -117,6 +146,20 @@ export class DesktopRuntime {
     string,
     { url: string; label: string; adapter: RssSourceAdapter }
   >()
+  /**
+   * 引擎看门狗（R8-A 任务一，E2）：startup 起、shutdown 停；触发条件/动作见
+   * watchdog.ts。观察面经 emitStatus 附加到状态广播（EngineStatus.watchdog）。
+   */
+  private readonly watchdog: EngineWatchdog
+  /**
+   * Telegram 遥控（R9-W1，DEC-6）：getUpdates 长轮询接收 /status /pause /
+   * /resume /poll /help。生命周期独立于 engine desired（坑8 第二条：/pause
+   * 后监听继续跑）；start/stop 由 startup/applyConfigSideEffects/shutdown 对齐
+   * （enabled × telegram 凭据就绪签名）。
+   */
+  private readonly botCommands: BotCommandController
+  /** startup() 是否已跑（遥控只在 startup 后才允许 start——构造期引擎未起） */
+  private startedUp = false
   /** 日报定时器句柄（startup 起、shutdown 清；自循环重排） */
   private reportTimer: ReturnType<typeof setTimeout> | null = null
   /** 上一帧 engine desired（F6：检测 paused→running 翻转补跑日报 tick；null=尚未见帧） */
@@ -152,6 +195,10 @@ export class DesktopRuntime {
     //   参数，变更后旧实例的抓取地址/展示名语义过期）。
     // getSources 每轮重读 config.sources 过滤 enabled（与既有语义一致：enabled=false
     // 不进返回）——配置热更新即生效，不在构造期定死数组（D3）。
+    //
+    // RSS 降级 fetch（R8-A 任务二，E3）：所有 rss 实例共用一个 Chromium 栈包装
+    // （无状态纯函数闭包）；adapter 内部在主 fetch 被 CF 挑战时用它重发同一请求。
+    const browserStackFetch = createBrowserStackFetch()
     const getSources = (): SourceAdapter[] => {
       const out: SourceAdapter[] = []
       for (const s of this.store.get().sources) {
@@ -186,7 +233,12 @@ export class DesktopRuntime {
             id: s.id,
             url: s.url,
             ...(s.label !== undefined ? { label: s.label } : {}),
-            fetchFn: (url, init) => this.siteClient.get(url, init)
+            fetchFn: (url, init) => this.siteClient.get(url, init),
+            // E3 Cloudflare B 计划：主 fetch（undici 栈）被挑战时换 Chromium 栈
+            // 重发同一请求（linux.do/LET 形态的 RSS 源）；能力声明
+            // browserStackFallback 由 adapter 构造时自动置 true
+            fallbackFetchFn: browserStackFetch,
+            log: this.logger
           })
           this.rssAdapters.set(s.id, { url: s.url, label: s.label ?? '', adapter })
           out.push(adapter)
@@ -282,6 +334,41 @@ export class DesktopRuntime {
     })
     this.engine = engine
 
+    // R8-A 任务一（E2）：engine watchdog——旁路观察 nextPollAt 超期并强制补轮询
+    // （自愈挂死的排程循环）。interval 现读 store（配置热更新语义，每次检查时取
+    // 当前 pollIntervalSec）；getStatus/runNow 绑 engine 实时快照与立即轮询入口。
+    // 生命周期随 engine：startup() 起、shutdown() 停；engine 暂停期间由 watchdog
+    // 自身按 desired 判定不触发，无需随 pause/resume 启停。
+    this.watchdog = new EngineWatchdog({
+      getStatus: () => engine.getStatus(),
+      runNow: () => engine.runNow(),
+      getIntervalMs: () => this.store.get().pollIntervalSec * 1000,
+      log: this.logger
+    })
+
+    // Telegram 遥控（R9-W1，DEC-6）：内核零 electron，装配层注入全部依赖。
+    // getEnabled/getCredentials 每轮循环现读 store（配置热更新；翻 false/凭据
+    // 失效由 controller 自行退出循环，翻 true 由 applyConfigSideEffects 对齐）。
+    // post 走 tgClient（自己的直调通道，绝不进 TelegramNotifier 的 1050ms 队列，
+    // 坑8 第一条）；pause/resume/runNow 直绑 engine（desired 翻转不影响本监听，
+    // 坑8 第二条）。
+    this.botCommands = new BotCommandController({
+      getEnabled: () => {
+        const rc = this.store.get().notify.remoteControl
+        return { enabled: rc.enabled, allowedChatIds: rc.allowedChatIds }
+      },
+      getCredentials: () => {
+        const creds = telegramCredentialsOf(this.store.get().channels)
+        return creds.botToken !== '' && creds.chatId !== '' ? creds : null
+      },
+      post: (url, init) => this.tgClient.post(url, init),
+      getStatus: () => engine.getStatus(),
+      pause: () => engine.pause(),
+      resume: () => engine.resume(),
+      runNow: () => engine.runNow(),
+      log: this.logger
+    })
+
     // 第一个订阅者是 IPC 广播器（onStatus/onHit 转发给渲染进程）
     this.statusListeners.add((s) => broadcaster.status(s))
     this.hitListeners.add((h) => broadcaster.hit(h))
@@ -307,10 +394,14 @@ export class DesktopRuntime {
     }
   }
 
-  /** desired=running 并立即触发首轮（首启基线在这一轮完成）+ 起日报定时器 */
+  /** desired=running 并立即触发首轮（首启基线在这一轮完成）+ 起 watchdog 与日报定时器 */
   startup(): void {
     this.engine.start()
+    this.watchdog.start()
     this.startReportTimer()
+    this.startedUp = true
+    // R9-W1：startup 后才允许遥控启动（构造期引擎未起，指令来得太早）
+    this.alignRemoteControl(this.store.get())
     this.logger.info('engine started: monitoring begins (desired=running)')
   }
 
@@ -332,6 +423,9 @@ export class DesktopRuntime {
    * - 推送扇出热重建（R6-W4）——仅当**就绪通道集合**变化（readyChannelSignature
    *   不一致）时 replace 壳内 composite；通道凭据/启停由发送器的 getConfig 每次
    *   发送前现读、路由由 composite 的 getRouting 现读，均不需要重建；
+   * - Telegram 遥控对齐（R9-W1）——enabled × 第一个就绪 telegram 通道的凭据
+   *   两个维度任一变化即 start/stop（controller 运行中也会每轮自读配置，这里
+   *   负责补"翻 true"的自举与即时停）；
    * - 开机自启（app.setLoginItemSettings）。
    * 单项失败只记日志，不阻断其余项。
    */
@@ -389,12 +483,34 @@ export class DesktopRuntime {
       this.lastReadyChannels = signature
       this.logger.info(`notify fan-out rebuilt (ready channels: [${signature}] or none)`)
     }
+    // Telegram 遥控对齐（R9-W1）：shouldRun 与 isRunning 求差即可——controller
+    // 运行中每轮自读 getEnabled/getCredentials（关掉/凭据失效它自退，这里的
+    // stop 分支只是让它立即退），翻 true 与凭据就绪只能靠这里自举 start。
+    this.alignRemoteControl(cfg)
+  }
+
+  /**
+   * 遥控 start/stop 对齐（R9-W1）：shouldRun = remoteControl.enabled 且存在
+   * 就绪 telegram 通道（telegramCredentialsOf 单一事实源）。startup 之前不
+   * start（构造期引擎未起）；shutdownStarted 后不再 start。
+   */
+  private alignRemoteControl(cfg: AppConfig): void {
+    const creds = telegramCredentialsOf(cfg.channels)
+    const shouldRun = cfg.notify.remoteControl.enabled && creds.botToken !== '' && creds.chatId !== ''
+    if (shouldRun) {
+      if (!this.startedUp || this.shutdownStarted) return
+      if (!this.botCommands.isRunning) this.botCommands.start()
+    } else if (this.botCommands.isRunning) {
+      this.botCommands.stop()
+    }
   }
 
   /** 退出路径统一走这里（before-quit 与 will-quit 之间调用）；幂等 */
   async shutdown(): Promise<void> {
     if (this.shutdownStarted) return
     this.shutdownStarted = true
+    this.watchdog.stop() // 先停旁路观察：后续 engine.pause 触发的状态广播不再需要触发自愈
+    this.botCommands.stop() // 显式停遥控长轮询（坑8：退出不留悬挂的 getUpdates 消费者）
     this.stopReportTimer()
     try {
       this.engine.pause() // 停排程；状态事件同时驱动 powerSaveBlocker 释放
@@ -539,9 +655,13 @@ export class DesktopRuntime {
       void this.runReportTick()
     }
     this.lastDesired = s.desired
+    // R8-A 任务一：watchdog 观测面在快照副本上附加再广播（engine 不写该字段，
+    // 最小侵入——不改 engine；watchdog 触发本身会调 runNow → 引擎发新状态，
+    // 该字段随下一帧自然带上最新值）
+    const enriched: EngineStatus = { ...s, watchdog: this.watchdog.getStatus() }
     for (const cb of [...this.statusListeners]) {
       try {
-        cb(s)
+        cb(enriched)
       } catch (err) {
         this.logger.error(`onStatus listener threw: ${describe(err)}`)
       }
@@ -626,6 +746,50 @@ function readyChannelSignature(cfg: AppConfig): string {
     .filter((ch) => isChannelReady(ch))
     .map((ch) => `${ch.type}:${ch.id}`)
     .join('|')
+}
+
+/**
+ * Electron net.fetch 的 FetchLike 包装（R8-A 任务二，E3 Cloudflare B 计划）。
+ * RSS adapter 的降级 fetch：主 fetch（undici/Node 栈）被 CF 挑战时用它**重发同一
+ * 请求**——net.fetch 走 **Chromium 网络栈**，TLS 指纹/JA3 与 undici 不同，按指纹
+ * 拦截的 Cloudflare 规则（linux.do/LET 形态）在 Chromium 栈下常能直出。
+ *
+ * **与主栈的行为差异**（观测/排障必读）：
+ * - 不走 undici dispatcher：ConfigStore 的 proxyUrl/proxyScope 对它**不生效**，
+ *   代理跟随**系统设置**（PAC/系统代理）；
+ * - 证书库、HTTP 缓存、HSTS/Alt-Svc 均为 Chromium 会话语义；
+ * - 超时语义对齐 HttpClient：timeoutMs → AbortSignal.timeout，外部 signal 经
+ *   AbortSignal.any 合并（老运行时缺失 AbortSignal.any 时以 timeout 为准，
+ *   同 http.ts mergeSignals 的已知取舍）。
+ *
+ * 仅 desktop 装配层存在（import electron 不进监控内核，ADR 2）；返回的闭包无状态
+ * 可全局共享。web Response → HttpResponse 的映射只覆盖内核消费面：
+ * status / headers（键统一小写）/ body 文本。
+ */
+function createBrowserStackFetch(): FetchLike {
+  return async (url: string, init?: HttpRequestInit): Promise<HttpResponse> => {
+    let signal = init?.signal
+    if (init?.timeoutMs !== undefined) {
+      const timeoutSignal = AbortSignal.timeout(init.timeoutMs)
+      if (signal !== undefined && typeof AbortSignal.any === 'function') {
+        signal = AbortSignal.any([signal, timeoutSignal])
+      } else {
+        signal = timeoutSignal
+      }
+    }
+    const res = await net.fetch(url, {
+      method: init?.method ?? 'GET',
+      ...(init?.headers !== undefined ? { headers: init.headers } : {}),
+      ...(init?.body !== undefined ? { body: init.body } : {}),
+      ...(signal !== undefined ? { signal } : {})
+    })
+    const headers: Record<string, string> = {}
+    res.headers.forEach((value, name) => {
+      headers[name.toLowerCase()] = value
+    })
+    const body = await res.text()
+    return { status: res.status, headers, body }
+  }
 }
 
 /** HttpClient 构造对非法代理 URL 会抛（fail-fast）；装配期降级为直连并记日志 */

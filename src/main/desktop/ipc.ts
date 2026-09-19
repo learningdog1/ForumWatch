@@ -6,17 +6,38 @@
  * - registerIpcHandlers：invoke handler 注册（getConfig / saveConfig / getStatus /
  *   getHits / getLogs / engineControl / openExternal / testAiProvider /
  *   getDailyReport / generateDailyReport / listDailyReports / dispositionsRecent /
- *   dispositionsDay / queryHits / getStats / hitFeedback），失败一律收敛为返回值，
+ *   dispositionsDay / queryHits / getStats / hitFeedback / checkUpdate /
+ *   getUpdateStatus / exportBackup / importBackup），失败一律收敛为返回值，
  *   绝不向渲染进程抛异常。
  * - AI / 日报通道（W2-c 接入）：testAiProvider 走 provider.testConnection（错误
  *   消息已脱敏，无 apiKey 明文）；getDailyReport/loadReport/list 走
  *   DailyReportService 的文件查询；generateDailyReport 是**手动生成**——跳过
  *   desired 与 attempts 检查、直接覆盖重生成（推送条件在 generate 内部）。
+ * - 更新检查（R8-B/E1）：UpdateChecker（desktop/update-check.ts，零 electron）
+ *   在这里构造并 start（15s 延迟 + 24h 轮询；runtime.ts 不掺和——它不在本包的
+ *   改动面）。checkUpdate / getUpdateStatus 只读 checker 的 outcome 缓存。
+ * - 备份导出/导入（R8-B/E4）：dialog 在本层弹；打包/验包/落盘方案走
+ *   src/main/backup.ts 纯函数内核；段写回用同目录 tmp+rename 原子写
+ *   （ConfigStore.writeAtomically 同款模式，config 段 0o600 对齐其凭据口径）。
  */
-import { BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { randomInt } from 'node:crypto'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import {
   IPC,
   type AiTestResult,
+  type BackupExportResult,
+  type BackupImportResult,
   type DailyReportListResult,
   type EngineControlResult,
   type HitFeedbackResult,
@@ -26,7 +47,8 @@ import {
   type MatchTestResult,
   type OpenExternalResult,
   type SaveConfigResult,
-  type StatsResult
+  type StatsResult,
+  type UpdateCheckStatus
 } from '../../shared/ipc'
 import type {
   AppConfig,
@@ -42,6 +64,9 @@ import { formatLocalDate } from '../monitor/hits-store'
 import { computeStats } from '../monitor/stats'
 import { normalizeTitle } from '../monitor/similarity'
 import { runMatchTest, type SemanticTestInput } from '../monitor/testbench'
+import { UpdateChecker, UPDATE_REPO } from './update-check'
+import { packBackup, restorePlan, unpackBackup } from '../backup'
+import type { FetchLike } from '../net/http-types'
 
 /** 主→渲染事件推送接口（runtime 把 engine onStatus/onHit / 日报广播转发给它） */
 export interface EventBroadcaster {
@@ -135,7 +160,12 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
   })
 
   // 仅放行 https 且 host 为已配置（enabled）来源的域或其子域；白名单按
-  // config.sources 派生（v2：nodeseek → nodeseek.com；见 monitor/sources/registry）
+  // config.sources 派生（v2：nodeseek → nodeseek.com；见 monitor/sources/registry）。
+  // R8-B/E1 起合并静态域 github.com（更新检查的「打开下载页」指向 GitHub
+  // Releases 发布页——它不来自任何来源配置，不能走派生路径；最小扩展为
+  // ipc 层的合并列表，registry 的派生逻辑不动）。
+  const STATIC_EXTERNAL_DOMAINS = ['github.com'] as const
+
   ipcMain.handle(IPC.openExternal, async (_event, url: unknown): Promise<OpenExternalResult> => {
     if (typeof url !== 'string') return { ok: false }
     let parsed: URL
@@ -145,7 +175,8 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
       return { ok: false }
     }
     if (parsed.protocol !== 'https:') return { ok: false }
-    if (!isHostAllowed(parsed.hostname, allowedExternalDomains(rt.store.get()))) {
+    const allowed = [...allowedExternalDomains(rt.store.get()), ...STATIC_EXTERNAL_DOMAINS]
+    if (!isHostAllowed(parsed.hostname, allowed)) {
       return { ok: false }
     }
     try {
@@ -400,5 +431,200 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
       semantic,
       topic: { category, categorySlug: category, author }
     })
+  })
+
+  // ---- 更新检查（R8-B/E1） --------------------------------------------------
+
+  /**
+   * 全局 fetch → FetchLike 适配（UpdateChecker 的注入面）。Electron 主进程
+   * （Node ≥18）自带 fetch；更新检查走直连——不掺 proxy 的 site/ai client
+   * （那些归 runtime 管，且 GitHub API 通常无需代理即可达；真不可达也只是
+   * 静默失败，下次轮询再试）。
+   */
+  const directFetch: FetchLike = async (url, init) => {
+    const res = await fetch(url, { headers: init?.headers, signal: init?.signal })
+    const headers: Record<string, string> = {}
+    res.headers.forEach((value, key) => {
+      headers[key] = value
+    })
+    return { status: res.status, headers, body: await res.text() }
+  }
+
+  /** 单实例：registerIpcHandlers 每进程只调一次（index.ts 装配序） */
+  const updateChecker = new UpdateChecker({
+    currentVersion: app.getVersion(),
+    repo: UPDATE_REPO,
+    fetchFn: directFetch,
+    log: { warn: (msg) => rt.logger.warn(msg) }
+  })
+  // 启动延迟 15s + 每 24h 轮询（app 退出进程随之消亡，无需显式 stop）
+  updateChecker.start()
+
+  /** checker 的 outcome → IPC 契约形状（checkedAt 转 ISO；idle 也带 current） */
+  const updateStatus = (): UpdateCheckStatus => {
+    const last = updateChecker.lastOutcome()
+    if (last === null) {
+      return { state: 'idle', current: app.getVersion(), checkedAt: null }
+    }
+    const checkedAt = new Date(last.checkedAt).toISOString()
+    switch (last.kind) {
+      case 'available':
+        return {
+          state: 'available',
+          current: last.current,
+          checkedAt,
+          latest: last.latest,
+          downloadUrl: last.downloadUrl
+        }
+      case 'up-to-date':
+        return { state: 'up-to-date', current: last.current, checkedAt, latest: last.latest }
+      case 'error':
+        return { state: 'error', current: last.current, checkedAt, error: last.error }
+    }
+  }
+
+  /**
+   * invoke() → UpdateCheckStatus：手动 force check（真发一次请求，成功失败都
+   * 刷新缓存）。check 内部一切失败已静默收敛，这里不会再抛。
+   */
+  ipcMain.handle(IPC.checkUpdate, async (): Promise<UpdateCheckStatus> => {
+    await updateChecker.check()
+    return updateStatus()
+  })
+
+  /** invoke() → UpdateCheckStatus：最近一次结果的缓存（不发包） */
+  ipcMain.handle(IPC.getUpdateStatus, (): UpdateCheckStatus => updateStatus())
+
+  // ---- 备份导出/导入（R8-B/E4） ---------------------------------------------
+
+  /** userData 下的四个数据文件名（与 runtime.ts 装配路径一致） */
+  const CONFIG_FILE = 'config.json'
+  const SEEN_FILE = 'seen.json'
+  const STATE_FILE = 'state.json'
+  const FEEDBACK_FILE = 'feedback.json'
+
+  /**
+   * 同目录 tmp + rename 原子写（ConfigStore.writeAtomically 同款；备份导入
+   * 的段写回用）。mode 给了则先收紧 tmp 权限再 rename（config 段含明文凭据，
+   * 与 config.json 的 0o600 口径一致）。失败清 tmp 后向上抛（handler 收口）。
+   */
+  const writeAtomically = (filePath: string, payload: string, mode?: 0o600): void => {
+    const tmpPath = `${filePath}.tmp-${process.pid}-${randomInt(0, 0xffffff).toString(36)}`
+    mkdirSync(dirname(filePath), { recursive: true })
+    try {
+      writeFileSync(tmpPath, payload, mode !== undefined ? { encoding: 'utf-8', mode } : 'utf-8')
+      if (mode !== undefined) {
+        try {
+          chmodSync(tmpPath, mode)
+        } catch {
+          /* 权限收紧失败不阻断（rename 后内容仍在用户指定目录）；Windows 无 POSIX 位 */
+        }
+      }
+      renameSync(tmpPath, filePath)
+    } catch (err) {
+      try {
+        unlinkSync(tmpPath)
+      } catch {
+        // tmp 清理失败可忽略（残留无害，下次写会用新 tmp）
+      }
+      throw err
+    }
+  }
+
+  /**
+   * 读 userData 下的 JSON 文件并 parse；文件缺失 / 读失败 / JSON 坏 → fallback
+   * （坏文件记 warn：导出的是「应用实际会加载到的内容」——config 损坏时
+   * ConfigStore 会回默认，导出侧同样给默认信封，而不是让整个导出炸掉）。
+   */
+  const readSegment = (fileName: string, fallback: unknown): unknown => {
+    const filePath = join(rt.userDataDir, fileName)
+    try {
+      if (!existsSync(filePath)) return fallback
+      return JSON.parse(readFileSync(filePath, 'utf-8'))
+    } catch (err) {
+      rt.logger.warn(
+        `[backup] read ${fileName} failed, exporting fallback: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return fallback
+    }
+  }
+
+  ipcMain.handle(IPC.exportBackup, async (event): Promise<BackupExportResult> => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender) ?? undefined
+      const opts = {
+        defaultPath: `forumwatch-backup-${formatLocalDate().replaceAll('-', '')}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      }
+      const picked = win !== undefined ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
+      if (picked.canceled || picked.filePath === undefined || picked.filePath === '') {
+        return { ok: false, error: '已取消导出' }
+      }
+      // 四段各取已解析的 JSON 值；缺失/坏文件回退到与内核读路径同口径的默认信封
+      const config = readSegment(CONFIG_FILE, { schemaVersion: 3, config: rt.store.get() })
+      const seen = readSegment(SEEN_FILE, { schemaVersion: 2, seen: [] })
+      const state = readSegment(STATE_FILE, { schemaVersion: 2, sources: {} })
+      const feedback = readSegment(FEEDBACK_FILE, undefined) // 缺文件 → undefined → 不落键
+      const text = packBackup({
+        appVersion: app.getVersion(),
+        config,
+        seen,
+        state,
+        ...(feedback !== undefined ? { feedback } : {})
+      })
+      // 用户所选路径直接写（非原子：目标是用户目录而非 userData，中途断电
+      // 最坏残留半份文件，重导即可）；内容含明文凭据 → 新建即 0o600
+      writeFileSync(picked.filePath, text, { encoding: 'utf-8', mode: 0o600 })
+      rt.logger.info(`backup exported to ${picked.filePath}`)
+      return { ok: true, path: picked.filePath }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.importBackup, async (event): Promise<BackupImportResult> => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender) ?? undefined
+      const picked =
+        win !== undefined
+          ? await dialog.showOpenDialog(win, {
+              properties: ['openFile'],
+              filters: [{ name: 'JSON', extensions: ['json'] }]
+            })
+          : await dialog.showOpenDialog({
+              properties: ['openFile'],
+              filters: [{ name: 'JSON', extensions: ['json'] }]
+            })
+      const filePath = picked.filePaths[0]
+      if (picked.canceled || filePath === undefined) {
+        return { ok: false, error: '已取消导入' }
+      }
+      // 验包（kind/版本/段形状；错误消息人读中文，UI 原样展示）
+      const unpacked = unpackBackup(readFileSync(filePath, 'utf-8'))
+      if (!unpacked.ok) return { ok: false, error: unpacked.error }
+      const plan = restorePlan(unpacked.data, { appVersion: app.getVersion() })
+      // 按段写回（各自原子；不做 .bak 备份——覆盖风险由 UI 导入前的确认文案承担）
+      writeAtomically(join(rt.userDataDir, CONFIG_FILE), JSON.stringify(plan.config, null, 2), 0o600)
+      if (plan.seen === null) {
+        // seen 段无效：删除现有 seen.json，引擎下次启动空集重建 + 补基线
+        // （state 的 baselineDone 已由 restorePlan 强制重置，ADR 8.9）
+        rmSync(join(rt.userDataDir, SEEN_FILE), { force: true })
+      } else {
+        writeAtomically(join(rt.userDataDir, SEEN_FILE), JSON.stringify(plan.seen))
+      }
+      writeAtomically(join(rt.userDataDir, STATE_FILE), JSON.stringify(plan.state, null, 2))
+      // feedback 与 seen 有效性无耦合：备份里给了才写；缺键不动现有 feedback.json
+      if (unpacked.data.feedback !== undefined) {
+        writeAtomically(
+          join(rt.userDataDir, FEEDBACK_FILE),
+          JSON.stringify(unpacked.data.feedback, null, 2)
+        )
+      }
+      // 内存不热换（store/engine 手里的还是旧值）：重启生效，needsRestart 恒 true
+      rt.logger.info(`backup imported from ${basename(filePath)}; restart required`)
+      return { ok: true, needsRestart: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
   })
 }

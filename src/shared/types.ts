@@ -41,6 +41,15 @@
  * - TelegramConfig 类型保留导出：仅 migrations/notify 读兼容与凭据访问器复用。
  * - HitRecord 增加可选 notifyDetail（per-channel 推送明细，键=channelId；W3
  *   router 落盘，本轮 engine 单 notifier 仍写 notifiedAt/notifyError 聚合口径）。
+ *
+ * R8-A 变更（2026-09-19，E2 引擎看门狗 + E3 Cloudflare B 计划）：
+ * - EngineStatus 增加可选 watchdog（runtime 层附加的看门狗观测面，engine 不写；
+ *   INITIAL 补默认 { lastTriggeredAt: null, count: 0 }，旧快照读者容忍缺失）。
+ * - （E3 的能力声明在 src/main/monitor/types.ts 的 SourceAdapter 上，不在此文件。）
+ *
+ * R9-W1 变更（2026-09-19，DEC-6 Telegram bot 双向遥控）：
+ * - NotifyConfig 增加 remoteControl（enabled + allowedChatIds，默认关/空列表）：
+ *   加法字段，不 bump schemaVersion；sanitize 见 store.ts sanitizeNotify。
  */
 
 /** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
@@ -296,6 +305,19 @@ export interface NotifyConfig {
     /** 'HH:MM' 终点 */
     endHHMM: string
   }
+  /**
+   * Telegram 遥控（R9-W1，DEC-6）：经 bot 的 getUpdates 长轮询接收指令
+   * （/status /pause /resume /poll /help），实现双向遥控。默认关闭。
+   * 就绪条件 = enabled 且存在就绪 telegram 通道（凭据齐备）；允许清单外的会话
+   * 一律静默忽略（硬闸，不回复）；主 Chat ID（第一个就绪 telegram 通道的 chatId）
+   * 隐含允许。注意：启用后本应用独占该 bot 的 getUpdates——其他工具轮询同一
+   * bot 会互相 409（坑8）。
+   */
+  remoteControl: {
+    enabled: boolean
+    /** 允许发指令的额外 Chat ID（字符串原样，可含负数群 id；主 chatId 隐含在内） */
+    allowedChatIds: string[]
+  }
 }
 
 /** 路由规则的匹配条件（W3 router 消费；全部字段可选，空 when 的规则由 sanitize 整条弃） */
@@ -382,7 +404,9 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   notify: {
     mode: 'instant',
     digestIntervalMin: 15,
-    quietHours: { enabled: false, startHHMM: '23:00', endHHMM: '08:00' }
+    quietHours: { enabled: false, startHHMM: '23:00', endHHMM: '08:00' },
+    // R9-W1：Telegram 遥控默认关闭（允许清单为空 = 仅主 Chat ID 可发指令）
+    remoteControl: { enabled: false, allowedChatIds: [] }
   },
   routing: [],
   notifyEnabled: true,
@@ -466,6 +490,15 @@ export interface EngineStatus {
    * 容忍缺失（等价 0）；engine 的 getStatus 每次快照恒下发当前值。
    */
   pendingNotifyCount?: number
+  /**
+   * 引擎看门狗观测面（R8-A 任务一，E2）：desktop 装配方持有的 EngineWatchdog
+   * 状态，随状态广播时**在 runtime 层附加**（快照对象上挂字段再发，见
+   * runtime.emitStatus）——engine 自身不写它（status 是 engine 的事实源，
+   * watchdog 是 runtime 侧旁路观测）。**可选**：旧状态快照与 headless 装配没有
+   * 此字段，消费方容忍缺失（等价「无看门狗」）；lastTriggeredAt=null 且 count=0
+   * = 看门狗在位但从未触发。
+   */
+  watchdog?: { lastTriggeredAt: string | null; count: number }
 }
 
 export const INITIAL_ENGINE_STATUS: EngineStatus = {
@@ -479,6 +512,8 @@ export const INITIAL_ENGINE_STATUS: EngineStatus = {
   totalHits: 0,
   sources: [],
   pendingNotifyCount: 0,
+  // R8-A：看门狗默认态（engine 快照里的占位值；广播路径由 runtime 附加实时值覆盖）
+  watchdog: { lastTriggeredAt: null, count: 0 },
   ai: {
     configured: false,
     effectiveMode: 'literal',

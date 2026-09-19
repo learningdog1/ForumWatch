@@ -35,6 +35,16 @@ export interface SourceAdapter {
    */
   readonly creationOrderedIds?: boolean
   /**
+   * 能力声明（R8-A 任务二，E3 Cloudflare B 计划）：本 adapter 实例带有**浏览器
+   * 网络栈降级 fetch**——主 fetch 被 Cloudflare 挑战（403 / cf-mitigated:
+   * challenge）时，adapter 内部用注入的 fallback fetch（Electron net.fetch，
+   * Chromium 网络栈/系统代理，TLS 指纹与 undici 不同）重发同一请求。降级完全在
+   * adapter 内部完成（成功对 engine 透明；双挑战仍抛 ChallengeError，状态照旧
+   * challenged），**engine 不消费本声明**——它仅用于观测/文档：哪些来源实例具备
+   * B 计划能力由装配方决定（desktop 传 fallbackFetchFn，headless 暂不传）。
+   */
+  readonly browserStackFallback?: true
+  /**
    * 抓取最新帖子列表（第五轮起，DEC-8：可选 `opts.pages` 请求补抓后续页）。
    * - opts 缺省 / pages 缺省 = 仅第 1 页（既有行为不变）。
    * - 第 2 页起的补抓语义由 R5-P2a 在各 adapter 实现，本轮只定契约：现有零参
