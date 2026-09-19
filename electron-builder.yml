@@ -2,8 +2,8 @@
 # 策略见 docs/decisions.md 第 4 条：双轨产出、不签名、无原生模块。
 # 注意：mac 未在 CLI 指定 --arch 时按当前机器架构打包（本机 arm64 / CI macos-latest 也是 arm64），
 # 不是双架构；要 x64 用 `--x64`，要单一包覆盖两种架构用 `--universal`（arch 只能走 CLI，config 无此字段）。
-appId: com.colmidad.nodeseek-monitor
-productName: NodeSeek Monitor
+appId: com.colmidad.forumwatch
+productName: ForumWatch
 
 directories:
   buildResources: resources

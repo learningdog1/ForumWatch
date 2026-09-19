@@ -1,8 +1,8 @@
 {
-  "name": "rss-monitor",
-  "productName": "NodeSeek Monitor",
-  "version": "0.1.0",
-  "description": "Monitor NodeSeek new topics by keywords, push hits to Telegram in real time",
+  "name": "forumwatch",
+  "productName": "ForumWatch",
+  "version": "0.2.0",
+  "description": "ForumWatch - multi-forum new topic monitor with keyword & AI semantic matching, Telegram push and AI daily digest",
   "author": "colmidad",
   "license": "MIT",
   "private": true,
@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "engine:headless": "tsx scripts/headless.ts",
+    "icons": "tsx scripts/gen-icons.ts",
     "dist": "electron-vite build && electron-builder",
     "dist:mac": "electron-vite build && electron-builder --mac",
     "dist:win": "electron-vite build && electron-builder --win nsis"
@@ -31,6 +32,7 @@
     "electron-vite": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "sharp": "^0.34.5",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0",
     "vite": "^7.0.0",

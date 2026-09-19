@@ -73,3 +73,25 @@
 ## 事实来源
 
 electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853（jsign）、Electron releases.json（44.4.3=Node 24.21.0）、npm registry 实测版本、NodeSeek 首页/RSS 实测（curl，2026-09-19）。
+
+---
+
+# 第二轮决策（2026-09-19，多论坛化 + AI 能力，ultrabrain 裁定）
+
+**D1 命名与迁移**：产品名 **ForumWatch**（productName 只用 ASCII；中文副标题放 UI："ForumWatch · 论坛监控"）；appId `com.colmidad.forumwatch`。userData 迁移选首启一次性拷贝（旧目录 `appData/NodeSeek Monitor` → 新目录，拷 config/seen/state，逐文件 tmp+rename；**不变式：seen 拷贝失败必须重置 baselineDone**——rebuiltFromCorrupt 覆盖不了"没拷过来"；绝不删旧目录；新 config.json 存在即"已迁移"标记）。Windows 改 appId 后新旧双装可同时运行=双推送，发布说明置顶"先退旧再装新"。mac 登录项由 applyConfigSideEffects 的差异比对自动重注册。
+
+**D2 配置 v2**：关键词 v2 全局共享（per-source 覆盖留给 v3 加法迁移）；**baselineDone/totalHits 按 source 拆分**（防风暴语义，不是过度设计）。形状见 `src/shared/types.ts`（sources: SourceConfig[] / ai: AiConfig）。迁移函数放 `src/main/config/migrations.ts` 纯函数（零 electron，ConfigStore envelope 解析后调用）；seen.json v1 裸 id → `nodeseek:{id}` 前缀（视为成功加载，不置 rebuiltFromCorrupt）；state.json v2 = `{schemaVersion:2, sources:Record<id,{baselineDone,totalHits}>}`。
+
+**D3 多来源引擎**：单 MonitorEngine 内循环多 source。`EngineDeps.getSources: () => SourceAdapter[]` 访问器（**不是构造期数组**，否则热更新断裂）；adapter 加 `readonly id`。每 source 独立 try/catch、独立失败计数走同一退避曲线（记 cooldownUntil）。EngineStatus 聚合字段保留 + 新增 `sources: SourceStatus[]`；聚合 health 取最差。seen 键 engine 组装 `${sourceId}:${topic.id}`；Topic.sourceId 由 engine 盖章。已知限制：全局 scheduler 间隔 = max(配置间隔, 最差 source 剩余退避)，v2 单 source 等价现状。
+
+**D4 语义评估**：批式单请求（每轮一次，cap 12 帖）+ pollOnce 内联 await（30s 超时）+ **评估失败不计入 consecutiveFailures**（记 lastAiError）+ **未决不入 seen**（下轮重评，滚出首页即止，对齐 8.10）+ 排除词永远先于 AI 一票否决。管线：排除词 → literal（'both' 命中即推不走 AI）→ 剩余 unseen 进 AI（'semantic'/'both'）。协议：OpenAI 兼容 chat/completions，temperature 0，response_format json_object（失败兜底取响应中首个 {} 块）；system"仅当明确相关才判 hit，宁可漏报不要误报"；响应缺 id 视为未决。语义档 interests 为空 = 永不命中；Provider 未配置 → 整体降级 literal（ai-unconfigured 标志）。每日调用上限 **300**（常量，本地自然日滚动），耗尽降级 literal-only。verdict 仅内存 Map（缓存"已判 hit 推送重试中"的帖子，重启重评一次成本可忽略）。
+
+**D5 日报**：独立 setTimeout 重排定时器 + 启动/resume 时检查 + **仅当天补做不回溯**；触发条件 `now >= 今日 timeHHMM（本地时区）` 且 `reports/<today>.md` 不存在且 desired==='running'；文件不存在即重试触发器 + 内存 attempts≤3 防死循环。当天命中落 `hits/YYYY-MM-DD.jsonl`（追加，本地日期分桶），日报存 `reports/YYYY-MM-DD.md`。零命中也生成"今日无命中"并推送（心跳）。TG 用 `sendRaw`（复用串行队列/限流），HTML parse_mode，3500 字符分段（UTF-16 口径，按行聚合切点），尾缀"（续 N）"。
+
+**D6 AI 网络与安全**：第三个 aiClient（独立实例，defaultTimeoutMs 30s）；复用二元 proxyScope：'all' → AI 走代理，'telegram-only' → AI 直连（DeepSeek/GLM 大陆直连可用）。`redactSecret(s)`：≤8 字符全 `***`，否则前3+`***`+后2；Authorization 头绝不进日志；AI 抛错消息一律脱敏；apiKey 与 botToken 同待遇（config.json 600 权限，getConfig 返回全量）。baseUrl sanitize 去尾斜杠，请求拼 `/chat/completions`。
+
+**D7 图标管线（ADR 3 豁免）**："豁免：devDependencies 允许原生二进制（现例 sharp，仅 scripts/gen-icons.ts 图标栅格化，PNG 产物提交入库、CI 不执行该脚本）。原约束收窄为：package.json 的 dependencies 禁原生模块，应用产物不含任何原生二进制。"尺寸：resources/icon.svg（512 viewBox 唯一事实源）→ icon.png 512；托盘 mac `trayTemplate.png`/`@2x`（纯黑+alpha，命名大小写敏感）+ win 彩色 `tray.png`/`@2x`。SVG 约束（librsvg）：纯 path + 至多一个 linearGradient，不用 filter/mask/style/text，fill-rule evenodd；mac 全出血留 20% 安全区，win 留 10% 透明边。
+
+**D8 UI 路线**：保留零框架手写 CSS + 令牌升级（不引入 tailwind/radix）。五个方向按性价比：① emoji 全换内联 SVG sprite（stroke 1.5px、currentColor、16/20 两档，品牌标复用 app 图标单体路径）；② 排版纪律（tnum 等宽数字、12/13/15/20/28 字号阶、4px 栅格、标题字距）；③ 材质层次（双层阴影、圆角 6/10/14 阶、侧栏带 accent 色相、dark 拉开明度差）；④ 微交互（120-180ms transition、focus-visible ring、新命中行入场动画）；⑤ 空态插画 + 引导文案。布局骨架不动。
+
+**新增坑清单**：① getSources 必须是访问器；② 新旧双装=双推送（发布说明置顶）；③ 迁移 seen 拷贝失败 → 强制重置 baselineDone；④ hits/reports 日分桶与 timeHHMM 判断必须本地时区（ISO slice(0,10) 是错的）；⑤ headless.ts 必须同步接线 AI 能力（或显式 no-op）；⑥ 'both' 模式 AI 判 hit 但推送失败的帖子不入 seen 下轮重评——verdict Map 为这个角落存在；⑦ TG 4096 是 UTF-16 单位数，分段切点按行聚合；⑧ sharp 平台二进制只进 lockfile 不进产物，无需 .npmrc。
