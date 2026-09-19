@@ -10,18 +10,33 @@
  * 保存走 AppConfig v2 全量透传：sources 与 ai 段都由本页表单构建
  * （ai 段来自 AI 模型/监控模式/每日总结三张卡，sources 来自「来源」卡——
  *  SourceCard 组件内管启停/增删/预设/分类与作者过滤，回写 draft.sources）；
- *  priceRules / similarity（R5-P2c）分别来自「价格规则」「相似降噪」卡。
+ *  priceRules / similarity（R5-P2c）分别来自「价格规则」「相似降噪」卡；
+ *  channels / notify / routing（R6-W4）来自「推送通道 / 推送策略 / 路由规则」卡。
  * "发送测试消息 / 测试连接 / 匹配测试台"用的都是**已保存**配置：表单 dirty 时先
- * 提示保存而非直接发送。dirty 状态通过 onDirtyChange 上报给外壳。
+ * 提示保存而非直接发送（测试消息 R6-W4 起广播全部就绪通道）。dirty 状态通过
+ * onDirtyChange 上报给外壳。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { AppConfig, MatchMode, PriceRuleConfig, ProxyScope, SourceConfig } from '@shared/types'
+import type {
+  AppConfig,
+  ChannelConfig,
+  MatchMode,
+  NotifyConfig,
+  PriceRuleConfig,
+  ProxyScope,
+  RoutingRule,
+  SourceConfig
+} from '@shared/types'
+import { ChannelsCard } from '../components/ChannelsCard'
+import { isChannelReadyUi } from '../components/ChannelsCard'
 import { Field } from '../components/Field'
 import { KeywordTagInput } from '../components/KeywordTagInput'
 import { MatchTestCard } from '../components/MatchTestCard'
+import { NotifyCard } from '../components/NotifyCard'
 import { RulesCard } from '../components/RulesCard'
+import { RoutingCard } from '../components/RoutingCard'
 import { SourceCard } from '../components/SourceCard'
-import { IconBolt, IconEye, IconEyeOff, IconSend } from '../components/icons'
+import { IconBolt, IconEye, IconEyeOff } from '../components/icons'
 import { formatClock } from '../lib/time'
 
 interface Draft {
@@ -31,8 +46,19 @@ interface Draft {
   pollIntervalText: string
   proxyUrl: string
   proxyScope: ProxyScope
-  botToken: string
-  chatId: string
+  /**
+   * 推送通道列表（R6-W1 起数据面在；R6-W4 由「推送通道」卡完整管理增删启停
+   * 与四类型凭据编辑）
+   */
+  channels: ChannelConfig[]
+  /**
+   * 推送策略（R6-W4「推送策略」卡：instant/digest + 免打扰时段）
+   */
+  notify: NotifyConfig
+  /**
+   * 路由规则（R6-W4「路由规则」卡：按条件分流到指定通道）
+   */
+  routing: RoutingRule[]
   notifyEnabled: boolean
   launchAtLogin: boolean
   aiBaseUrl: string
@@ -80,8 +106,16 @@ function toDraft(c: AppConfig): Draft {
     pollIntervalText: String(c.pollIntervalSec),
     proxyUrl: c.proxyUrl,
     proxyScope: c.proxyScope,
-    botToken: c.telegram.botToken,
-    chatId: c.telegram.chatId,
+    channels: c.channels.map((ch) => ({ ...ch })),
+    notify: {
+      ...c.notify,
+      quietHours: { ...c.notify.quietHours }
+    },
+    routing: c.routing.map((r) => ({
+      ...r,
+      when: { ...r.when },
+      channelIds: [...r.channelIds]
+    })),
     notifyEnabled: c.notifyEnabled,
     launchAtLogin: c.launchAtLogin,
     aiBaseUrl: c.ai.provider.baseUrl,
@@ -106,7 +140,6 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
   const [saveMsg, setSaveMsg] = useState<Msg | null>(null)
   const [testing, setTesting] = useState(false)
   const [testMsg, setTestMsg] = useState<Msg | null>(null)
-  const [showToken, setShowToken] = useState(false)
   const [aiTesting, setAiTesting] = useState(false)
   const [aiTestMsg, setAiTestMsg] = useState<Msg | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
@@ -167,7 +200,9 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
     try {
       const cfg: AppConfig = {
         // sources 来自「来源」卡（SourceCard 回写 draft）；ai 段由本页三张 AI 卡
-        // 构建，其余字段覆盖为本表单管理的值
+        // 构建，其余字段覆盖为本表单管理的值。channels/notify/routing（R6-W4）
+        // 来自「推送通道 / 推送策略 / 路由规则」三卡——旧顶层 telegram 键不再
+        // 发送（写路径只写新形状）
         ...saved,
         includeKeywords: draft.includeKeywords,
         excludeKeywords: draft.excludeKeywords,
@@ -175,7 +210,10 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
         pollIntervalSec: intervalValid ? Math.floor(intervalNum) : 15,
         proxyUrl: proxyTrim,
         proxyScope: draft.proxyScope,
-        telegram: { botToken: draft.botToken.trim(), chatId: draft.chatId.trim() },
+        channels: draft.channels,
+        // R6-W4：推送策略与路由规则（「推送策略」「路由规则」卡回写 draft 透传）
+        notify: draft.notify,
+        routing: draft.routing,
         notifyEnabled: draft.notifyEnabled,
         launchAtLogin: draft.launchAtLogin,
         priceRules: draft.priceRules,
@@ -217,6 +255,10 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
     }
   }
 
+  /**
+   * 发送测试消息（R6-W4 起广播全部就绪通道，不走路由）：dirty 时先提示保存
+   * （主进程用的是已保存配置）；无就绪通道时提示先配置。
+   */
   async function sendTest(): Promise<void> {
     if (draft == null) return
     if (dirty) {
@@ -226,17 +268,20 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
       })
       return
     }
-    if (draft.botToken.trim() === '' || draft.chatId.trim() === '') {
-      setTestMsg({ kind: 'err', text: '请先填写 Bot Token 与 Chat ID 再测试' })
+    if (!draft.channels.some(isChannelReadyUi)) {
+      setTestMsg({
+        kind: 'err',
+        text: '没有就绪的通道：请先在上方配好至少一个通道（凭据齐备且已启用）并保存'
+      })
       return
     }
     setTesting(true)
-    setTestMsg({ kind: 'pending', text: '正在发送测试消息…' })
+    setTestMsg({ kind: 'pending', text: '正在向全部就绪通道发送测试消息…' })
     try {
       const r = await window.api.engineControl('sendTest')
       setTestMsg(
         r.ok
-          ? { kind: 'ok', text: '✓ 测试消息已发送，请在 Telegram 中查收' }
+          ? { kind: 'ok', text: '✓ 测试消息已发送到全部就绪通道，请分别查收' }
           : { kind: 'err', text: `发送失败：${r.error}` }
       )
     } finally {
@@ -310,55 +355,29 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
         </Field>
       </section>
 
+      <ChannelsCard
+        channels={draft.channels}
+        onChange={(channels) => patch({ channels })}
+        test={{
+          testing,
+          msg: testMsg == null ? null : { kind: testMsg.kind, text: testMsg.text },
+          onSend: () => void sendTest()
+        }}
+      />
+
+      <NotifyCard notify={draft.notify} onChange={(notify) => patch({ notify })} />
+
+      <RoutingCard
+        routing={draft.routing}
+        onChange={(routing) => patch({ routing })}
+        sources={draft.sources}
+        priceRules={draft.priceRules}
+        channels={draft.channels}
+      />
+
       <RulesCard rules={draft.priceRules} onChange={(priceRules) => patch({ priceRules })} />
 
       <MatchTestCard sources={draft.sources} dirty={dirty} />
-
-      <section className="card">
-        <div className="card-head">
-          <span className="card-title">Telegram 推送</span>
-        </div>
-        <Field label="Bot Token" hint="来自 @BotFather，形如 123456:ABC-DEF...">
-          <div className="pw-wrap">
-            <input
-              className="input mono"
-              type={showToken ? 'text' : 'password'}
-              spellCheck={false}
-              autoComplete="off"
-              value={draft.botToken}
-              onChange={(e) => patch({ botToken: e.target.value })}
-            />
-            <button
-              type="button"
-              className="pw-toggle"
-              onClick={() => setShowToken((v) => !v)}
-              aria-label={showToken ? '隐藏 Token' : '显示 Token'}
-              title={showToken ? '隐藏 Token' : '显示 Token'}
-            >
-              {showToken ? <IconEyeOff size={14} /> : <IconEye size={14} />}
-            </button>
-          </div>
-        </Field>
-        <Field label="Chat ID" hint="个人或群组 id，来自 @userinfobot 或类似机器人。">
-          <input
-            className="input mono"
-            type="text"
-            spellCheck={false}
-            autoComplete="off"
-            value={draft.chatId}
-            onChange={(e) => patch({ chatId: e.target.value })}
-          />
-        </Field>
-        <Field label="测试推送" hint="按已保存的配置向该 Chat 发送一条测试消息。">
-          <div className="input-row">
-            <button type="button" className="btn" disabled={testing} onClick={() => void sendTest()}>
-              <IconSend size={14} />
-              {testing ? '发送中…' : '发送测试消息'}
-            </button>
-            {testMsg != null && <span className={`feedback ${testMsg.kind}`}>{testMsg.text}</span>}
-          </div>
-        </Field>
-      </section>
 
       <section className="card">
         <div className="card-head">

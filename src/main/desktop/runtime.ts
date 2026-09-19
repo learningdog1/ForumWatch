@@ -6,7 +6,8 @@
  *   'telegram-only' → site/ai 恒直连、tg 走代理；'all' → 都带；aiClient 默认
  *   超时 30s，D6）→ getSources adapter 工厂（按 config.sources 逐项构造：
  *   nodeseek/v2ex 按 id 惰性单例，rss 按项实例、url/label 变更时重建）/
- *   TelegramNotifier → AiProvider /
+ *   多通道推送装配（R6-W4：buildNotifiers → CompositeNotifier，包稳定壳
+ *   NotifierShell 供 engine/日报/ipc 持有，通道集合变化时热替换）→ AiProvider /
  *   SemanticEvaluator / CommentGenerator / DailyReportService（reportsDir=
  *   <userData>/reports）→ FileSeenStore / FileEngineState / HitsStore（<userData>/
  *   hits）→ PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑
@@ -48,7 +49,13 @@ import { RssSourceAdapter } from '../monitor/sources/rss'
 import { V2exSourceAdapter } from '../monitor/sources/v2ex'
 import type { SourceAdapter } from '../monitor/types'
 import { TelegramNotifier } from '../notify/telegram'
-import type { AppConfig, EngineStatus, HitRecord } from '../../shared/types'
+import { BarkNotifier } from '../notify/bark'
+import { NtfyNotifier } from '../notify/ntfy'
+import { WebhookNotifier } from '../notify/webhook'
+import { CompositeNotifier } from '../notify/composite'
+import { isChannelReady, type HitMessageInput, type Notifier } from '../notify/types'
+import type { FetchLike } from '../net/http-types'
+import type { AppConfig, ChannelConfig, EngineStatus, HitRecord } from '../../shared/types'
 import type { EventBroadcaster } from './ipc'
 
 /** 日报定时器 sleep 下限：即使 nextCheckAt 很近也至少 60s 一查（防空转） */
@@ -81,6 +88,13 @@ export class DesktopRuntime {
   private lastSiteProxy: string | null = null
   private lastTgProxy: string | null = null
   private lastAiProxy: string | null = null
+  /**
+   * 推送稳定壳（R6-W4）：engine / 日报 / ipc 共用的 Notifier 引用（构造期
+   * 创建，永不重建）；通道集合变化时只 replace 壳内 composite。
+   */
+  private readonly notifierShell: NotifierShell
+  /** 上次已生效的就绪通道签名（applyConfigSideEffects 据此只在变化时重建扇出） */
+  private lastReadyChannels: string
   /** nodeseek 惰性单例（首次 getSources 命中时构造；id 固定 'nodeseek'） */
   private nodeseekAdapter: HtmlSourceAdapter | null = null
   /** v2ex 按 id 惰性单例（构造签名带 id；常规配置就一项，退化为单例） */
@@ -167,10 +181,18 @@ export class DesktopRuntime {
       }
       return out
     }
-    const notifier = new TelegramNotifier({
-      post: (url, init) => this.tgClient.post(url, init),
-      getConfig: () => this.store.get().telegram
-    })
+    // R6-W4 多通道推送装配（DEC-9 收口）：按 initial.channels 为**就绪**通道
+    // （isChannelReady）构造发送器，包进 CompositeNotifier（路由扇出 + 聚合），
+    // 外面再包 NotifierShell——engine / 日报 / ipc 测试消息持壳，通道集合变化时
+    // applyConfigSideEffects 热替换壳内实现（见 NotifierShell 注释）。凭据/
+    // 启停/路由全部现读 store（发送时/路由时），只有就绪通道集合变化才重建。
+    this.lastReadyChannels = readyChannelSignature(initial)
+    this.notifierShell = new NotifierShell(
+      new CompositeNotifier(this.buildNotifiers(initial), {
+        getRouting: () => this.store.get().routing
+      })
+    )
+    const notifier: Notifier = this.notifierShell
 
     // AI 装配（D4/D6 + 第三轮锐评）：provider 每次调用重读 store（热更新）；
     // evaluator 批式评估；锐评生成器与 evaluator 共用同一 provider 实例
@@ -283,6 +305,9 @@ export class DesktopRuntime {
    * - 三个 HttpClient 的 setProxy（'telegram-only' → site/ai 恒直连）——**仅代理值
    *   变化时调用**：setProxy 会销毁重建 dispatcher、中断在途请求，保存无关配置
    *   （如只改关键词）不应打断网络；
+   * - 推送扇出热重建（R6-W4）——仅当**就绪通道集合**变化（readyChannelSignature
+   *   不一致）时 replace 壳内 composite；通道凭据/启停由发送器的 getConfig 每次
+   *   发送前现读、路由由 composite 的 getRouting 现读，均不需要重建；
    * - 开机自启（app.setLoginItemSettings）。
    * 单项失败只记日志，不阻断其余项。
    */
@@ -327,6 +352,19 @@ export class DesktopRuntime {
     } catch (err) {
       this.logger.error(`setLoginItemSettings failed: ${describe(err)}`)
     }
+    // 推送扇出热重建（R6-W4）：就绪通道集合变化才 replace 壳内 composite
+    // （凭据/启停/路由热更新都不需要——getConfig/getRouting 现读，见
+    // NotifierShell 注释）。replace 只换壳内引用，engine/日报手里的壳不动。
+    const signature = readyChannelSignature(cfg)
+    if (signature !== this.lastReadyChannels) {
+      this.notifierShell.replace(
+        new CompositeNotifier(this.buildNotifiers(cfg), {
+          getRouting: () => this.store.get().routing
+        })
+      )
+      this.lastReadyChannels = signature
+      this.logger.info(`notify fan-out rebuilt (ready channels: [${signature}] or none)`)
+    }
   }
 
   /** 退出路径统一走这里（before-quit 与 will-quit 之间调用）；幂等 */
@@ -352,6 +390,81 @@ export class DesktopRuntime {
   }
 
   // ---- 内部实现 ----------------------------------------------------------
+
+  /**
+   * 按配置构造**就绪**通道的发送器列表（R6-W4；仅 isChannelReady 通过的通道，
+   * 未就绪通道不构造——engine 侧 configured 闸之外，composite 也不给无凭据
+   * 通道留扇出位）。client 路由对齐 proxyScope 语义：只有 telegram 走 tgClient
+   * （恒代理作用域），bark/ntfy/webhook 走 siteClient——siteClient 的代理随
+   * proxyScope 热更新（'all' 才带代理），telegram-only 时三新通道与 site/ai
+   * 同待遇直连。getConfig 每次发送前按 id 重读 store：找不到（通道被删）或类型
+   * 已变时回空凭据，发送器自身 fail-fast 抛 not configured（正常流程 engine 的
+   * configured 闸已拦下，这是签名未变时的兜底）。
+   */
+  private buildNotifiers(cfg: AppConfig): Notifier[] {
+    /** 按 id+type 现读通道（getConfig 访问器的公共形状） */
+    const channelNow = (id: string): ChannelConfig | undefined =>
+      this.store.get().channels.find((ch) => ch.id === id)
+    const post: FetchLike = (url, init) => this.siteClient.post(url, init)
+    const out: Notifier[] = []
+    for (const ch of cfg.channels) {
+      if (!isChannelReady(ch)) continue
+      if (ch.type === 'telegram') {
+        out.push(
+          new TelegramNotifier({
+            id: ch.id,
+            post: (url, init) => this.tgClient.post(url, init),
+            getConfig: () => {
+              const cur = channelNow(ch.id)
+              return cur !== undefined && cur.type === 'telegram'
+                ? { botToken: cur.botToken, chatId: cur.chatId }
+                : { botToken: '', chatId: '' }
+            }
+          })
+        )
+      } else if (ch.type === 'bark') {
+        out.push(
+          new BarkNotifier({
+            id: ch.id,
+            post,
+            getConfig: () => {
+              const cur = channelNow(ch.id)
+              return cur !== undefined && cur.type === 'bark'
+                ? { deviceKey: cur.deviceKey, ...(cur.serverUrl !== undefined ? { serverUrl: cur.serverUrl } : {}) }
+                : { deviceKey: '' }
+            }
+          })
+        )
+      } else if (ch.type === 'ntfy') {
+        out.push(
+          new NtfyNotifier({
+            id: ch.id,
+            post,
+            getConfig: () => {
+              const cur = channelNow(ch.id)
+              return cur !== undefined && cur.type === 'ntfy'
+                ? { topic: cur.topic, ...(cur.serverUrl !== undefined ? { serverUrl: cur.serverUrl } : {}) }
+                : { topic: '' }
+            }
+          })
+        )
+      } else {
+        out.push(
+          new WebhookNotifier({
+            id: ch.id,
+            post,
+            getConfig: () => {
+              const cur = channelNow(ch.id)
+              return cur !== undefined && cur.type === 'webhook'
+                ? { url: cur.url, ...(cur.secret !== undefined ? { secret: cur.secret } : {}) }
+                : { url: '' }
+            }
+          })
+        )
+      }
+    }
+    return out
+  }
 
   /** 日报自循环定时器（D5）：执行后按 nextCheckAt 重排；sleep ∈ [60s, 30min] */
   private startReportTimer(): void {
@@ -443,6 +556,52 @@ export function getRuntime(): DesktopRuntime {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * 稳定壳（R6-W4）：engine / DailyReportService / ipc 测试消息持有的 Notifier。
+ * 四个方法全部委托 `current`；通道集合变化时 applyConfigSideEffects 用
+ * `replace()` 换内部 CompositeNotifier——依赖方手里的引用永不变（engine deps
+ * 不重建、日报服务不重造），扇出集合却是新的。getRouting 在 composite 构造时
+ * 以闭包现读 store（路由热更新免重建），通道凭据经各发送器的 getConfig 访问器
+ * 每次发送前现读（凭据热更新同样免重建）——**只有就绪通道集合本身变化才需要
+ * replace**（见 readyChannelSignature）。
+ */
+class NotifierShell implements Notifier {
+  private current: Notifier
+  constructor(initial: Notifier) {
+    this.current = initial
+  }
+  /** 热替换内部实现（applyConfigSideEffects 的通道集合变化分支） */
+  replace(next: Notifier): void {
+    this.current = next
+  }
+  get id(): string {
+    return this.current.id
+  }
+  sendHit(input: HitMessageInput): Promise<void> {
+    return this.current.sendHit(input)
+  }
+  sendRaw(text: string): Promise<void> {
+    return this.current.sendRaw(text)
+  }
+  sendTest(): Promise<void> {
+    return this.current.sendTest()
+  }
+}
+
+/**
+ * 就绪通道集合的重建签名（R6-W4）：`type:id` 按序拼接。只看**就绪**通道
+ * （isChannelReady：enabled × 已实现类型 × 凭据齐备）——buildNotifiers 只为
+ * 就绪通道构造发送器，未就绪通道进出列表不改变扇出集合，不值得为此中断在途
+ * 发送重建 composite。签名变化 = 就绪集合变化 = 需要重建；同 id 换类型（手工
+ * 编辑 config.json 的边缘情况）也因 type 参与签名而被捕获。
+ */
+function readyChannelSignature(cfg: AppConfig): string {
+  return cfg.channels
+    .filter((ch) => isChannelReady(ch))
+    .map((ch) => `${ch.type}:${ch.id}`)
+    .join('|')
 }
 
 /** HttpClient 构造对非法代理 URL 会抛（fail-fast）；装配期降级为直连并记日志 */

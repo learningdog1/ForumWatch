@@ -2,6 +2,9 @@
  * 监控台：状态卡（含来源/AI 状态与操作条）+ 最近命中列表 + 运行日志。
  * 数据全部来自 useApi（全量 + 增量）；按钮逻辑在本层，
  * 摆放与分级（danger/普通/主按钮）在 StatusCard 的 subactions。
+ * R6-W4：状态卡下方补「挂起待推送」一行（status.pendingNotifyCount > 0 时显示
+ * ——免打扰/摘要模式挂起队列的可观测性；StatusCard 组件不在本轮改动清单，
+ * 暂以独立行呈现，数值随状态快照实时下发）。
  */
 import { useState } from 'react'
 import { HitList } from '../components/HitList'
@@ -59,6 +62,15 @@ export function Dashboard(props: ApiState) {
           feedback
         }}
       />
+
+      {(status.pendingNotifyCount ?? 0) > 0 && (
+        <div
+          className="notice muted-notice"
+          title="免打扰时段内或摘要模式下挂起的命中：不入已读、暂不计数，免打扰窗尾 / 摘要到点后合并推送（重启丢弃，仍在首页的帖子会重新处理）"
+        >
+          ⏳ 挂起待推送: {status.pendingNotifyCount} 条
+        </div>
+      )}
 
       <HitList
         hits={hits}
