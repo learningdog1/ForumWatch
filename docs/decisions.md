@@ -35,7 +35,7 @@
 
 - `GET https://www.nodeseek.com/?sort=createTime` —— 裸 HTTP 客户端 + 普通 Mozilla UA 返回 200（~90KB），`ul.post-list > li.post-list-item` 含帖子 ID（`/post-{id}-1` 链接）/标题/作者/分类/浏览评论数/最后回复时间/置顶标记。按创建时间排序。
 - `/rss`、`/api/topics` 等 —— 403 且 `cf-mitigated: challenge`（Cloudflare 主动挑战），纯后端客户端不可用。
-- 翻页 `?sort=createTime&page-2` 可用（每页 49 条）；MVP 只监控第 1 页。
+- 翻页 `?sort=createTime&page-2` 可用（每页 49 条）；MVP 只监控第 1 页。**（此记录已过时：2026-09-19 第五轮复测推翻——query 形态页码被服务端忽略、路径形态 403，当前对 NodeSeek 实际无效，见第五轮 D14。）**
 
 防护条款（写进 adapter）：
 
@@ -152,3 +152,22 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 - **坑（手工改配置须为 3）**：headless 数据目录（或任何手工编辑 config.json 的场景）里信封的 `schemaVersion` 必须是 **3**——迁移链只认 1/2/3，写成其他值会走损坏备份路径回默认配置。
 
 **新增坑清单（编号沿用 ultrabrain 原表，与代码注释一致）**：① sanitize 按 type 分派的丢弃纪律（未知 type / 非法 url 整项丢，不猜测修复）；② 静态 id→adapter 注册表在判别联合下不成立（rss 按项建实例、url 变更重建）；③ 外链白名单对新源类型失效（rss 走 url host 派生）；④ sanitize 隐式 schema 白名单（契约加字段必须同 commit 补 sanitize）；⑫ seen 全局 1000 在多源下被容量淘汰先于时间淘汰击穿（1000 + 500×(n−1) 扩容）。
+
+---
+
+# 第五轮决策（2026-09-19，匹配与降噪，ultrabrain 裁定）
+
+**D14 匹配与降噪包（DEC-2 / DEC-4 / DEC-8 裁定结论与修正口径 + 解析兼容经验 + page-2 现实复测修正）**：
+
+- **价格规则 = 第三种命中通道（DEC-2，裁定修正口径：独立于 matchMode）**：`matchedBy='rule'`。规则 `{label?, cycle(yearly/monthly/any), maxPrice?, currency(CNY/USD/any), minTrafficGB?, keywords?[]}` 条件 AND、逐条评估**首条命中即返回**；管线位置**先于字面**（第 6 步）——命中即得、短路 literal 与语义批，同一帖只记一种命中方式（规则优先）；**不受 matchMode 门控**：matchMode 只分派字面关键词 vs AI 语义，规则是零成本结构化匹配，semantic-only 下同样生效（引擎测试锁定该语义）。标题提取（extractDeal）总原则「宁缺勿错」——识别不了的形态不产出字段、让规则不命中，而不是猜近似值喂给比较：
+  - 周期：认 `年付/每年/包年/一年/N年（数字或中文数字，≤3 位）/X/年/annual/per year/yr/yearly` 与 `月付（含 N月付）/每月/X/月/monthly/per month/独立词 mo`；**半年付/季付/双月付不识别**（闸门：`年付/月付` 前是 半/季/双 挡掉、`annual` 前是字母或连字符挡掉 semi-annual、裸「一月」不算月付）；年付与月付信号同现取 yearly（固定优先级，行为可预测）。
+  - 价格：认 `¥99/￥99/99元/99 块`（CNY）与 `$9.9/9.9刀/USD 20`（USD），千分位（`1,299`）优先匹配；**裸数字（「年付88」的 88）无币种标记不算价格**；多价格标题取首个（简单可预测，多价对比帖建议用规则 keywords 缩小范围而不是让提取器猜「最便宜」）；`99元素` 由负向断言挡掉。
+  - 流量：认 `500G/GB、0.5T/TB、1024M/MB`（统一换算 GB，M 级保留一位小数）；数字前是字母（`2C2G` 的 2G 是内存）、单位后是 ASCII 字母或「内」（`500Mbps` 带宽、`2G内存`）不算；`2GB RAM` 带空格仍是已知残余误读，靠规则 keywords 兜底；`不限流量/unlimited` 不设 trafficGB（无约束，不返回 Infinity）。
+  - **「无条件规则 = 全匹配」由用户自己负责**：任一条件都不声明的 enabled 规则命中时 deal 为空对象，sanitize 不拦（契约如实写进文档）。
+  - 清洗（sanitizePriceRules）：非数组回 `[]`（空列表 = 无规则，合法状态）；整条非对象/无可用 id 丢弃；id slug 化全列表去重；cycle/currency 枚举非法（含缺失）回 `'any'`（落键与缺省语义等价，统一物化）；maxPrice/minTrafficGB 非有限正数丢字段；**keywords 每条规则 ≤20、规则列表 ≤20 条**（超出截断）。
+  - 呈现：推送「🎯 命中规则: {label}」（无 label 用 id）；HitRecord.matchedBy 扩三档、新增可选 `matchedRule`（旧 jsonl 行缺字段容忍，等价非规则命中——消费方必须容忍 undefined，对齐 commentary 三态契约先例）。
+- **相似降噪 = 纯字面相似度 + 窗口重建 + 短标题守卫（DEC-4 裁定）**：`similarity.enabled` **默认开**（与 `ai.commentary.enabled` 并列的两个「默认开布尔」——旧配置缺失该字段时不能静默关掉降噪，`!== false` 才是关）；threshold 默认 0.72（UI 0.50–0.95 可调；sanitize 非法回 0.72、钳 [0,1] 保留两位小数）。48h 窗口时长是引擎侧常量不进配置。算法链：normalizeTitle（小写 → 全角 ASCII U+FF01–FF5E 线性映射半角 → 非「字母/数字/空格」一律替换成空格——emoji/标点/装饰符**当空格用**保留分词信息 → 空白折叠 trim；幂等）→ 字符 trigram（按码点切，中文/表意文字不劈代理对；空格参与滑窗）→ 集合 Jaccard `≥` 阈值判相似；**归一后 <6 字符的标题双向不参与**（短标题 trigram 误伤率高，`vps` vs `vps2`）。窗口语义：**「近期已推」= 近 48h 成功推送过的标题**（推送失败/静音不入窗——窗口语义是"用户已收到"）；轮末按时间 prune，48h 以**判定时点**为准（长睡眠恢复后窗口里的过期条目放行）；**启动从近 3 天 hits（notifiedAt 非空且仍在 48h 内）重建**（3 天是数据面：48h 跨本地日最多涉 3 个日桶，48h 过滤是窗口不变式；重建 promise 构造期发起、首个推送前 await 就位，失败 = 空窗开始只 log，绝不抛）。被吞帖入 seen 不推送不 emit（log `similar topic swallowed` + 内存计数），作用于**全部命中方式**（规则/字面/语义）push 前、锐评生成之前（吞并的帖子不打 LLM 不耗配额），重试在途的键一并收口。**能力边界（必须如实写、不 oversell）**：字符 trigram 只拦「装饰级」转发变体（加 tag/emoji/全角/大小写）；**换词级改写（`99/年 白嫖`→`99一年 优惠码`）Jaccard ≈0.22、大幅加词 ≈0.67，0.72 阈值下都拦不住**——那类重复是 AI 语义通道（或手动降阈值，代价是误杀正常新帖）的取舍，不是本模块的 bug。
+- **page2 自适应 = 有效新帖计数口径（DEC-8 裁定）**：触发条件 = 上一轮**有效新帖数 ≥ 40 且来源 health=ok**。有效新帖 = 过了 id 阈值 + 置顶 + 排除词 + per-source 过滤之后**进入匹配管线**（规则/字面/语义）的帖子数——**不是裸 unseen**（40 ≈ NodeSeek 单页 49 条去掉置顶后的全量新页，即"整页都是新帖"的信号）；health=ok 门槛防 challenged/backoff 恢复后的第一轮补抓（防双倍 CF 暴露）。观测面 `SourceStatus.page2Fetches`（内存累计、重启清零；口径 = 引擎**发起** 2 页请求的次数，第 2 页在 adapter 内失败也计——观测的是引擎侧事实）；第 2 页失败由 adapter 吞并按第 1 页成功收尾（log warn），两页按 topic id 去重保序（第 1 页原序在前）——天然覆盖"服务端忽略页参数返回同页内容"的形态。
+- **page-2 现实复测修正（2026-09-19，推翻 ADR 5 旧实测）**：NodeSeek 第 2 页 query 形态（`?sort=createTime&page-2` 与 `?page-2`）**服务端忽略页码返回第 1 页**；路径形态 `/page-2` 裸客户端 403（带全浏览器头也 403）。**当前对 NodeSeek 实际无效**——无害：返回的同页内容被 id 去重 = 无操作；能力保留，等站点放开页参数或换代理出口环境再验证。RSS/V2EX 不实现 pages（收到 opts 忽略，行为不变）。ADR 5 的「翻页可用」记录已就地标注过时。
+- **解析兼容经验（D11 同款：score 缺失回退）**：裁决元素可带 `score`（0-1 置信度）。**缺失/非数字回退 1.0**——旧模型行为完全不变（hit 就命中），且与模型真实回的 1.0 不可区分（文档提示用户：调高阈值后若所有语义命中都显示很高置信度且模型不支持 score，阈值实际不起作用；DeepSeek/Kimi/GLM 等支持 JSON 输出的主流模型均回 score）。数值钳 [0,1]；非有限数按"坏值"走回退而非钳位（钳 NaN 产出 NaN，`NaN >= 阈值` 恒 false 会静默吞 hit）。**score 不参与元素合法性判定**（isValidVerdictItem 只看 key/hit，缺 score 的元素仍是合法裁决——D11 的 verdicts→results→兜底扫描兼容链不受影响）。prompt 侧在输出示例里钉死 `"score"` 键（示例是对换键名行为最直接的免疫，W3 同款逻辑）；"仅当明确相关才判 hit=true" 原则不变（score 是补充信号不是放行）。引擎侧消费：hit 且 score ≥ `ai.semanticThreshold`（默认 0 = 不过滤，行为不变）才推送；hit 但 score < 阈值 → **按不相关处理**（入 seen 不再重评、不写语义理由、只 log 一条观测）；已在重试缓存（semanticVerdicts，D4 坑⑥）中的帖子不受热更新阈值影响——缓存的是已过闸 verdict，重试轮直接重推不再过闸。
+- **契约兑现与诊断面（执行事实，非裁定）**：D12 立的 `sources[].filters` 契约本轮引擎消费落地（filters.ts 纯函数；管线第 2 步、先于 id 阈值；滤帖入 seen 不推送不评估；`getSourceFilters` 访问器每轮重读，配置热更新）；SourceCard 行内「过滤」展开区（分类白/黑名单 + 作者黑名单；三列表全空不落键，保存往返无假 dirty）。匹配测试台（R5-P2c）：设置页只读诊断卡，按**已保存**配置跑六阶段 trace（来源过滤 → 排除词 → 价格规则 → 字面 → 相似 → 语义）+ wouldPush 结论；不写 seen/hits、不推送、引擎零感知；「调用 AI」真调一次 evaluator——**消耗服务侧额度但不进引擎每日 300 计数器**（engine 的计数器不可从外部改，测试台走独立 IPC handler）；相似阶段用近 2 天已推标题近似真实 48h 窗口（不做时间过滤——2 天读取面本身界定范围，宽一点更有诊断价值）；两处与引擎的有意差异均为诊断服务：字面/语义档不受 matchMode 门控（用户在 semantic-only 下也想看字面档怎么判）、相似闸在"若命中"假设下评估（引擎只在真命中后查）。
