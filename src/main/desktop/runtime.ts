@@ -4,7 +4,9 @@
  *
  *   logger（userData/logs）→ ConfigStore → 三 HttpClient（按 proxyScope 路由：
  *   'telegram-only' → site/ai 恒直连、tg 走代理；'all' → 都带；aiClient 默认
- *   超时 30s，D6）→ HtmlSourceAdapter / TelegramNotifier → AiProvider /
+ *   超时 30s，D6）→ getSources adapter 工厂（按 config.sources 逐项构造：
+ *   nodeseek/v2ex 按 id 惰性单例，rss 按项实例、url/label 变更时重建）/
+ *   TelegramNotifier → AiProvider /
  *   SemanticEvaluator / CommentGenerator / DailyReportService（reportsDir=
  *   <userData>/reports）→ FileSeenStore / FileEngineState / HitsStore（<userData>/
  *   hits）→ PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑
@@ -36,12 +38,14 @@ import { AiProvider } from '../ai/provider'
 import { SemanticEvaluator } from '../ai/evaluator'
 import { CommentGenerator } from '../ai/commentary'
 import { DailyReportService } from '../ai/daily-report'
-import { FileSeenStore } from '../monitor/dedup'
+import { FileSeenStore, seenCapacityForSources } from '../monitor/dedup'
 import { MonitorEngine } from '../monitor/engine'
 import { HitsStore, HITS_DIR_NAME } from '../monitor/hits-store'
 import { PollScheduler } from '../monitor/poller'
 import { FileEngineState } from '../monitor/state'
 import { HtmlSourceAdapter } from '../monitor/sources/html'
+import { RssSourceAdapter } from '../monitor/sources/rss'
+import { V2exSourceAdapter } from '../monitor/sources/v2ex'
 import type { SourceAdapter } from '../monitor/types'
 import { TelegramNotifier } from '../notify/telegram'
 import type { AppConfig, EngineStatus, HitRecord } from '../../shared/types'
@@ -70,6 +74,15 @@ export class DesktopRuntime {
   private lastSiteProxy: string | null = null
   private lastTgProxy: string | null = null
   private lastAiProxy: string | null = null
+  /** nodeseek 惰性单例（首次 getSources 命中时构造；id 固定 'nodeseek'） */
+  private nodeseekAdapter: HtmlSourceAdapter | null = null
+  /** v2ex 按 id 惰性单例（构造签名带 id；常规配置就一项，退化为单例） */
+  private readonly v2exAdapters = new Map<string, V2exSourceAdapter>()
+  /** rss 按 id 缓存；url/label 指纹不匹配时重建（见 getSources） */
+  private readonly rssAdapters = new Map<
+    string,
+    { url: string; label: string; adapter: RssSourceAdapter }
+  >()
   /** 日报定时器句柄（startup 起、shutdown 清；自循环重排） */
   private reportTimer: ReturnType<typeof setTimeout> | null = null
   /** 上一帧 engine desired（F6：检测 paused→running 翻转补跑日报 tick；null=尚未见帧） */
@@ -96,23 +109,54 @@ export class DesktopRuntime {
     this.lastTgProxy = initial.proxyUrl
     this.lastAiProxy = aiProxy
 
-    // adapter 注册表：source id → adapter（v2 仅 nodeseek；新增来源类型在此登记工厂）。
-    // 固定单实例（无内部可变状态，fetchHtml 闭包引 siteClient）；getSources 每轮
-    // 重读 config.sources 过滤 enabled——配置热更新即生效，不在构造期定死数组（D3）。
-    const nodeseekAdapter = new HtmlSourceAdapter({
-      fetchHtml: (url, init) => this.siteClient.get(url, init)
-    })
-    const adapters = new Map<string, SourceAdapter>([[nodeseekAdapter.id, nodeseekAdapter]])
+    // adapter 工厂：getSources 访问器内按当前 config.sources 逐项构造（R4-W4，
+    // ultrabrain 坑2——v3 判别联合下静态 id→adapter 注册表不成立：rss 的 url/label
+    // 是配置数据，必须按项建实例）。三类构造策略：
+    // - nodeseek / v2ex：按 id 惰性单例（实例无内部可变状态，闭包引 siteClient；
+    //   HtmlSourceAdapter 的 id 固定 'nodeseek'，V2exSourceAdapter 构造签名带 id）；
+    // - rss：按 id 缓存 {url, label, adapter}，url/label 变化时重建（它们是构造
+    //   参数，变更后旧实例的抓取地址/展示名语义过期）。
+    // getSources 每轮重读 config.sources 过滤 enabled（与既有语义一致：enabled=false
+    // 不进返回）——配置热更新即生效，不在构造期定死数组（D3）。
     const getSources = (): SourceAdapter[] => {
       const out: SourceAdapter[] = []
       for (const s of this.store.get().sources) {
         if (!s.enabled) continue
-        const adapter = adapters.get(s.id)
-        if (adapter === undefined) {
-          this.logger.warn(`no adapter registered for source "${s.id}", skipping`)
-          continue
+        // 判别联合按 type 收窄：rss 分支里 s.url / s.label 才存在（types.ts v3）
+        if (s.type === 'nodeseek') {
+          if (this.nodeseekAdapter === null) {
+            this.nodeseekAdapter = new HtmlSourceAdapter({
+              fetchHtml: (url, init) => this.siteClient.get(url, init)
+            })
+          }
+          out.push(this.nodeseekAdapter)
+        } else if (s.type === 'v2ex') {
+          const cached = this.v2exAdapters.get(s.id)
+          if (cached !== undefined) {
+            out.push(cached)
+          } else {
+            const adapter = new V2exSourceAdapter({
+              fetchJson: (url, init) => this.siteClient.get(url, init),
+              id: s.id
+            })
+            this.v2exAdapters.set(s.id, adapter)
+            out.push(adapter)
+          }
+        } else {
+          const cached = this.rssAdapters.get(s.id)
+          if (cached !== undefined && cached.url === s.url && cached.label === (s.label ?? '')) {
+            out.push(cached.adapter)
+            continue
+          }
+          const adapter = new RssSourceAdapter({
+            id: s.id,
+            url: s.url,
+            ...(s.label !== undefined ? { label: s.label } : {}),
+            fetchFn: (url, init) => this.siteClient.get(url, init)
+          })
+          this.rssAdapters.set(s.id, { url: s.url, label: s.label ?? '', adapter })
+          out.push(adapter)
         }
-        out.push(adapter)
       }
       return out
     }
@@ -142,7 +186,13 @@ export class DesktopRuntime {
       onGenerated: (info) => broadcaster.report(info)
     })
 
-    this.seen = new FileSeenStore(join(this.userDataDir, 'seen.json'))
+    // seen 容量随来源数扩容（ultrabrain 坑12：1000 + 500×(n-1)，防容量淘汰先于
+    // 时间淘汰击穿）。容量构造期定死：配置增删来源后不自动跟随，下次重启生效
+    // （不为它重构 engine deps；期间偏小容量只是环形淘汰更早，无正确性问题）
+    this.seen = new FileSeenStore(
+      join(this.userDataDir, 'seen.json'),
+      seenCapacityForSources(initial.sources.length)
+    )
     this.seen.load()
     const engineState = new FileEngineState(join(this.userDataDir, 'state.json'))
     engineState.load()

@@ -32,16 +32,18 @@ import { AiProvider } from '../src/main/ai/provider'
 import { SemanticEvaluator } from '../src/main/ai/evaluator'
 import { CommentGenerator } from '../src/main/ai/commentary'
 import { DailyReportService } from '../src/main/ai/daily-report'
-import { FileSeenStore } from '../src/main/monitor/dedup'
+import { FileSeenStore, seenCapacityForSources } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
 import { HitsStore, HITS_DIR_NAME } from '../src/main/monitor/hits-store'
 import { PollScheduler } from '../src/main/monitor/poller'
 import { HtmlSourceAdapter } from '../src/main/monitor/sources/html'
+import { RssSourceAdapter } from '../src/main/monitor/sources/rss'
+import { V2exSourceAdapter } from '../src/main/monitor/sources/v2ex'
 import { FileEngineState } from '../src/main/monitor/state'
 import type { SourceAdapter } from '../src/main/monitor/types'
 import { TelegramNotifier } from '../src/main/notify/telegram'
 import { createLogger } from '../src/main/logger'
-import type { AppConfig, EngineStatus, HitRecord } from '../src/shared/types'
+import type { AppConfig, EngineStatus, HitRecord, SourceConfig } from '../src/shared/types'
 
 const USAGE = `usage: npm run engine:headless -- [--config <dir>] [--once] [--duration <sec>] [--interval <sec>]
   --config <dir>     数据目录（config/seen/state/logs），默认 ./data/headless
@@ -161,7 +163,81 @@ async function main(): Promise<number | null> {
     return 1
   }
 
-  const source = new HtmlSourceAdapter({ fetchHtml: (url, init) => siteClient.get(url, init) })
+  // ---- adapter 工厂 + getSources 访问器（R4-W4，与 runtime.ts 同款） ------------
+  // 按 effective.sources 逐项构造（D3 访问器语义）：nodeseek/v2ex 按 id 惰性单例，
+  // rss 按项实例、url/label 变更时重建。headless 配置是启动快照（无热更新），
+  // 缓存形状仍与桌面装配保持一致。
+  // --once 模式在 fetch 时点统计（此刻 seen 尚未被本轮 add 污染），去重键与
+  // engine 同口径 `${sourceId}:${topic.id}`（D2）；多来源下 fetched/fresh 为
+  // 全来源聚合求和（单来源时与旧口径一致）。
+  let nodeseekAdapter: HtmlSourceAdapter | null = null
+  const v2exAdapters = new Map<string, V2exSourceAdapter>()
+  const rssAdapters = new Map<
+    string,
+    { url: string; label: string; adapter: RssSourceAdapter }
+  >()
+  let fetchedCount = 0
+  let freshCount = 0
+  const onceHits: HitRecord[] = []
+  const buildAdapter = (s: SourceConfig): SourceAdapter => {
+    if (s.type === 'nodeseek') {
+      if (nodeseekAdapter === null) {
+        nodeseekAdapter = new HtmlSourceAdapter({
+          fetchHtml: (url, init) => siteClient.get(url, init)
+        })
+      }
+      return nodeseekAdapter
+    }
+    if (s.type === 'v2ex') {
+      let adapter = v2exAdapters.get(s.id)
+      if (adapter === undefined) {
+        adapter = new V2exSourceAdapter({
+          fetchJson: (url, init) => siteClient.get(url, init),
+          id: s.id
+        })
+        v2exAdapters.set(s.id, adapter)
+      }
+      return adapter
+    }
+    const cached = rssAdapters.get(s.id)
+    if (cached !== undefined && cached.url === s.url && cached.label === (s.label ?? '')) {
+      return cached.adapter
+    }
+    const adapter = new RssSourceAdapter({
+      id: s.id,
+      url: s.url,
+      ...(s.label !== undefined ? { label: s.label } : {}),
+      fetchFn: (url, init) => siteClient.get(url, init)
+    })
+    rssAdapters.set(s.id, { url: s.url, label: s.label ?? '', adapter })
+    return adapter
+  }
+  const getSources = (): SourceAdapter[] => {
+    const out: SourceAdapter[] = []
+    for (const s of effective.sources) {
+      if (!s.enabled) continue
+      const adapter = buildAdapter(s)
+      if (!args.once) {
+        out.push(adapter)
+        continue
+      }
+      out.push({
+        id: adapter.id,
+        name: adapter.name,
+        // W3/D9：包装层必须透传能力声明，否则 --once 模式 engine 看不到
+        // creationOrderedIds、旧帖过滤整段失效（R4-W4 泛化到全部 adapter 类型）
+        creationOrderedIds: adapter.creationOrderedIds,
+        fetchLatest: async () => {
+          const topics = await adapter.fetchLatest()
+          fetchedCount += topics.length
+          freshCount += topics.filter((t) => !seen.has(`${adapter.id}:${t.id}`)).length
+          return topics
+        }
+      })
+    }
+    return out
+  }
+
   const notifier = new TelegramNotifier({
     post: (url, init) => tgClient.post(url, init),
     getConfig: () => effective.telegram
@@ -186,46 +262,15 @@ async function main(): Promise<number | null> {
     reportsDir: join(dir, 'reports')
   })
 
-  const seen = new FileSeenStore(join(dir, 'seen.json'))
+  const seen = new FileSeenStore(
+    join(dir, 'seen.json'),
+    // seen 容量随来源数扩容（ultrabrain 坑12）；容量构造期定死，增删来源后下次
+    // 重启生效（与 runtime.ts 同款取舍，不为它重构 engine deps）
+    seenCapacityForSources(effective.sources.length)
+  )
   seen.load()
   const engineState = new FileEngineState(join(dir, 'state.json'))
   engineState.load()
-
-  // ---- getSources 访问器：每轮按 config.sources 过滤 enabled（D3） ------------
-  // v2 仅 nodeseek 一个 adapter；未注册 id log warn 跳过。--once 模式在 fetch
-  // 时点统计（此刻 seen 尚未被本轮 add 污染），去重键与 engine 同口径
-  // `${sourceId}:${topic.id}`（D2）。
-  let fetchedCount = 0
-  let freshCount = 0
-  const onceHits: HitRecord[] = []
-  const getSources = (): SourceAdapter[] => {
-    const out: SourceAdapter[] = []
-    for (const s of effective.sources) {
-      if (!s.enabled) continue
-      if (s.id !== source.id) {
-        logger.warn(`no adapter registered for source "${s.id}", skipping`)
-        continue
-      }
-      if (!args.once) {
-        out.push(source)
-        continue
-      }
-      out.push({
-        id: source.id,
-        name: source.name,
-        // W3：包装层必须透传能力声明，否则 --once 模式 engine 看不到
-        // creationOrderedIds、旧帖过滤整段失效
-        creationOrderedIds: source.creationOrderedIds,
-        fetchLatest: async () => {
-          const topics = await source.fetchLatest()
-          fetchedCount = topics.length
-          freshCount = topics.filter((t) => !seen.has(`${source.id}:${t.id}`)).length
-          return topics
-        }
-      })
-    }
-    return out
-  }
 
   let engine!: MonitorEngine
   let lastStatusLine = ''

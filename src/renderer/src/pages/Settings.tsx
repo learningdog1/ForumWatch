@@ -8,20 +8,23 @@
  * - 兴趣描述超过 20 条 → 橙字提示（不硬拦）
  *
  * 保存走 AppConfig v2 全量透传：sources 与 ai 段都由本页表单构建
- * （ai 段来自 AI 模型/监控模式/每日总结三张卡，sources 透传已保存值）。
+ * （ai 段来自 AI 模型/监控模式/每日总结三张卡，sources 来自「来源」卡——
+ * SourceCard 组件内管启停/增删/预设，回写 draft.sources）。
  * "发送测试消息 / 测试连接"用的都是**已保存**配置：表单 dirty 时先提示保存
  * 而非直接发送。dirty 状态通过 onDirtyChange 上报给外壳。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { AppConfig, MatchMode, ProxyScope } from '@shared/types'
+import type { AppConfig, MatchMode, ProxyScope, SourceConfig } from '@shared/types'
 import { Field } from '../components/Field'
 import { KeywordTagInput } from '../components/KeywordTagInput'
+import { SourceCard } from '../components/SourceCard'
 import { IconBolt, IconEye, IconEyeOff, IconSend } from '../components/icons'
 import { formatClock } from '../lib/time'
 
 interface Draft {
   includeKeywords: string[]
   excludeKeywords: string[]
+  sources: SourceConfig[]
   pollIntervalText: string
   proxyUrl: string
   proxyScope: ProxyScope
@@ -62,6 +65,8 @@ function toDraft(c: AppConfig): Draft {
   return {
     includeKeywords: [...c.includeKeywords],
     excludeKeywords: [...c.excludeKeywords],
+    // 浅拷贝逐项（编辑只整项替换、不就地改嵌套字段，浅层足够）
+    sources: c.sources.map((s) => ({ ...s })),
     pollIntervalText: String(c.pollIntervalSec),
     proxyUrl: c.proxyUrl,
     proxyScope: c.proxyScope,
@@ -147,11 +152,12 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
     setSaving(true)
     try {
       const cfg: AppConfig = {
-        // sources 透传已保存值（v2 仅 nodeseek，来源编辑 UI 留给后续轮次）；
-        // ai 段由本页三张 AI 卡构建，其余字段覆盖为本表单管理的值
+        // sources 来自「来源」卡（SourceCard 回写 draft）；ai 段由本页三张 AI 卡
+        // 构建，其余字段覆盖为本表单管理的值
         ...saved,
         includeKeywords: draft.includeKeywords,
         excludeKeywords: draft.excludeKeywords,
+        sources: draft.sources,
         pollIntervalSec: intervalValid ? Math.floor(intervalNum) : 15,
         proxyUrl: proxyTrim,
         proxyScope: draft.proxyScope,
@@ -256,6 +262,8 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
 
   return (
     <div className="page page-settings">
+      <SourceCard sources={draft.sources} onChange={(sources) => patch({ sources })} />
+
       <section className="card">
         <div className="card-head">
           <span className="card-title">关键词</span>
