@@ -221,3 +221,38 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
   - **只影响语义档**：engine 不动，反馈只经 evaluator 进 prompt——字面与价格规则命中不受影响；数据只进本机 feedback.json 与用户自己配置的 LLM 服务（评估请求的 system prompt 会带上这些标题，隐私口径如实写进 README）。
 
 **执行事实（非裁定）**：DispositionStore / HitsStore.query / computeStats / FileFeedbackStore 均零 electron 依赖（ADR 2）；桌面 runtime 与 headless 同款装配（headless 无 IPC，feedback.json 可手工编辑、recentForPrompt 照常进 prompt）；IPC 新通道五条（dispositionsRecent / dispositionsDay / queryHits / getStats / hitFeedback），失败一律收敛为返回值不向渲染进程抛；queryHits / hitFeedback 载荷逐字段判型（不信任 renderer 内存），非法日期 → 空区间、非法载荷 → {ok:false}。
+
+---
+
+# 第八轮决策（2026-09-19，运维硬化）
+
+**D17 运维硬化包（E2 引擎看门狗 / E1 更新检查 / E4 备份 / E6 headless 热重载 / E3 CF B 计划）**：
+
+- **E2 引擎看门狗（`desktop/watchdog.ts`，EngineWatchdog）**：旁路自愈件，覆盖「PollScheduler 的 setTimeout 因主进程事件循环阻塞 / 定时器丢失而不再触发」的挂死形态——此时 `EngineStatus.nextPollAt` 停在过去，引擎不会自愈、监控静默失效。watchdog 以独立 30s 自循环定时器（重排模式对齐 poller / 日报定时器，不用 setInterval）观察该信号：
+  - **触发条件（三者同时满足）**：`desired === 'running'`（用户暂停期间不排程，nextPollAt 停留是正常态，不触发）；`nextPollAt != null`（null = 无排程，不触发）；`now > nextPollAt + max(轮询间隔 × 2, 90s)`（宽限窗吸收排程 jitter、在途 tick 的重排延迟、休眠唤醒的补偿轮询；间隔由装配方从 config 现读——EngineStatus 不携带它；非法时刻字符串保守跳过）。
+  - **触发动作**：error 日志（含超期时长）→ `runNow()`（幂等、尊重 desired）强制补一轮让排程循环重新起步 → 计数。**60s 详情日志抑制窗**：窗内重复触发只计数不 log（防每 30s 一条刷屏；抑制基准与触发时刻解耦）；单次检查抛错不破坏循环。
+  - **状态暴露两条路径（如实写）**：`getStatus() → {lastTriggeredAt, count}` 由 runtime 的 emitStatus 在快照副本上附加后随**状态广播**（evStatus）下发——engine 自身不写该字段（status 是 engine 的事实源，watchdog 是 runtime 侧旁路观测）；IPC `status:get` 拉取路径直读 engine.getStatus()，**不带 runtime 侧实时值**（引擎快照不写该字段，拉取到的至多是恒 null/0 的占位值）——消费方以广播事件为该字段的事实源、按可选字段容忍缺失。**headless 装配未接**（watchdog 属桌面装配观测件，headless 接线留待后续包）。
+  - 生命周期随 engine：startup 起、shutdown 停（退出路径先停它再 pause）；暂停不触发由 watchdog 自身按 desired 判定，无需随 pause/resume 启停。零 electron 依赖（放 desktop/ 仅因属桌面装配观测件）；时钟 / 定时器可注入，单测假时钟驱动触发矩阵。
+- **E1 更新检查（`desktop/update-check.ts`，UpdateChecker）**：GitHub Releases latest 轻量轮询。**边界：不是自动更新**——只做「检查 + 跳转下载页」，下载安装仍手动覆盖（mac 未签名做不了 electron-updater，ADR 4 的既有裁定不变）：
+  - 数据面 `GET api.github.com/repos/{repo}/releases/latest`（GitHub API 强制 User-Agent，无 UA 一律 403）；版本比较自实现 compareSemver（v/V 前缀容忍、点分数字、缺段补 0、最多比三段，空串/非数字段按 0）——不为一次三段比较引入 semver 依赖。**repo 是常量 `colmidad/forumwatch`**：本仓库当前未配置 git remote（实测为空），按仓库自身证据推导（electron-builder appId `com.colmidad.forumwatch` / package.json author / name）；若实际 remote 与此不符，改一个常量即可。
+  - 调度：启动 15s 后首轮 + 每 24h（setTimeout 自循环）+ 设置页「关于」卡手动 force check，三处共用同一条 outcome 写路径。**三态 available / up-to-date / error**（外加从未检查的 idle）；一切失败（网络 / 非 2xx / 坏 JSON / 载荷形状不对）**静默收敛**——只 log warn、绝不打扰用户更不炸，更新检查失败与监控完全无关。fetch 用主进程直连（不掺 runtime 的 proxy client：GitHub API 通常直连可达，真不可达下次轮询再试）。
+  - 「打开下载页」经 openExternal 打开 release 页，github.com 并入主进程静态外链白名单（既有外链白名单体系加一个静态域）。
+  - IPC：`update:check`（force check）/ `update:status`（最近结果缓存，不发包）。
+- **E4 备份（`src/main/backup.ts` 纯函数内核 + `desktop/ipc.ts` handler）**：设置页「数据」卡导出 / 导入，单文件 JSON：
+  - 备份件形状 `{kind:'forumwatch-backup', schemaVersion:1, appVersion, createdAt, config, seen, state, feedback?}`——四段都是**已解析的 JSON 信封值**（config 段是完整 `{schemaVersion:3, config}` 信封原样搬运而非裸 AppConfig，导入端复用 ConfigStore 的迁移 / 清洗读路径）；feedback 是**可选段**（导出时文件缺失不落键，导入时缺键不动现有 feedback.json）。段内文件缺失 / 坏 JSON 时导出回退到与内核读路径同口径的默认信封，不让整个导出炸掉。
+  - **导出明文含凭据**（bot token / API key），新建即 0o600（与 config.json 同口径；Windows 无 POSIX 位，chmod 失败不阻断）；UI 卡内 hint 与成功提示双重警告。写到用户所选路径**非原子**（目标非 userData，断电最坏残留半份文件，重导即可）。
+  - 导入校验只到**段形状下限**（JSON 合法 → 根对象 → kind / schemaVersion / appVersion → config / seen / state 三段存在且为对象，feedback 给了须对象；错误消息人读中文 UI 原样展示），**深度校验留给各内核读路径**（config 交给 ConfigStore 迁移 + sanitize，seen / state 交给各自宽容收编）——防把任意 JSON 当备份导进来，又不越权重构。段写回各自同目录 tmp + rename 原子落位；**内存不热换**（store / engine 手里还是旧值），`needsRestart` 恒 true，重启生效；不做 .bak 备份（覆盖风险由 UI 导入前的确认层文案承担）。
+  - **ADR 8.9 不变式落到导入路径**：seen 段无效（schemaVersion 不认识 / seen 非数组，与 FileSeenStore 的 v1/v2 接受面同口径判定）→ 删现有 seen.json（引擎下次启动空集重建）且 state 里**全部** sources 的 baselineDone 强制重置 false——空 seen × baselineDone=true 会把来源首页整页当新帖推送（单页 mini 风暴）；seen 有效则两段原样透传。totalHits / maxSeenTopicId 不动（与 seen 无耦合）。
+  - IPC：`backup:export` / `backup:import`；对话框取消按「已取消」提示收敛，不算错误。
+- **E6 headless 配置热重载（`config/watch.ts` + headless.ts 访问器化 + rebuildDerived）**：作废「headless 配置是启动时快照、改配置需重启」的旧语义：
+  - **监听数据目录而非 config.json 文件**：macOS 原子写（tmp + rename）换 inode，`fs.watch` 盯文件在 rename 后丢事件；盯目录则子项事件冒泡、换 inode 无感。**500ms 去抖**把一次保存的事件风暴（tmp 创建 + rename + 旧 tmp 清理连发）合并为恰好一次回调。watch 构造失败 / 运行期错误不抛（首启目录可能还没建；热重载是尽力而为的增强能力，不拖垮常驻进程）。
+  - **顶层键 diff 静默**：回调重读 `store.load()`（损坏容错：备份 + 回默认）与上次盘上配置 diff 顶层键，无变化直接返回——seen.json / state.json 每轮的例行写入照样触发目录事件，但 diff 为空，**不产生任何重载动作**；真变化 log `config reloaded (key changes: ...)`。
+  - **槽位间接层设计（访问器化 + rebuildDerived）**：配置消费全部访问器化（对齐桌面 runtime：getEffective = store.get() + env 凭据合并 + `--interval` 覆盖，每次现读）——引擎 / adapter / 发送器 / AI provider 对配置变化**天然无感**（它们的依赖里没有配置快照），多数配置零动作生效；轮询间隔由 engine 每轮 finishRound 的 setIntervalSec 自然生效。只有两类**派生物**需显式差异重建：proxy 相关键（proxyUrl / proxyScope）变 → 三个 HttpClient 整体重建——`let clients` **槽位替换**，所有闭包（adapter fetch / notifier post / provider post）经 `clients.xxx` 现取实例，换新后旧闭包自动用新栈（close 旧 client 中断其上在途请求，与桌面 setProxy 同款代价）；就绪通道签名（`type:id` 按序拼接，与 runtime 同款）变 → 重建 composite notifier——`let notifierImpl` 槽位，engine / 日报持有的稳定壳引用永不变。
+  - **`--interval` CLI 覆盖仍最高优先**（启动参数意图）：访问器每次现读都重新叠加 CLI 覆盖，热重载改盘上 pollIntervalSec 压不过它；env 凭据注入同理（常量叠加，热重载后照常生效）。`--once` 单轮语义不起 watch。既有取舍不动：seen 容量构造期定死，增删来源下次重启才扩容；退出路径先关 watcher 再收尾。
+  - 冒烟实证（2026-09-19）：改盘上 pollIntervalSec 下一轮生效；改 proxyUrl / 通道集合见 `proxy clients rebuilt` / `notify fan-out rebuilt` 日志。
+- **E3 Cloudflare B 计划（`sources/rss.ts` browserStackFallback + `runtime.ts` createBrowserStackFetch）**：ADR 5 预留的 B 计划兑现——undici TLS 指纹被 CF 按指纹拦截的形态，换 Chromium 网络栈（TLS 指纹 / JA3 不同）重发常能直出：
+  - **能力声明式契约**：RssSourceAdapter 构造传入 `fallbackFetchFn` 时置 `browserStackFallback: true`（SourceAdapter 可选能力声明，与 creationOrderedIds 同款「缺省即无」；engine 不消费，纯观测 / 文档）。未传时行为与本特性引入前完全一致——**headless 装配不注入，行为不变**（无 Electron net.fetch）。
+  - **降级顺序（adapter 内部完成，engine 不感知）**：主 fetch 抛 **ChallengeError** 才走降级（普通错误直接上抛，不降级）→ 用 fallback **重发同一请求**（同 URL / headers / 超时，主 / 降级共用同一 fetchOnce）；fallback 成功 → 正常返回（降级对 engine 透明）；fallback 也被挑战 → 抛 fallback 的 ChallengeError（状态照旧 challenged，走既有挑战退避）；fallback 普通错误 → **保守抛原 ChallengeError**（「确实被拦」比「换栈后网络不通」诊断更准，不以后者掩盖前者）；**fallback 200 但 0 条 → 按挑战处理**（CF interstitial 页正是 200 + 解析 0 条的形态，该路径抛普通 0 条错误 → 非 ChallengeError → 最终上抛原挑战错误，该轮定为 challenged，宁严勿松）。
+  - **系统代理边界（如实写）**：桌面装配注入的 fallback 是 Electron net.fetch 的 FetchLike 包装——Chromium 网络栈不走 undici dispatcher，**ConfigStore 的 proxyUrl / proxyScope 对它不生效，代理跟随系统设置**（PAC / 系统代理）；证书库、HTTP 缓存、HSTS 均为 Chromium 会话语义。仅 desktop 装配层存在（import electron 不进监控内核，ADR 2）。
+  - linux.do / LowEndTalk 桌面端实测**留待人工**（机制在、入口在，不做未验证的效果声称，真机验证后补记）。
+- **IPC 新通道四条**：`update:check` / `update:status` / `backup:export` / `backup:import`，失败一律收敛为返回值不向渲染进程抛（既有纪律）。
