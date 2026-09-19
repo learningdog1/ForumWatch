@@ -209,4 +209,28 @@ describe('TelegramNotifier', () => {
     // 全部成功场景下唯一的 sleep 就是限流等待（第二条消息进入时距上一条 0ms）
     expect(h.sleeps).toEqual([1050])
   })
+
+  it('sendRaw 成功：进队发送、原文透传、不带 parse_mode（<b> 不被解析为实体）', async () => {
+    const h = makeHarness(() => okRes)
+    const raw = '# ForumWatch 监控日报\n\n今日无命中 <b>字面量</b>\nhttps://example.com/r/2026-09-19'
+    await h.notifier.sendRaw(raw)
+
+    expect(h.calls.length).toBe(1)
+    const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as {
+      text: string
+      parse_mode?: string
+    }
+    expect(body.text).toBe(raw) // 不做 HTML 转义
+    expect(body.parse_mode).toBeUndefined() // 纯文本：无 parse_mode
+    expect(h.sleeps).toEqual([]) // 首条不限流等待
+  })
+
+  it('sendRaw 与 sendHit 共用同一串行队列与 1050ms 限流', async () => {
+    const h = makeHarness(() => okRes)
+    await Promise.all([h.notifier.sendRaw('日报第一段'), h.notifier.sendRaw('日报第二段')])
+    expect(h.calls.length).toBe(2)
+    expect(h.sleeps).toEqual([1050]) // 第二段按限流间隔排队
+    const bodies = h.calls.map((c) => JSON.parse(c.init?.body ?? '{}') as { text: string })
+    expect(bodies.map((b) => b.text)).toEqual(['日报第一段', '日报第二段']) // 保序
+  })
 })

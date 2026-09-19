@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- 应用图标小尺寸简化变体（preview 的 64/32/16 展示档专用，不落 resources/）。
+       looker 返修新增：单一外环 + 扫描针 + 唯一亮青信号点（去内环/扇形/第二点），
+       笔画按比例加粗（22 vs 完整版 15）、青点放大，保证小档可辨。
+       针端点 r=118（-20deg），帽尖 r=129，距环内缘 139 留缝隙不穿环。 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="18" width="476" height="476" rx="110" fill="url(#bg)"/>
+  <circle cx="256" cy="266" r="150" fill="none" stroke="#FFFFFF" stroke-width="22"/>
+  <path d="M256 266 L366.88 225.64" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="256" cy="266" r="20" fill="#FFFFFF"/>
+  <circle cx="327.61" cy="189.21" r="32" fill="#22D3EE"/>
+</svg>

@@ -1,7 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <!-- ForumWatch 应用图标：雷达/声呐。概念：同心环=监控范围，扇形拖尾=持续扫描，
-       亮青信号点=新帖命中（推送），白色回波点=已捕获。SVG 约束（ADR D7）：
-       仅 path/circle/rect + 单个 linearGradient，无 filter/mask/style/text/pattern。 -->
+       唯一亮青信号点=新帖命中（推送）。SVG 约束（ADR D7）：
+       仅 path/circle/rect + 单个 linearGradient，无 filter/mask/style/text/pattern。
+       looker 返修：扫描针止于外环内缘留 2px 呼吸缝隙（不与环熔接）；删 8 点钟白点
+       （保持"唯一青点=命中"语义）；淡扫描扇形保留。 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#4F46E5"/>
@@ -15,11 +17,10 @@
   <circle cx="256" cy="266" r="102" fill="none" stroke="#FFFFFF" stroke-width="13"/>
   <!-- 扫描扇形（拖尾余辉，圆心 256,266；-70deg -> -24deg） -->
   <path d="M256 266 L307.3 125.05 A150 150 0 0 1 393.03 204.99 Z" fill="#FFFFFF" fill-opacity="0.3"/>
-  <!-- 扫描针（扇形前缘） -->
-  <path d="M256 266 L393.03 204.99" fill="none" stroke="#FFFFFF" stroke-width="15" stroke-linecap="round"/>
+  <!-- 扫描针（扇形前缘；端点 r=133，圆头帽尖 r=140.5，距外环内缘 142.5 留 2px 缝隙） -->
+  <path d="M256 266 L377.5 211.9" fill="none" stroke="#FFFFFF" stroke-width="15" stroke-linecap="round"/>
   <!-- 圆心 -->
   <circle cx="256" cy="266" r="16" fill="#FFFFFF"/>
-  <!-- 信号点：亮青=新帖命中（唯一强调色），白=回波 -->
+  <!-- 唯一信号点：亮青 = 新帖命中 -->
   <circle cx="333.75" cy="182.63" r="26" fill="#22D3EE"/>
-  <circle cx="187.4" cy="290.97" r="12" fill="#FFFFFF"/>
 </svg>

@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
   <!-- 彩色托盘（Windows 等，32 自然尺寸，渲染为 tray@2x.png）。
-       同款雷达语言：渐变底 + 白环 + 扇形 + 亮青信号点；无扫描针（32px 下留白换清晰度）。 -->
+       looker 返修：简化为"单环 + 针 + 青点"（去扇形）；针端点 r=8.2，
+       圆头帽尖 r=9.5 与环内缘（11-1.5）齐平不穿环；青点置于针上方留白处。 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#4F46E5"/>
@@ -9,7 +10,7 @@
   </defs>
   <rect x="0" y="0" width="32" height="32" rx="7.5" fill="url(#bg)"/>
   <circle cx="16" cy="16.5" r="11" fill="none" stroke="#FFFFFF" stroke-width="3"/>
-  <path d="M16 16.5 L19.76 6.16 A11 11 0 0 1 25.71 11.34 Z" fill="#FFFFFF" fill-opacity="0.35"/>
+  <path d="M16 16.5 L23.71 13.7" fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round"/>
   <circle cx="16" cy="16.5" r="2" fill="#FFFFFF"/>
-  <circle cx="20.31" cy="10.98" r="2.3" fill="#22D3EE"/>
+  <circle cx="13.63" cy="11.42" r="2.5" fill="#22D3EE"/>
 </svg>

@@ -18,6 +18,21 @@ export interface MatchResult {
 }
 
 /**
+ * 排除词否决判定（D4：排除词永远先于 AI 一票否决）。
+ * 语义模式下 engine 用它单独做否决检查——被否决的帖子直接入 seen，
+ * 不进语义评估批。判定口径与 matchTopic 的排除分支一致（trim/小写/子串）。
+ */
+export function isExcluded(topic: Topic, excludeKeywords: string[]): boolean {
+  const title = topic.title.toLowerCase()
+  for (const raw of excludeKeywords) {
+    const kw = raw.trim().toLowerCase()
+    if (kw.length === 0) continue
+    if (title.includes(kw)) return true
+  }
+  return false
+}
+
+/**
  * 判定一条帖子是否命中用户关键词。
  *
  * @param topic 帖子（只读 title）
@@ -29,14 +44,9 @@ export function matchTopic(
   includeKeywords: string[],
   excludeKeywords: string[]
 ): MatchResult {
+  if (isExcluded(topic, excludeKeywords)) return { matched: false, matchedKeywords: [] }
+
   const title = topic.title.toLowerCase()
-
-  for (const raw of excludeKeywords) {
-    const kw = raw.trim().toLowerCase()
-    if (kw.length === 0) continue
-    if (title.includes(kw)) return { matched: false, matchedKeywords: [] }
-  }
-
   if (includeKeywords.length === 0) return { matched: false, matchedKeywords: [] }
 
   const matchedKeywords: string[] = []

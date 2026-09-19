@@ -85,7 +85,9 @@ export interface HtmlSourceOptions {
 }
 
 export class HtmlSourceAdapter implements SourceAdapter {
-  readonly name = 'nodeseek-homepage-html'
+  /** 稳定 slug：seen 前缀 `nodeseek:{id}`（与 v1 seen 迁移共用）、state 键、状态键 */
+  readonly id = 'nodeseek'
+  readonly name = 'NodeSeek'
 
   private readonly fetchHtml: FetchLike
   private readonly baseUrl: string

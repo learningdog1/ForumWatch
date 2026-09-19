@@ -1,9 +1,11 @@
 /**
- * Telegram Bot 推送（ADR 8.6）。
+ * Telegram Bot 推送（ADR 8.6；D5 增补 sendRaw）。
  *
  * - 网络 post 由外部注入（FetchLike，生产传 HttpClient 封装），本模块零直接网络依赖。
  * - 限流：内部串行队列，两次实际发送间隔 >= 1050ms。放弃 20 msg/min 全局限流——
  *   1050ms 间隔 + 尊重 429 的 retry_after 已满足个人监控量级（每轮命中个位数）。
+ * - sendHit / sendTest 走 HTML parse_mode（用户内容一律 escapeHtml）；
+ *   sendRaw（D5 日报）纯文本：不转义、不带 parse_mode，与命中推送共用队列与限流。
  * - 429：读响应体 parameters.retry_after，等 (min(retry_after, 60) + 0.5)s 后重试
  *   （封顶 60s：过大的 retry_after 不允许长时间阻塞轮询线程上的后续推送）。
  * - 其他失败（网络异常 / 非 2xx 非 429）：共 3 次尝试，间隔 1s / 2s，仍失败抛 TelegramError
@@ -88,11 +90,20 @@ export class TelegramNotifier {
   }
 
   async sendHit(topic: Topic, matchedKeywords: string[]): Promise<void> {
-    await this.enqueue(() => this.deliver(formatHitMessage(topic, matchedKeywords)))
+    await this.enqueue(() => this.deliver(formatHitMessage(topic, matchedKeywords), 'HTML'))
   }
 
   async sendTest(): Promise<void> {
-    await this.enqueue(() => this.deliver('✅ ForumWatch 测试消息'))
+    await this.enqueue(() => this.deliver('✅ ForumWatch 测试消息', 'HTML'))
+  }
+
+  /**
+   * 纯文本发送（D5 日报用）：**不做 HTML 转义、不带 parse_mode**——markdown
+   * 日报以纯文本呈现（链接退化为裸 URL，TG 原生可点）。复用同一串行队列 /
+   * 1050ms 限流 / 429 retry_after 语义，与命中推送互相排队。
+   */
+  async sendRaw(text: string): Promise<void> {
+    await this.enqueue(() => this.deliver(text, null))
   }
 
   /** 排队执行；前一个任务失败不阻塞后一个 */
@@ -112,7 +123,8 @@ export class TelegramNotifier {
     this.lastSendAt = this.now()
   }
 
-  private async deliver(text: string): Promise<void> {
+  /** @param parseMode 'HTML'（命中/测试消息）或 null（sendRaw 纯文本，不带 parse_mode） */
+  private async deliver(text: string, parseMode: 'HTML' | null): Promise<void> {
     const cfg = this.getConfig()
     if (!cfg.botToken || !cfg.chatId) {
       throw new TelegramError('telegram not configured')
@@ -127,7 +139,7 @@ export class TelegramNotifier {
       body: JSON.stringify({
         chat_id: cfg.chatId,
         text,
-        parse_mode: 'HTML',
+        ...(parseMode !== null ? { parse_mode: parseMode } : {}),
         link_preview_options: { is_disabled: false }
       })
     }

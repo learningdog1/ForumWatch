@@ -8,9 +8,16 @@
  *   npm run engine:headless -- --config ./data/headless         # 常驻直到 Ctrl-C
  *   npm run engine:headless -- --duration 600 --interval 30     # 跑 10 分钟，30s 一轮
  *
- * 目录结构 `<dir>/{config.json, seen.json, state.json, logs/}`；首次运行生成默认
- * config.json（chmod 600 由 ConfigStore 保证）并提示填写关键词与 telegram。
- * 环境变量 `NSM_BOT_TOKEN` / `NSM_CHAT_ID` 可快速注入 telegram 凭据（只进内存不落盘）。
+ * 目录结构 `<dir>/{config.json, seen.json, state.json, hits/, reports/, logs/}`；
+ * 首次运行生成默认 config.json（chmod 600 由 ConfigStore 保证）并提示填写关键词与
+ * telegram。环境变量 `NSM_BOT_TOKEN` / `NSM_CHAT_ID` 可快速注入 telegram 凭据
+ * （只进内存不落盘）。
+ *
+ * AI 能力（D4/D5，与桌面装配方同款接线）：第三 aiClient（defaultTimeoutMs 30s，
+ * proxyScope='all' 时走代理）→ AiProvider / SemanticEvaluator / HitsStore /
+ * DailyReportService（reportsDir=<dir>/reports）；engine deps 注入 evaluator +
+ * hitsStore。常驻模式起日报自循环定时器（sleep ∈ [60s, 30min]，复用 nextCheckAt）；
+ * `--once` 模式跳过日报（单轮冒烟不产文件、不推送）。
  *
  * 限制（有意为之）：配置为启动时快照，headless 不做热更新（桌面装配方经 IPC 负责）；
  * 改配置请重启进程。
@@ -19,8 +26,12 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
 import { HttpClient, redactProxyUrl } from '../src/main/net/http'
-import { FileSeenStore, NODESEEK_SEEN_KEY_PREFIX } from '../src/main/monitor/dedup'
+import { AiProvider } from '../src/main/ai/provider'
+import { SemanticEvaluator } from '../src/main/ai/evaluator'
+import { DailyReportService } from '../src/main/ai/daily-report'
+import { FileSeenStore } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
+import { HitsStore, HITS_DIR_NAME } from '../src/main/monitor/hits-store'
 import { PollScheduler } from '../src/main/monitor/poller'
 import { HtmlSourceAdapter } from '../src/main/monitor/sources/html'
 import { FileEngineState } from '../src/main/monitor/state'
@@ -130,13 +141,15 @@ async function main(): Promise<number | null> {
     logger.info(`poll interval overridden by --interval: ${effective.pollIntervalSec}s (not persisted)`)
   }
 
-  // ---- 两个 HttpClient：按 proxyScope 路由（telegram-only → site 直连） --------
+  // ---- 三个 HttpClient：按 proxyScope 路由（telegram-only → site/ai 直连；D6） ----
   const siteProxyUrl = effective.proxyScope === 'all' ? effective.proxyUrl : ''
   let siteClient: HttpClient
   let tgClient: HttpClient
+  let aiClient: HttpClient
   try {
     siteClient = new HttpClient({ proxyUrl: siteProxyUrl })
     tgClient = new HttpClient({ proxyUrl: effective.proxyUrl })
+    aiClient = new HttpClient({ proxyUrl: siteProxyUrl, defaultTimeoutMs: 30_000 })
   } catch (err) {
     logger.error(
       `invalid proxy url "${redactProxyUrl(effective.proxyUrl)}": ${err instanceof Error ? err.message : String(err)}`
@@ -151,32 +164,66 @@ async function main(): Promise<number | null> {
     getConfig: () => effective.telegram
   })
 
+  // ---- AI 装配（D4/D5）：provider / evaluator / hits / 日报服务 ----------------
+  const aiProvider = new AiProvider({
+    post: (url, init) => aiClient.post(url, init),
+    getConfig: () => effective.ai.provider
+  })
+  const evaluator = new SemanticEvaluator({ provider: aiProvider })
+  const hitsStore = new HitsStore(join(dir, HITS_DIR_NAME))
+  const reportService = new DailyReportService({
+    provider: aiProvider,
+    hits: hitsStore,
+    notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+    getConfig: () => effective,
+    logger,
+    reportsDir: join(dir, 'reports')
+  })
+
   const seen = new FileSeenStore(join(dir, 'seen.json'))
   seen.load()
   const engineState = new FileEngineState(join(dir, 'state.json'))
   engineState.load()
 
-  // ---- --once 统计包装：在 fetch 时点计数（此刻 seen 尚未被本轮 add 污染） ----
+  // ---- getSources 访问器：每轮按 config.sources 过滤 enabled（D3） ------------
+  // v2 仅 nodeseek 一个 adapter；未注册 id log warn 跳过。--once 模式在 fetch
+  // 时点统计（此刻 seen 尚未被本轮 add 污染），去重键与 engine 同口径
+  // `${sourceId}:${topic.id}`（D2）。
   let fetchedCount = 0
   let freshCount = 0
   const onceHits: HitRecord[] = []
-  const engineSource: SourceAdapter = args.once
-    ? {
+  const getSources = (): SourceAdapter[] => {
+    const out: SourceAdapter[] = []
+    for (const s of effective.sources) {
+      if (!s.enabled) continue
+      if (s.id !== source.id) {
+        logger.warn(`no adapter registered for source "${s.id}", skipping`)
+        continue
+      }
+      if (!args.once) {
+        out.push(source)
+        continue
+      }
+      out.push({
+        id: source.id,
         name: source.name,
         fetchLatest: async () => {
           const topics = await source.fetchLatest()
           fetchedCount = topics.length
-          // 去重键与 engine 同口径：`${sourceId}:${topic.id}`（D2）
-          freshCount = topics.filter((t) => !seen.has(NODESEEK_SEEN_KEY_PREFIX + t.id)).length
+          freshCount = topics.filter((t) => !seen.has(`${source.id}:${t.id}`)).length
           return topics
         }
-      }
-    : source
+      })
+    }
+    return out
+  }
 
   let engine!: MonitorEngine
   let lastStatusLine = ''
   const printStatus = (s: EngineStatus): void => {
-    const line = `desired=${s.desired} health=${s.health} nextPollAt=${s.nextPollAt ?? '-'} totalHits=${s.totalHits}`
+    const line =
+      `desired=${s.desired} health=${s.health} nextPollAt=${s.nextPollAt ?? '-'} totalHits=${s.totalHits} ` +
+      `ai=${s.ai.effectiveMode}/${s.ai.degraded}`
     if (line === lastStatusLine) return
     lastStatusLine = line
     console.log(`${new Date().toISOString()} status: ${line}`)
@@ -189,18 +236,20 @@ async function main(): Promise<number | null> {
   })
 
   engine = new MonitorEngine({
-    source: engineSource,
+    getSources,
     seen,
     state: engineState,
     notifier,
     getConfig: () => effective,
     scheduler,
     logger,
+    semanticEvaluator: evaluator,
+    hitsStore,
     onStatus: printStatus,
     ...(args.once ? { onHit: (h: HitRecord) => onceHits.push(h) } : {})
   })
 
-  // ---- --once：单轮后打印统计并退出 ----------------------------------------
+  // ---- --once：单轮后打印统计并退出（跳过日报：冒烟不产文件不推送） -----------
   if (args.once) {
     await engine.pollOnce()
     const st = engine.getStatus()
@@ -209,10 +258,12 @@ async function main(): Promise<number | null> {
     const muted = onceHits.length - notified - failed
     console.log(
       `once summary: fetched=${fetchedCount} fresh=${freshCount} hits=${onceHits.length} ` +
-        `notified=${notified} failed=${failed} muted-or-unconfigured=${muted}`
+        `notified=${notified} failed=${failed} muted-or-unconfigured=${muted} ` +
+        `ai=mode:${st.ai.effectiveMode}/degraded:${st.ai.degraded}/calls:${st.ai.callsToday}`
     )
     siteClient.close()
     tgClient.close()
+    aiClient.close()
     // 给日志 appendFile 一拍落盘再退出（尾部丢失本可容忍，尽量保住）
     await new Promise((r) => setTimeout(r, 100))
     logger.close()
@@ -228,11 +279,38 @@ async function main(): Promise<number | null> {
       `proxy=${redactProxyUrl(effective.proxyUrl) || 'direct'} scope=${effective.proxyScope})`
   )
 
-  let stopping = false
+  // 日报自循环定时器（D5，与桌面 runtime 同款）：sleep = clamp(nextCheckAt-now, 60s, 30min)
+  let reportTimer: ReturnType<typeof setTimeout> | null = null
+  let stopped = false
+  const scheduleReportTimer = (): void => {
+    if (stopped) return
+    const sleep = Math.min(
+      30 * 60_000,
+      Math.max(60_000, reportService.nextCheckAt() - Date.now())
+    )
+    reportTimer = setTimeout(() => {
+      void reportService
+        .tick(engine.getStatus().desired === 'running')
+        .then((ran) => {
+          if (ran) logger.info('daily report generated by timer tick')
+        })
+        .catch((err: unknown) => {
+          logger.error(`daily report tick failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+        .finally(scheduleReportTimer)
+    }, sleep)
+  }
+  scheduleReportTimer()
+  logger.info(
+    `daily report timer started (timeHHMM=${effective.ai.dailyReport.timeHHMM} ` +
+      `enabled=${effective.ai.dailyReport.enabled})`
+  )
+
   const shutdown = (reason: string): void => {
-    if (stopping) return
-    stopping = true
+    if (stopped) return
+    stopped = true
     console.log(`${new Date().toISOString()} shutting down (${reason})`)
+    if (reportTimer !== null) clearTimeout(reportTimer)
     engine.pause()
     void (async () => {
       try {
@@ -240,6 +318,7 @@ async function main(): Promise<number | null> {
       } finally {
         siteClient.close()
         tgClient.close()
+        aiClient.close()
         logger.close()
         process.exit(0)
       }
@@ -250,7 +329,7 @@ async function main(): Promise<number | null> {
   if (args.durationSec !== null) {
     setTimeout(() => shutdown(`--duration ${args.durationSec}s elapsed`), args.durationSec * 1000)
   }
-  return null // 常驻由 scheduler 计时器保活
+  return null // 常驻由 scheduler / 日报计时器保活
 }
 
 void main().then(

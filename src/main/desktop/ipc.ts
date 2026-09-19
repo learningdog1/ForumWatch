@@ -7,10 +7,10 @@
  *   getHits / getLogs / engineControl / openExternal / testAiProvider /
  *   getDailyReport / generateDailyReport / listDailyReports），失败一律收敛为返回值，
  *   绝不向渲染进程抛异常。
- * - AI / 日报五个通道是**占位实现**（W2 接入真实能力）：test/generate 固定返回
- *   {ok:false, error:'AI 功能尚未接入'}；getDailyReport 回当天日期 + markdown:null；
- *   listDailyReports 回空列表。占位先行是为了让 DesktopApi 契约在 preload/渲染端
- *   先行落地，避免 W2 再动三层签名。
+ * - AI / 日报通道（W2-c 接入）：testAiProvider 走 provider.testConnection（错误
+ *   消息已脱敏，无 apiKey 明文）；getDailyReport/loadReport/list 走
+ *   DailyReportService 的文件查询；generateDailyReport 是**手动生成**——跳过
+ *   desired 与 attempts 检查、直接覆盖重生成（推送条件在 generate 内部）。
  */
 import { BrowserWindow, ipcMain, shell } from 'electron'
 import {
@@ -29,16 +29,15 @@ import type {
   LogEntry
 } from '../../shared/types'
 import type { DesktopRuntime } from './runtime'
+import { allowedExternalDomains, isHostAllowed } from '../monitor/sources/registry'
+import { formatLocalDate } from '../monitor/hits-store'
 
-/** AI / 日报能力未接入时占位 handler 的统一回执文案 */
-const AI_NOT_WIRED = 'AI 功能尚未接入'
-
-/** 主→渲染事件推送接口（runtime 把 engine onStatus/onHit 转发给它） */
+/** 主→渲染事件推送接口（runtime 把 engine onStatus/onHit / 日报广播转发给它） */
 export interface EventBroadcaster {
   status(s: EngineStatus): void
   hit(h: HitRecord): void
   log(e: LogEntry): void
-  /** 日报生成完成时推送（DailyReportInfo；发送方 W2 接入） */
+  /** 日报生成完成时推送（DailyReportInfo） */
   report(r: DailyReportInfo): void
 }
 
@@ -124,7 +123,8 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
     }
   })
 
-  // 仅放行 https 且 host 为 nodeseek.com 或其子域，其余拒绝
+  // 仅放行 https 且 host 为已配置（enabled）来源的域或其子域；白名单按
+  // config.sources 派生（v2：nodeseek → nodeseek.com；见 monitor/sources/registry）
   ipcMain.handle(IPC.openExternal, async (_event, url: unknown): Promise<OpenExternalResult> => {
     if (typeof url !== 'string') return { ok: false }
     let parsed: URL
@@ -134,8 +134,9 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
       return { ok: false }
     }
     if (parsed.protocol !== 'https:') return { ok: false }
-    const host = parsed.hostname.toLowerCase()
-    if (host !== 'nodeseek.com' && !host.endsWith('.nodeseek.com')) return { ok: false }
+    if (!isHostAllowed(parsed.hostname, allowedExternalDomains(rt.store.get()))) {
+      return { ok: false }
+    }
     try {
       await shell.openExternal(parsed.toString())
       return { ok: true }
@@ -144,37 +145,45 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
     }
   })
 
-  // ---- AI / 日报（占位实现，W2 接入真实能力） -------------------------------
+  // ---- AI / 日报（W2-c 真实实现） -----------------------------------------
 
-  /** invoke(url) → AiTestResult：发一条最小对话验证 Provider 连通性（W2） */
-  ipcMain.handle(IPC.testAiProvider, (): AiTestResult => ({ ok: false, error: AI_NOT_WIRED }))
+  /** invoke() → AiTestResult：最小对话验证 Provider；错误消息 provider 已脱敏 */
+  ipcMain.handle(IPC.testAiProvider, async (): Promise<AiTestResult> => {
+    try {
+      await rt.aiProvider.testConnection()
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   /** invoke(dateLocal?) → DailyReportInfo：缺省取今天（本地时区），无日报则 markdown:null */
   ipcMain.handle(
     IPC.getDailyReport,
-    (_event, dateLocal?: unknown): DailyReportInfo => {
-      const date = typeof dateLocal === 'string' && dateLocal !== '' ? dateLocal : localDateToday()
-      return { date, markdown: null }
+    async (_event, dateLocal?: unknown): Promise<DailyReportInfo> => {
+      const date =
+        typeof dateLocal === 'string' && dateLocal !== '' ? dateLocal : formatLocalDate()
+      return { date, markdown: await rt.reportService.loadReport(date) }
     }
   )
 
-  /** invoke() → EngineControlResult：手动生成本日日报（生成 + 推送，W2） */
-  ipcMain.handle(IPC.generateDailyReport, (): EngineControlResult => ({
-    ok: false,
-    error: AI_NOT_WIRED
+  /**
+   * invoke() → EngineControlResult：手动生成本日日报。跳过 desired 与 attempts
+   * 检查、覆盖重生成（generate 直接 writeFile 覆盖）；推送条件同 generate 内部
+   * （enabled × telegram 配置 × notifyEnabled）。onGenerated 广播由 reportService
+   * 构造时的回调发出（broadcaster.report）。
+   */
+  ipcMain.handle(IPC.generateDailyReport, async (): Promise<EngineControlResult> => {
+    try {
+      await rt.reportService.generate()
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  /** invoke() → { dates: string[] }：已有日报的日期列表（新→旧，读 reports/ 目录） */
+  ipcMain.handle(IPC.listDailyReports, (): DailyReportListResult => ({
+    dates: rt.reportService.listReportDays()
   }))
-
-  /** invoke() → { dates: string[] }：已有日报的日期列表（新→旧，W2 读 reports/ 目录） */
-  ipcMain.handle(IPC.listDailyReports, (): DailyReportListResult => ({ dates: [] }))
-}
-
-/**
- * 本地时区 'YYYY-MM-DD'（D5 坑清单④：ISO slice(0,10) 是 UTC 日期，不能用）。
- * 临时内联实现，W2 日报/命中分桶落地时换成公共 util。
- */
-function localDateToday(): string {
-  const d = new Date()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}-${mm}-${dd}`
 }

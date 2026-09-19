@@ -85,22 +85,25 @@ async function buildPreview(buffers: Map<string, Buffer>): Promise<void> {
   const clr16 = buffers.get('tray-color-simple.svg')
   const clr32 = buffers.get('tray-color.svg')
   if (!app || !tpl16 || !tpl32 || !clr16 || !clr32) throw new Error('missing render buffers for preview')
-  const app16 = await shrink(app, 16)
+  // 小尺寸展示档用独立简化变体（单一环 + 针 + 青点），矢量按目标像素直出
+  const appSimple64 = await svgToPng('icon-simple.svg', 64)
+  const appSimple32 = await svgToPng('icon-simple.svg', 32)
+  const appSimple16 = await svgToPng('icon-simple.svg', 16)
 
   const tiles: Tile[] = []
 
-  // -- 行 1：应用图标 512/128/64/32/16（浅灰底，基线对齐）--
-  const appRow = [
-    { size: 512, x: 56 },
-    { size: 128, x: 632 },
-    { size: 64, x: 816 },
-    { size: 32, x: 944 },
-    { size: 16, x: 1056 }
+  // -- 行 1：应用图标 512/128（完整版）+ 64/32/16（简化变体），浅灰底基线对齐 --
+  const appRow: { buf: Buffer; size: number; x: number }[] = [
+    { buf: app, size: 512, x: 56 },
+    { buf: await shrink(app, 128), size: 128, x: 632 },
+    { buf: appSimple64, size: 64, x: 816 },
+    { buf: appSimple32, size: 32, x: 944 },
+    { buf: appSimple16, size: 16, x: 1056 }
   ]
   const baseY = 624
   const labels: string[] = []
   for (const item of appRow) {
-    tiles.push({ input: await shrink(app, item.size), left: item.x, top: baseY - item.size })
+    tiles.push({ input: item.buf, left: item.x, top: baseY - item.size })
     labels.push(label(item.x + item.size / 2, 656, `${item.size}`, '#4B5563'))
   }
 
@@ -131,7 +134,7 @@ async function buildPreview(buffers: Map<string, Buffer>): Promise<void> {
     {
       top: 944, bg: '#EFEFF4', titleFill: '#374151', subFill: '#6B7280', markFill: '#9CA3AF',
       title: 'Tray color (Windows) - light',
-      sub: 'gradient base + white radar + cyan blip; from tray-color(-simple).svg',
+      sub: 'gradient base, simplified: ring + needle + cyan blip',
       icons: [[clr16, 940, 984], [clr32, 1024, 976]]
     },
     {
@@ -163,7 +166,7 @@ async function buildPreview(buffers: Map<string, Buffer>): Promise<void> {
     buf: Buffer
   }
   const chips: Chip[] = [
-    { x: 48, bg: '#E9E9ED', caption: 'app 16', buf: app16 },
+    { x: 48, bg: '#E9E9ED', caption: 'app 16 (simple)', buf: appSimple16 },
     { x: 248, bg: '#EFEFF4', caption: 'tpl 16 light', buf: tpl16 },
     { x: 448, bg: '#232329', caption: 'tpl 16 dark (inverted)', buf: tpl16Dark },
     { x: 648, bg: '#EFEFF4', caption: 'clr 16 light', buf: clr16 },
@@ -180,7 +183,7 @@ async function buildPreview(buffers: Map<string, Buffer>): Promise<void> {
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1400" viewBox="0 0 1120 1400">
   <rect width="1120" height="1400" fill="#F6F6F8"/>
   <text x="48" y="56" font-family="${FONT}" font-size="24" font-weight="700" fill="#111827">ForumWatch icons - preview</text>
-  <text x="48" y="84" font-family="${FONT}" font-size="14" fill="#6B7280">app icon 512/128/64/32/16 | tray template and color 16/32 on light and dark | bottom: 16px at 8x nearest zoom</text>
+  <text x="48" y="84" font-family="${FONT}" font-size="14" fill="#6B7280">app icon: 512/128 full variant, 64/32/16 simplified variant | tray template and color 16/32 on light and dark | bottom: 16px at 8x nearest zoom</text>
   <rect x="24" y="104" width="1072" height="596" rx="14" fill="#E9E9ED"/>
   ${labels.join('\n  ')}
   ${trayRects.join('\n  ')}

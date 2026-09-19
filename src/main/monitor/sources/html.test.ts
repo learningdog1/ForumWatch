@@ -70,7 +70,9 @@ describe('HtmlSourceAdapter.fetchLatest', () => {
   it('请求 ?sort=createTime，带浏览器头与 10s 超时', async () => {
     const fetchHtml = okFetch()
     const adapter = new HtmlSourceAdapter({ fetchHtml })
-    expect(adapter.name).toBeTruthy()
+    // D3：id 是 seen 前缀 / state 键 / 状态键的稳定 slug
+    expect(adapter.id).toBe('nodeseek')
+    expect(adapter.name).toBe('NodeSeek')
 
     const topics = await adapter.fetchLatest()
     expect(topics).toHaveLength(49)

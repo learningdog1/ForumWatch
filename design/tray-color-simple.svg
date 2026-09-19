@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
   <!-- 彩色托盘简化版（16 自然尺寸，渲染为 tray.png）。
-       16px 做减法：更圆的底、单环加粗、扇形不透明度提高，保证底板+图形可辨认。 -->
+       looker 返修：单环 + 针 + 青点；针端点 r=3.2（帽尖 r=4.0，距环内缘 4.8
+       留 0.8 缝隙不穿环）；青点在针上方留白处，与针/圆心均不粘连。 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#4F46E5"/>
@@ -8,8 +9,8 @@
     </linearGradient>
   </defs>
   <rect x="0" y="0" width="16" height="16" rx="4.5" fill="url(#bg)"/>
-  <circle cx="8" cy="8.3" r="5.6" fill="none" stroke="#FFFFFF" stroke-width="1.7"/>
-  <path d="M8 8.3 L9.92 3.04 A5.6 5.6 0 0 1 13.03 5.85 Z" fill="#FFFFFF" fill-opacity="0.5"/>
-  <circle cx="8" cy="8.3" r="1.1" fill="#FFFFFF"/>
-  <circle cx="10.19" cy="5.7" r="1.3" fill="#22D3EE"/>
+  <circle cx="8" cy="8.3" r="5.6" fill="none" stroke="#FFFFFF" stroke-width="1.6"/>
+  <path d="M8 8.3 L11.01 7.21" fill="none" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="8" cy="8.3" r="1" fill="#FFFFFF"/>
+  <circle cx="6.73" cy="5.58" r="1.6" fill="#22D3EE"/>
 </svg>

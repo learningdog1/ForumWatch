@@ -12,9 +12,10 @@ import { computeBackoffMs, PollScheduler } from './poller'
 import { FileSeenStore } from './dedup'
 import { FileEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
+import type { SemanticEvaluator, SemanticVerdict } from '../ai/evaluator'
 import { TelegramError } from '../notify/telegram'
 import { createLogger, type Logger } from '../logger'
-import { DEFAULT_APP_CONFIG, type AppConfig, type Topic } from '../../shared/types'
+import { DEFAULT_APP_CONFIG, type AppConfig, type HitRecord, type Topic } from '../../shared/types'
 
 let dir: string
 
@@ -32,7 +33,7 @@ afterEach(async () => {
 function topic(id: string, overrides: Partial<Topic> = {}): Topic {
   return {
     id,
-    sourceId: '', // adapter 不盖章；engine v2 阶段不感知 sourceId（W2 盖章）
+    sourceId: '', // adapter 不盖章；engine 处理前按 adapter.id 盖章（D2/D3）
     title: `title-${id}`,
     url: `https://example.com/post-${id}-1`,
     author: 'alice',
@@ -42,6 +43,11 @@ function topic(id: string, overrides: Partial<Topic> = {}): Topic {
     lastActiveAt: null,
     ...overrides
   }
+}
+
+/** 假时钟推进（fake timers 同步冻结 Date.now）：用于跨过 per-source 退避冷却 */
+function advanceMs(ms: number): void {
+  vi.advanceTimersByTime(ms)
 }
 
 interface Harness {
@@ -58,16 +64,26 @@ interface Harness {
   ticks: Promise<void>[]
   onHit: Mock
   onStatus: Mock
+  /** getSources 返回的活数组：splice/push 即可模拟配置热更新 */
+  sources: SourceAdapter[]
 }
 
 function build(
   opts: {
     config?: Partial<AppConfig>
     impl?: () => Promise<Topic[]>
+    /** 多 source 场景：直接给 adapter 列表（默认单个 id='nodeseek'） */
+    sources?: SourceAdapter[]
     /** 覆盖 getConfig（F7：注入抛错版本） */
     getConfig?: () => AppConfig
     /** 覆盖 seen 文件路径（F9：指向不可写路径让 flush 失败） */
     seenPath?: string
+    /** 引擎构造前对 seen/state 预置（per-source 基线等场景） */
+    preSeed?: (seen: FileSeenStore, state: FileEngineState) => void
+    /** 语义评估器 mock（D4；缺省不注入 = 语义档不可用） */
+    evaluator?: { evaluate: Mock }
+    /** 命中持久化 mock（D5） */
+    hitsStore?: { append: Mock }
   } = {}
 ): Harness {
   const config: AppConfig = {
@@ -83,6 +99,7 @@ function build(
   seen.load()
   const state = new FileEngineState(join(dir, 'state.json'))
   state.load()
+  opts.preSeed?.(seen, state)
 
   const sendHit = vi.fn(async () => {})
   const sendTest = vi.fn(async () => {})
@@ -91,7 +108,8 @@ function build(
   const ticks: Promise<void>[] = []
 
   const fetchLatest = vi.fn(opts.impl ?? (async () => [] as Topic[]))
-  const source: SourceAdapter = { name: 'fake-source', fetchLatest }
+  const sources: SourceAdapter[] =
+    opts.sources ?? [{ id: 'nodeseek', name: 'NodeSeek', fetchLatest }]
 
   let engine!: MonitorEngine
   const scheduler = new PollScheduler({
@@ -106,7 +124,7 @@ function build(
   })
 
   engine = new MonitorEngine({
-    source,
+    getSources: () => sources, // 访问器：热更新语义（D3）
     seen,
     state,
     notifier: { sendHit, sendTest },
@@ -114,7 +132,12 @@ function build(
     scheduler,
     logger,
     onHit,
-    onStatus
+    onStatus,
+    // D4/D5：mock 对象结构满足 SemanticEvaluator / hitsStore 的结构类型
+    ...(opts.evaluator !== undefined
+      ? { semanticEvaluator: opts.evaluator as unknown as SemanticEvaluator }
+      : {}),
+    ...(opts.hitsStore !== undefined ? { hitsStore: opts.hitsStore } : {})
   })
 
   return {
@@ -129,7 +152,8 @@ function build(
     logger,
     ticks,
     onHit,
-    onStatus
+    onStatus,
+    sources
   }
 }
 
@@ -169,6 +193,8 @@ describe('首启基线（防通知风暴）', () => {
     expect(h.engine.getStatus().health).toBe('backoff')
     expect(h.state.getFor('nodeseek').baselineDone).toBe(false)
 
+    // 失败后该 source 进冷却（120s）：越过冷却再轮（冷却中的轮次会跳过它）
+    advanceMs(computeBackoffMs(1, 60_000))
     h.fetchLatest.mockImplementation(async () => [topic('1', { title: '羊毛大促' })])
     await h.engine.pollOnce()
     expect(h.sendHit).not.toHaveBeenCalled() // 补做基线，不是推送
@@ -190,7 +216,7 @@ describe('首启基线（防通知风暴）', () => {
 
     // 新引擎装配（state 仍是 baselineDone=true）：构造时重置为 false 并 warn
     const engine2 = new MonitorEngine({
-      source: { name: 'fake', fetchLatest: h.fetchLatest },
+      getSources: () => [{ id: 'nodeseek', name: 'fake', fetchLatest: h.fetchLatest }],
       seen: seen2,
       state: h.state,
       notifier: { sendHit: h.sendHit, sendTest: h.sendTest },
@@ -435,7 +461,7 @@ describe('推送失败重试（ADR 8.10）', () => {
 })
 
 describe('失败与健康流转', () => {
-  it('ChallengeError → health=challenged，间隔按指数退避放大', async () => {
+  it('ChallengeError → health=challenged，间隔按指数退避放大（冷却剩余折进全局间隔）', async () => {
     const h = build({ impl: async () => [topic('1')] })
     await h.engine.pollOnce() // 基线成功
     const spy = vi.spyOn(h.scheduler, 'setIntervalSec')
@@ -446,13 +472,18 @@ describe('失败与健康流转', () => {
     expect(st.health).toBe('challenged')
     expect(st.consecutiveFailures).toBe(1)
     expect(st.lastError).toContain('challenge')
+    // 全局间隔 = max(配置 60, 冷却剩余 120s)
     expect(spy).toHaveBeenLastCalledWith(computeBackoffMs(1, 60_000) / 1000) // 120
 
+    // 冷却结束后的失败轮才再计一次（冷却中的轮次跳过该 source）
+    advanceMs(computeBackoffMs(1, 60_000))
     await h.engine.pollOnce()
     st = h.engine.getStatus()
     expect(st.consecutiveFailures).toBe(2)
     expect(spy).toHaveBeenLastCalledWith(computeBackoffMs(2, 60_000) / 1000) // 240
     expect(st.health).toBe('challenged')
+    expect(st.sources[0]).toMatchObject({ sourceId: 'nodeseek', health: 'challenged' })
+    expect(st.sources[0].cooldownUntil).not.toBeNull()
   })
 
   it('一般 Error → health=backoff；成功后复位 ok 且间隔回配置值', async () => {
@@ -468,6 +499,8 @@ describe('失败与健康流转', () => {
     expect(st.lastError).toBe('network down')
     expect(spy).toHaveBeenLastCalledWith(120)
 
+    // 越过冷却（120s）后成功 → 复位
+    advanceMs(computeBackoffMs(1, 60_000))
     h.fetchLatest.mockResolvedValueOnce([topic('2'), topic('1')])
     await h.engine.pollOnce()
     st = h.engine.getStatus()
@@ -606,7 +639,7 @@ describe('生命周期与 desired 状态', () => {
     const state2 = new FileEngineState(join(dir, 'state.json'))
     state2.load()
     const engine2 = new MonitorEngine({
-      source: { name: 'fake', fetchLatest: async () => [] as Topic[] },
+      getSources: () => [{ id: 'nodeseek', name: 'fake', fetchLatest: async () => [] as Topic[] }],
       seen: h.seen,
       state: state2,
       notifier: { sendHit: h.sendHit, sendTest: h.sendTest },
@@ -622,10 +655,480 @@ describe('生命周期与 desired 状态', () => {
     await h.engine.pollOnce()
     h.fetchLatest.mockRejectedValueOnce(new Error('x'))
     await h.engine.pollOnce()
+    advanceMs(computeBackoffMs(1, 60_000)) // 越过冷却
     h.fetchLatest.mockResolvedValueOnce([topic('1')])
     await h.engine.pollOnce()
     const statuses = h.onStatus.mock.calls.map((c) => c[0] as ReturnType<MonitorEngine['getStatus']>)
     expect(statuses.some((s) => s.health === 'ok')).toBe(true)
     expect(statuses.some((s) => s.health === 'backoff')).toBe(true)
+  })
+})
+
+describe('多来源（D3：单引擎循环多 source）', () => {
+  it('双 source：一个被挑战一个正常 → 正常的仍被处理推送，全局 health=challenged', async () => {
+    const fetchA = vi.fn(async () => {
+      throw new ChallengeError('cf challenge: status=403')
+    })
+    const fetchB = vi.fn(async () => [topic('b1')])
+    const h = build({
+      sources: [
+        { id: 'forumA', name: 'Forum A', fetchLatest: fetchA },
+        { id: 'forumB', name: 'Forum B', fetchLatest: fetchB }
+      ]
+    })
+    // 第 1 轮：A 失败（challenged，进冷却）；B 首启基线（不推送）
+    await h.engine.pollOnce()
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.seen.has('forumB:b1')).toBe(true)
+    expect(h.state.getFor('forumB').baselineDone).toBe(true)
+
+    // 第 2 轮：A 冷却中被跳过；B 出新帖 → 照常命中推送
+    fetchB.mockResolvedValue([topic('b2', { title: '羊毛B' }), topic('b1')])
+    await h.engine.pollOnce()
+    expect(fetchA).toHaveBeenCalledTimes(1) // 冷却中未被重试
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0][0]).toMatchObject({ id: 'b2', sourceId: 'forumB' })
+    expect(h.seen.has('forumB:b2')).toBe(true)
+    expect(h.state.getFor('forumB').totalHits).toBe(1) // per-source 累计
+
+    // 全局聚合：health 取最差；per-source 快照各自独立
+    const st = h.engine.getStatus()
+    expect(st.health).toBe('challenged')
+    expect(st.consecutiveFailures).toBe(1)
+    expect(st.lastError).toContain('challenge')
+    expect(st.sources.map((s) => s.sourceId)).toEqual(['forumA', 'forumB'])
+    const [sa, sb] = st.sources
+    expect(sa).toMatchObject({ sourceId: 'forumA', health: 'challenged', consecutiveFailures: 1, lastSuccessAt: null })
+    expect(sa.cooldownUntil).not.toBeNull()
+    expect(sb).toMatchObject({ sourceId: 'forumB', health: 'ok', consecutiveFailures: 0, cooldownUntil: null })
+    expect(sb.lastSuccessAt).not.toBeNull()
+  })
+
+  it('冷却中的 source 被跳过：不重复抓取、failures 不增；越过后恢复轮询', async () => {
+    const h = build({ impl: async () => [topic('1')] })
+    await h.engine.pollOnce() // 基线成功
+    h.fetchLatest.mockRejectedValue(new Error('net down'))
+    await h.engine.pollOnce() // 失败 1：冷却 = now + 120s
+    expect(h.engine.getStatus().consecutiveFailures).toBe(1)
+    expect(h.fetchLatest).toHaveBeenCalledTimes(2)
+
+    await h.engine.pollOnce() // 冷却中：本轮跳过该 source
+    expect(h.fetchLatest).toHaveBeenCalledTimes(2)
+    expect(h.engine.getStatus().consecutiveFailures).toBe(1) // 不动 failures
+    expect(h.engine.getStatus().sources[0]?.cooldownUntil).not.toBeNull()
+
+    advanceMs(computeBackoffMs(1, 60_000)) // 越过冷却
+    h.fetchLatest.mockResolvedValue([topic('1')])
+    await h.engine.pollOnce()
+    expect(h.fetchLatest).toHaveBeenCalledTimes(3)
+    expect(h.engine.getStatus().health).toBe('ok')
+  })
+
+  it('sourceId 盖章与 seen 前缀按 source 隔离（键 = `${sourceId}:${topic.id}`）', async () => {
+    const fetchA = vi.fn(async () => [topic('1', { title: '羊毛AA' })])
+    const fetchB = vi.fn(async () => [topic('1', { title: '羊毛BB' })])
+    const h = build({
+      sources: [
+        { id: 'aa', name: 'A', fetchLatest: fetchA },
+        { id: 'bb', name: 'B', fetchLatest: fetchB }
+      ]
+    })
+    // 两个 source 都未基线：首轮全量入集（各自的 `${sourceId}:${id}` 键）不推送
+    await h.engine.pollOnce()
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.seen.has('aa:1')).toBe(true)
+    expect(h.seen.has('bb:1')).toBe(true)
+    expect(h.seen.has('nodeseek:1')).toBe(false) // 无串键
+
+    // 第 2 轮各出新帖（同 topic.id）：互不干扰，engine 处理前各自盖章
+    fetchA.mockResolvedValue([topic('2', { title: '羊毛A2' })])
+    fetchB.mockResolvedValue([topic('2', { title: '羊毛B2' })])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.sendHit.mock.calls.map((c) => (c[0] as Topic).sourceId).sort()).toEqual(['aa', 'bb'])
+    expect(h.seen.has('aa:2')).toBe(true)
+    expect(h.seen.has('bb:2')).toBe(true)
+    for (const x of h.engine.getRecentHits()) {
+      expect(['aa', 'bb']).toContain(x.topic.sourceId) // HitRecord 里的 topic 同样带章
+    }
+  })
+
+  it('per-source baseline 独立：A 已基线、B 未基线 → B 首轮全量入集不推送，A 正常推送', async () => {
+    const fetchA = vi.fn(async () => [topic('a0'), topic('a1', { title: '羊毛A' })])
+    const fetchB = vi.fn(async () => [topic('b1', { title: '羊毛B' })])
+    const h = build({
+      sources: [
+        { id: 'aa', name: 'A', fetchLatest: fetchA },
+        { id: 'bb', name: 'B', fetchLatest: fetchB }
+      ],
+      preSeed: (seen, state) => {
+        state.setFor('aa', { baselineDone: true })
+        seen.add('aa:a0') // A 的存量帖已在集：只有 a1 是新的
+      }
+    })
+    await h.engine.pollOnce()
+    // A 已基线：a1 命中正常推送；B 未基线：整页（含会命中的 b1）只入集不推送
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0][0]).toMatchObject({ id: 'a1', sourceId: 'aa' })
+    expect(h.seen.has('bb:b1')).toBe(true)
+    expect(h.state.getFor('bb').baselineDone).toBe(true) // B 本轮完成基线
+
+    // B 基线后，下一轮新帖才走正常推送管线
+    fetchB.mockResolvedValue([topic('b2', { title: '羊毛B2' })])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.sendHit.mock.calls[1][0]).toMatchObject({ id: 'b2', sourceId: 'bb' })
+  })
+
+  it('全局 scheduler 间隔 = max(配置间隔, 最差 source 剩余退避)；全部健康回配置值', async () => {
+    const fetchA = vi.fn(async () => [topic('a1')])
+    const fetchB = vi.fn(async () => [topic('b1')])
+    const h = build({
+      sources: [
+        { id: 'forumA', name: 'A', fetchLatest: fetchA },
+        { id: 'forumB', name: 'B', fetchLatest: fetchB }
+      ]
+    })
+    const spy = vi.spyOn(h.scheduler, 'setIntervalSec')
+    await h.engine.pollOnce() // 双 source 基线成功
+    expect(spy).toHaveBeenLastCalledWith(60) // 全部健康：配置值
+
+    // A 失败（backoff 120s）、B 健康：全局间隔抬到最差剩余退避
+    fetchA.mockRejectedValue(new Error('a down'))
+    await h.engine.pollOnce()
+    expect(spy).toHaveBeenLastCalledWith(120)
+
+    // 冷却过半（剩余 60s）：间隔随剩余退避回落，但不再低于配置值
+    advanceMs(60_000)
+    await h.engine.pollOnce() // A 跳过、B 成功
+    expect(spy).toHaveBeenLastCalledWith(60)
+    expect(fetchA).toHaveBeenCalledTimes(2) // A 冷却中未重试
+
+    // A 冷却结束并恢复：全部健康 → 回配置值
+    advanceMs(60_000)
+    fetchA.mockResolvedValue([topic('a1')])
+    await h.engine.pollOnce()
+    expect(fetchA).toHaveBeenCalledTimes(3)
+    expect(spy).toHaveBeenLastCalledWith(60)
+    expect(h.engine.getStatus().health).toBe('ok')
+  })
+
+  it('getSources 返回空数组：pollOnce 安全通过，不算失败', async () => {
+    const h = build()
+    h.sources.splice(0, h.sources.length) // 模拟配置里没有任何可用来源
+    await h.engine.pollOnce()
+    const st = h.engine.getStatus()
+    expect(st.health).toBe('ok')
+    expect(st.consecutiveFailures).toBe(0)
+    expect(st.lastError).toBeNull()
+    expect(st.sources).toEqual([])
+    expect(st.lastSuccessAt).toBeNull() // 没有实际抓取，不算成功
+    expect(h.fetchLatest).not.toHaveBeenCalled()
+  })
+})
+
+describe('语义评估管线（D4）', () => {
+  /** 已配置好的 AI 段（provider 三项齐备） */
+  function aiConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
+    return {
+      provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-k', model: 'm' },
+      matchMode: 'both',
+      interests: ['自建主机'],
+      dailyReport: { enabled: false, timeHHMM: '22:00' },
+      ...overrides
+    }
+  }
+
+  it("both 模式：literal 命中不走 AI（evaluate 不被调），matchedBy='literal'", async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'both' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).not.toHaveBeenCalled()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    const hits = h.engine.getRecentHits()
+    expect(hits[0]).toMatchObject({ matchedBy: 'literal', semanticReason: null, matchedKeywords: ['羊毛'] })
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+  })
+
+  it("AI 命中：processHit 走 semantic 分支，matchedBy='semantic'、matchedKeywords=[]、semanticReason 透传", async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([
+          ['nodeseek:2', { hit: true, reason: '与自建主机兴趣明确相关' }]
+        ])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '出手一台家用小主机' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    const [topicsArg, interestsArg] = evaluate.mock.calls[0]!
+    expect(topicsArg.map((t) => t.id)).toEqual(['2'])
+    expect(topicsArg[0].sourceId).toBe('nodeseek') // 盖章后才进批
+    expect(interestsArg).toEqual(['自建主机'])
+
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0][1]).toEqual([]) // semantic 命中不带关键词
+    const hits = h.engine.getRecentHits()
+    expect(hits[0]).toMatchObject({
+      matchedBy: 'semantic',
+      matchedKeywords: [],
+      semanticReason: '与自建主机兴趣明确相关'
+    })
+    expect(hits[0].notifiedAt).not.toBeNull()
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    const st = h.engine.getStatus()
+    expect(st.ai).toMatchObject({ configured: true, effectiveMode: 'semantic', degraded: 'none', callsToday: 1 })
+  })
+
+  it('verdict hit:false：入 seen（与字面未命中同待遇），下轮不再重评', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(h.sendHit).not.toHaveBeenCalled()
+
+    await h.engine.pollOnce() // 同帖在首页：已入 seen，不进批
+    expect(evaluate).toHaveBeenCalledTimes(1)
+  })
+
+  it('未决（Map 缺键）：不入 seen，下轮重评；>12 帖自动切片（12+1 两批）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    ) // 全部未决
+    const h = build({
+      impl: async () => [topic('0')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    // 13 条新帖（页面最新在前）：期望 2 批（12 + 1），批内顺序旧→新
+    const fresh = Array.from({ length: 13 }, (_, i) => topic(String(20 - i)))
+    h.fetchLatest.mockImplementation(async () => [...fresh, topic('0')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(2)
+    const sizes = evaluate.mock.calls.map(([t]) => t.length)
+    expect(sizes).toEqual([12, 1])
+    expect(evaluate.mock.calls[0]![0][0].id).toBe('8') // 批内最旧
+    for (const t of fresh) expect(h.seen.has(`nodeseek:${t.id}`)).toBe(false) // 未决不入 seen
+
+    await h.engine.pollOnce() // 全部重评
+    expect(evaluate).toHaveBeenCalledTimes(4)
+    expect(h.seen.size()).toBe(1) // 仍只有基线那条
+  })
+
+  it('evaluate 抛错：该批全部未决（不入 seen）、lastAiError 记录、consecutiveFailures 不动、health 不受影响', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]): Promise<Map<string, SemanticVerdict>> => {
+        throw new Error('AI provider network error: fetch failed')
+      }
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    const st = h.engine.getStatus()
+    expect(st.health).toBe('ok') // AI 故障 ≠ 抓取故障
+    expect(st.consecutiveFailures).toBe(0)
+    expect(st.ai.lastAiError).toContain('AI provider network error')
+    expect(st.ai.callsToday).toBe(1) // 失败的调用也计数
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'warn' && e.msg.includes('semantic evaluation failed'))
+    ).toBe(true)
+
+    // 恢复：评估成功后 lastAiError 清空
+    evaluate.mockImplementation(async (_topics: Topic[], _interests: string[]) =>
+      new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+    )
+    await h.engine.pollOnce()
+    expect(h.engine.getStatus().ai.lastAiError).toBeNull()
+  })
+
+  it('每日配额 300：达限后降级 literal-only（不再调 evaluate），未决帖按字面语义入 seen，log 一次', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    ) // 全部未决 → 每轮重评
+    const h = build({
+      impl: async () => [topic('0')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    // 13 条新帖 = 2 批/轮；未决不入 seen → 每轮固定 2 次调用
+    const fresh = Array.from({ length: 13 }, (_, i) => topic(String(20 - i)))
+    h.fetchLatest.mockImplementation(async () => [...fresh, topic('0')])
+    await h.engine.pollOnce() // callsToday = 2
+    // 再跑 148 轮 → 2 + 148*2 = 298
+    for (let r = 0; r < 148; r++) await h.engine.pollOnce()
+    expect(h.engine.getStatus().ai.callsToday).toBe(298)
+    expect(h.seen.size()).toBe(1) // 13 帖全部未决，仍在集外
+
+    // 第 150 轮：页面新增 25 条（共 38 未决 = 4 批）；批 1/2 调用后 callsToday=300，
+    // 批 3 触发达限 break + log（剩余 14 帖保持未决）
+    const more = Array.from({ length: 25 }, (_, i) => topic(String(50 - i)))
+    h.fetchLatest.mockImplementation(async () => [...more, ...fresh, topic('0')])
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(300)
+    expect(h.engine.getStatus().ai.callsToday).toBe(300)
+    expect(h.engine.getStatus().ai.degraded).toBe('quota-exhausted')
+    expect(h.seen.size()).toBe(1)
+
+    // 下一轮：配额耗尽 → 降级 literal-only，evaluate 不再被调，未命中帖全部入 seen
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(300)
+    const st = h.engine.getStatus()
+    expect(st.ai).toMatchObject({ degraded: 'quota-exhausted', effectiveMode: 'literal', callsToday: 300 })
+    expect(h.seen.size()).toBe(39) // 38 新帖 + 基线帖
+    const quotaLogs = h.logger
+      .getRecent()
+      .filter((e) => e.msg.includes('AI daily call limit reached'))
+    expect(quotaLogs).toHaveLength(1)
+  })
+
+  it('unconfigured：mode=semantic 但 provider 未配 → effectiveMode=literal、degraded=unconfigured、不算失败', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: {
+        ai: aiConfig({ matchMode: 'semantic', provider: { baseUrl: '', apiKey: '', model: '' } })
+      },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).not.toHaveBeenCalled() // 降级字面档，语义批不存在
+    expect(h.sendHit).not.toHaveBeenCalled() // 字面未命中（标题不含关键词）
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 字面档未命中入 seen
+    const st = h.engine.getStatus()
+    expect(st.ai).toMatchObject({
+      configured: false,
+      effectiveMode: 'literal',
+      degraded: 'unconfigured',
+      lastAiError: null
+    })
+    expect(st.health).toBe('ok')
+    expect(st.consecutiveFailures).toBe(0)
+  })
+
+  it('纯 semantic 模式：标题即使字面可命中也不走字面管线，仍进 AI（字面结果不被改变）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1) // 进了 AI（ despite 字面可命中）
+    expect(evaluate.mock.calls[0]![0].map((t) => t.id)).toEqual(['2'])
+    expect(h.sendHit).not.toHaveBeenCalled() // AI 判 miss → 不推送
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+  })
+
+  it('排除词一票否决先于 AI：被否决帖不进批、入 seen', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '小主机广告' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).not.toHaveBeenCalled() // 排除词否决：不进语义批
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(h.sendHit).not.toHaveBeenCalled()
+  })
+
+  it('interests 为空且 mode 含 semantic：不降级 unconfigured，语义批照走（evaluator 自身全判 miss）', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'both', interests: [] }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    const st = h.engine.getStatus()
+    expect(st.ai).toMatchObject({ configured: true, effectiveMode: 'both', degraded: 'none' })
+    expect(h.seen.has('nodeseek:2')).toBe(true) // miss 入 seen
+  })
+
+  it('hitsStore.append：每次命中被调用且收到 HitRecord；append 抛错只 warn，不影响推送与 onHit', async () => {
+    const append = vi.fn(async (_hit: HitRecord, _now?: Date) => {
+      throw new Error('EACCES: permission denied')
+    })
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { includeKeywords: ['羊毛'] },
+      hitsStore: { append }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce()
+
+    expect(append).toHaveBeenCalledTimes(1)
+    const [hitArg, nowArg] = append.mock.calls[0] as [HitRecord, Date]
+    expect(hitArg.topic.id).toBe('2')
+    expect(hitArg.matchedBy).toBe('literal')
+    expect(nowArg).toBeInstanceOf(Date)
+    // 推送不受 append 失败影响
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    expect(h.engine.getRecentHits()).toHaveLength(1)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'warn' && e.msg.includes('hits append failed'))
+    ).toBe(true)
   })
 })

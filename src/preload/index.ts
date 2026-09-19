@@ -26,7 +26,7 @@ const api: DesktopApi = {
   getLogs: () => ipcRenderer.invoke(IPC.getLogs),
   engineControl: (command) => ipcRenderer.invoke(IPC.engineControl, command),
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url),
-  // AI / 日报（主进程当前为占位实现，W2 接入真实能力）
+  // AI / 日报（主进程 W2-c 已接入：Provider 连通性测试 + 日报生成/查询）
   testAiProvider: () => ipcRenderer.invoke(IPC.testAiProvider),
   getDailyReport: (dateLocal) => ipcRenderer.invoke(IPC.getDailyReport, dateLocal),
   generateDailyReport: () => ipcRenderer.invoke(IPC.generateDailyReport),
