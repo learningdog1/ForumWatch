@@ -191,13 +191,16 @@ export class DailyReportService {
         category: h.topic.category,
         sourceId: h.topic.sourceId,
         matchedBy: h.matchedBy,
+        // 第三轮锐评：旧 hits/*.jsonl 行没有该字段，?? null 归一（LLM 按需引用）
+        commentary: h.commentary ?? null,
         pushed: h.notifiedAt !== null
       }))
     }
     const system =
       '根据命中记录生成中文监控日报，markdown 格式，结构：一段总述（几条命中、' +
       '主要话题）+ 分来源/分类的要点列表（标题、时间、命中方式），结尾一句数据说明' +
-      '（AI 生成）。只输出 markdown。'
+      '（AI 生成）。命中如带锐评（commentary 字段），在要点中用一句话引用它。' +
+      '只输出 markdown。'
     return this.deps.provider.chat({
       system,
       user: JSON.stringify(payload),
@@ -276,7 +279,10 @@ function fallbackReport(date: string, hits: HitRecord[]): string {
     }
     const time = h.notifiedAt !== null ? hhmmLocal(h.notifiedAt) : '--:--'
     const how = h.matchedBy === 'semantic' ? '语义命中' : '字面命中'
-    lines.push(`- ${time} [${h.topic.category}] ${h.topic.title}（${how}）`)
+    // 第三轮锐评：非空时以「」附在命中行尾；无（含旧记录缺字段 → null）不加
+    const commentary = h.commentary ?? null
+    const remark = commentary !== null && commentary !== '' ? `「${commentary}」` : ''
+    lines.push(`- ${time} [${h.topic.category}] ${h.topic.title}（${how}）${remark}`)
   }
   lines.push('', '—— 数据说明：本日报由 ForumWatch 按命中记录自动生成（模板模式）。')
   return lines.join('\n')

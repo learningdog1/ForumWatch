@@ -1297,3 +1297,232 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
     expect(h.sendHit).toHaveBeenCalledTimes(2) // 滚出后不再重试
   })
 })
+
+describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 来源）', () => {
+  /** 已配置好的 AI 段（provider 三项齐备）——语义未决豁免用例需要 */
+  function aiConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
+    return {
+      provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-k', model: 'm' },
+      matchMode: 'semantic',
+      interests: ['自建主机'],
+      dailyReport: { enabled: false, timeHHMM: '22:00' },
+      commentary: { enabled: false },
+      ...overrides
+    }
+  }
+
+  /** 带 creationOrderedIds 能力声明的假 source（id 随创建单调递增的来源语义） */
+  function idOrderedSource(fetchLatest: Mock): SourceAdapter {
+    return { id: 'nodeseek', name: 'NodeSeek', creationOrderedIds: true, fetchLatest }
+  }
+
+  it('老帖顶起不推送：id ≤ 阈值的 unseen 帖入 seen、无推送；同页新帖（id > 阈值）照常命中推送', async () => {
+    const fetchLatest = vi.fn(async () => [topic('1002'), topic('1001'), topic('1000')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce() // 基线：阈值同轮初始化为整页 max 1002
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(1002)
+
+    // 下轮页面混入被回复顶回首页的旧帖（id 800，从未入 seen，标题可命中）+ 新帖 1003
+    fetchLatest.mockImplementation(async () => [
+      topic('1003', { title: '羊毛新帖' }),
+      topic('800', { title: '羊毛旧帖被顶起' }),
+      topic('1002')
+    ])
+    await h.engine.pollOnce()
+
+    // 旧帖：入 seen、绝不推送/不进命中管线
+    expect(h.seen.has('nodeseek:800')).toBe(true)
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('1003')
+    expect(h.engine.getStatus().totalHits).toBe(1)
+    // 阈值推进到本页 max；吞并有观测日志
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(1003)
+    expect(
+      h.logger.getRecent().some((e) => e.level === 'info' && e.msg.includes('old topic(s) swallowed'))
+    ).toBe(true)
+  })
+
+  it('豁免集（ultrabrain 修正）：id ≤ 阈值但上一轮就在 unseen 流里（推送失败重试中）→ 不被吞，重试路径保持', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce() // 基线：阈值 100
+
+    // 第 2 轮：新帖 150 命中但推送真实失败 → 不入 seen；轮末阈值追上（推进到 150）
+    fetchLatest.mockImplementation(async () => [topic('150', { title: '羊毛' }), topic('100')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(h.seen.has('nodeseek:150')).toBe(false)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(150)
+
+    // 第 3 轮：150 仍 unseen 且 150 ≤ 阈值 150——豁免集里有它 → 不当旧帖吞，重试成功入集
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.seen.has('nodeseek:150')).toBe(true)
+
+    // 第 4 轮：已入 seen，不再处理
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+  })
+
+  it('豁免集（语义未决）：上轮 AI 未决帖（不入 seen）下轮 id ≤ 阈值仍重进 AI 批，不被吞', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    ) // 恒未决
+    const fetchLatest = vi.fn(async () => [topic('100')])
+    const h = build({
+      sources: [idOrderedSource(fetchLatest)],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线：阈值 100
+
+    fetchLatest.mockImplementation(async () => [topic('150', { title: '出手一台小主机' }), topic('100')])
+    await h.engine.pollOnce() // 150 进 AI 批未决：不入 seen；阈值推进 150
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:150')).toBe(false)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(150)
+
+    await h.engine.pollOnce() // 150 ≤ 阈值但豁免生效 → 重进 AI 批（而非被吞入 seen）
+    expect(evaluate).toHaveBeenCalledTimes(2)
+    expect(h.seen.has('nodeseek:150')).toBe(false) // 仍未决
+  })
+
+  it('存量升级初始化轮：baselineDone=true 且阈值 null → 整页 unseen 入 seen、不推送不评估、阈值写入、log info、健康 ok', async () => {
+    const fetchLatest = vi.fn(async () => [topic('937071', { title: '羊毛' }), topic('937070')])
+    const h = build({
+      sources: [idOrderedSource(fetchLatest)],
+      preSeed: (_seen, state) => {
+        state.setFor('nodeseek', { baselineDone: true }) // 旧版升级：state 里没有阈值字段
+      }
+    })
+    await h.engine.pollOnce()
+
+    // 含关键词命中的旧帖也不推送、不进命中管线
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.onHit).not.toHaveBeenCalled()
+    expect(h.seen.has('nodeseek:937070')).toBe(true)
+    expect(h.seen.has('nodeseek:937071')).toBe(true)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(937071)
+    expect(
+      h.logger
+        .getRecent()
+        .some((e) => e.level === 'info' && e.msg.includes('id threshold initialized at 937071'))
+    ).toBe(true)
+    expect(h.engine.getStatus().health).toBe('ok') // 静默初始化轮是正常收尾，不算失败
+
+    // 下轮起阈值生效：顶起的旧帖被吞、新帖照常推送
+    fetchLatest.mockImplementation(async () => [
+      topic('937072', { title: '羊毛新' }),
+      topic('900000', { title: '羊毛旧' })
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('937072')
+    expect(h.seen.has('nodeseek:900000')).toBe(true)
+  })
+
+  it('首装基线轮同轮初始化阈值：baselineDone 与整页 max id 同 patch 原子写', async () => {
+    const fetchLatest = vi.fn(async () => [topic('50'), topic('40'), topic('30')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce()
+    expect(h.state.getFor('nodeseek')).toEqual({
+      baselineDone: true,
+      totalHits: 0,
+      maxSeenTopicId: 50
+    })
+  })
+
+  it('命中轮 totalHits 与阈值推进合并一次写盘：阈值不丢、totalHits 累计（引擎侧口径）', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce() // 基线：阈值 100
+
+    fetchLatest.mockImplementation(async () => [topic('110', { title: '羊毛' }), topic('100')])
+    await h.engine.pollOnce() // 命中（delta 1）+ 阈值推进 110：同一 patch 落盘
+    expect(h.state.getFor('nodeseek')).toEqual({
+      baselineDone: true,
+      totalHits: 1,
+      maxSeenTopicId: 110
+    })
+  })
+
+  it('非数字 id：不过滤、不进阈值（含超安全整数）；整页无合法数值 id 时阈值不推进不回撤', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100'), topic('abc'), topic('9007199254740993')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce() // 基线：pageMax=100（abc 与超安全整数串均不计入）
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(100)
+
+    // 非数字 / 超安全整数的新 unseen 帖不做数值比较、不被吞：照常走管线（命中推送）
+    fetchLatest.mockImplementation(async () => [
+      topic('zzz', { title: '羊毛' }),
+      topic('9007199254740995', { title: '羊毛大数' }),
+      topic('100'),
+      topic('abc'),
+      topic('9007199254740993')
+    ])
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.sendHit.mock.calls.map((c) => (c[0] as Topic).id).sort()).toEqual([
+      '9007199254740995',
+      'zzz'
+    ])
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(100) // 阈值不含非法 id
+
+    // 整页无合法数值 id：阈值不动，轮次健康不炸
+    fetchLatest.mockImplementation(async () => [topic('zzz'), topic('def')])
+    await h.engine.pollOnce()
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(100)
+    expect(h.engine.getStatus().health).toBe('ok')
+  })
+
+  it('整页无非数字 id 且阈值 null：不触发升级初始化轮（pageMax null），正常管线不受影响', async () => {
+    const fetchLatest = vi.fn(async () => [topic('abc')]) // 标题不含关键词
+    const h = build({
+      sources: [idOrderedSource(fetchLatest)],
+      preSeed: (_seen, state) => {
+        state.setFor('nodeseek', { baselineDone: true }) // 阈值 null + pageMax null
+      }
+    })
+    await h.engine.pollOnce() // 基线外首轮：无 pageMax → 初始化轮跳过，abc 正常处理（未命中入集）
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBeNull()
+    expect(h.seen.has('nodeseek:abc')).toBe(true)
+    expect(h.sendHit).not.toHaveBeenCalled()
+    fetchLatest.mockImplementation(async () => [topic('def', { title: '羊毛' }), topic('abc')])
+    await h.engine.pollOnce() // 仍无 pageMax → def 照常推送（不被任何轮吞掉）
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('def')
+    expect(h.seen.has('nodeseek:def')).toBe(true)
+  })
+
+  it('pageMax 下降：warn 一行（id 单调性异常信号）；阈值只升不降', async () => {
+    const fetchLatest = vi.fn(async () => [topic('100'), topic('90')])
+    const h = build({ sources: [idOrderedSource(fetchLatest)] })
+    await h.engine.pollOnce() // 基线：阈值 100
+
+    // 下轮高 id 帖滚出首页、整页都是低 id 旧帖：pageMax 90 < 100 → warn；阈值不回撤
+    fetchLatest.mockImplementation(async () => [topic('90'), topic('80')])
+    await h.engine.pollOnce()
+    expect(
+      h.logger
+        .getRecent()
+        .some((e) => e.level === 'warn' && e.msg.includes('page max topic id decreased'))
+    ).toBe(true)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBe(100)
+  })
+
+  it('creationOrderedIds 未声明（undefined）：完全不走过滤——无初始化轮、无阈值写入、低 id unseen 帖照常推送', async () => {
+    const h = build({
+      impl: async () => [topic('50', { title: '羊毛' }), topic('40')],
+      preSeed: (_seen, state) => {
+        state.setFor('nodeseek', { baselineDone: true }) // 存量升级形态，但来源未声明能力
+      }
+    })
+    await h.engine.pollOnce()
+    // 未声明能力 → 不触发升级初始化轮，低 id 帖照常走管线（命中推送 / 未命中入集）
+    expect(h.sendHit).toHaveBeenCalledTimes(1)
+    expect(h.sendHit.mock.calls[0]![0].id).toBe('50')
+    expect(h.seen.has('nodeseek:40')).toBe(true)
+    expect(h.state.getFor('nodeseek').maxSeenTopicId).toBeNull() // 阈值永不写入
+    expect(h.logger.getRecent().some((e) => e.msg.includes('id threshold'))).toBe(false)
+  })
+})

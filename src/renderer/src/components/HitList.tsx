@@ -2,7 +2,8 @@
  * 最近命中列表：时间 · 来源徽标 · 分类徽标 · 标题（openExternal，仅已配置
  * 来源的域会被主进程放行）· 命中方式徽标（字面/语义）· 命中词 chips 或
  * AI 判定理由（语义命中时 matchedKeywords 恒为空，改展示 semanticReason 斜体
- * 小字）· 推送状态（✓已推送 / ✗推送失败[hover 见原因] / −静音[hover 见说明]）。
+ * 小字）· 锐评行（commentary 非空时，💬 前缀 + ai-reason 同款斜体小字；旧
+ * hits/*.jsonl 行无该字段，?? null 归一后不展示）· 推送状态（✓已推送 / ✗推送失败[hover 见原因] / −静音[hover 见说明]）。
  * 时间取 notifiedAt（推送时间）；静音/失败命中没有推送时间，退而取帖子 lastActiveAt。
  */
 import type { HitRecord } from '@shared/types'
@@ -34,9 +35,25 @@ function PushState(props: { hit: HitRecord }) {
   )
 }
 
-/** 命中方式区：字面 → 命中词 chips；语义 → AI 理由（斜体小字） */
+/**
+ * 锐评行（第三轮）：commentary 非空时展示，与 AI 理由同款 ai-reason 斜体小字，
+ * 💬 前缀区分。旧 hits/*.jsonl 行没有该字段（调用处 ?? null 归一），空/缺失
+ * 时整行省略；与语义理由行并存时两行独立展示。
+ */
+function CommentaryLine(props: { commentary: string | null }) {
+  const { commentary } = props
+  if (commentary === null || commentary === '') return null
+  return (
+    <span className="ai-reason" title={commentary}>
+      💬 {commentary}
+    </span>
+  )
+}
+
+/** 命中方式区：字面 → 命中词 chips；语义 → AI 理由（斜体小字）；锐评（有则附同区域） */
 function MatchInfo(props: { hit: HitRecord }) {
   const { hit } = props
+  const commentary = hit.commentary ?? null
   if (hit.matchedBy === 'semantic') {
     return (
       <span className="hit-how semantic">
@@ -46,6 +63,7 @@ function MatchInfo(props: { hit: HitRecord }) {
             AI: {hit.semanticReason}
           </span>
         )}
+        <CommentaryLine commentary={commentary} />
       </span>
     )
   }
@@ -59,6 +77,7 @@ function MatchInfo(props: { hit: HitRecord }) {
           </span>
         ))}
       </span>
+      <CommentaryLine commentary={commentary} />
     </span>
   )
 }

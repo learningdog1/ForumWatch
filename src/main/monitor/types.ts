@@ -25,5 +25,14 @@ export interface SourceAdapter {
   readonly id: string
   /** 展示名（如 'NodeSeek'），给日志与 UI */
   readonly name: string
+  /**
+   * 能力声明（W3 "新帖 vs 回复顶起旧帖"过滤）：该来源的 topic id 是否随创建时间
+   * 单调递增。声明 true 时 engine 维护 per-source 的 maxSeenTopicId 阈值
+   * （FileEngineState），把 "unseen 且数值 id ≤ 阈值" 的帖子当"被回复顶回首页的
+   * 旧帖"跳过（入 seen 不推送）——NodeSeek 首页按**最后回复时间**排序，靠它区分
+   * 新帖与顶帖。未声明（undefined）的来源完全不走该过滤（未来 RSS 源的 guid
+   * 非数值/非单调，不受影响）。
+   */
+  readonly creationOrderedIds?: boolean
   fetchLatest(): Promise<Topic[]>
 }

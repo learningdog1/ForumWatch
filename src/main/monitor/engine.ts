@@ -30,7 +30,21 @@
  * per-source 运行态（SourceRuntime，内存）：health / lastSuccessAt / lastError /
  * consecutiveFailures / cooldownUntilMs——同一退避曲线 computeBackoffMs（含
  * ChallengeError：health='challenged' 但同样进冷却，避免每轮硬撞 Cloudflare）。
- * 失败只影响该 source；持久化部分（baselineDone / totalHits）走 state.getFor/setFor。
+ * 失败只影响该 source；持久化部分（baselineDone / totalHits / maxSeenTopicId）
+ * 走 state.getFor/setFor。
+ *
+ * 旧帖过滤（W3，仅 creationOrderedIds 来源）：NodeSeek 首页按最后回复时间排序，
+ * 旧帖被回复顶回首页会被误判新帖。engine 维护 per-source 阈值 maxSeenTopicId
+ * （持久化），unseen 且数值 id ≤ 阈值的帖子按旧帖跳过（入 seen 不推送）。
+ * - 阈值初始化两条路径：真·首装在基线轮末同轮写入整页 max id；存量升级
+ *   （baselineDone=true 但阈值 null）走静默初始化轮——整页 unseen 全入 seen、
+ *   写阈值、不推送不评估，正常收尾返回。
+ * - 豁免集 prevUnseenKeys（ultrabrain 修正）：上一轮就在 unseen 处理流里的帖子
+ *   （推送失败重试 / 语义未决重评——它们不入 seen）不被阈值吞掉，否则轮末
+ *   阈值追上后重试机会被永久杀死。
+ * - 阈值只升不降（max(旧阈值, 本页 max 数值 id)），与 seen 重建/baseline 重置
+ *   互不影响；pageMax 下降时 warn（id 单调性异常信号）。
+ * - 非数字 id（非 /^\d+$/ 或超出安全整数）跳过过滤且不计入阈值。
  *
  * 全局聚合（每轮收尾 finishRound 派生，既有消费方——托盘/UI——不破）：
  * health = 各 source 最差（challenged > backoff > ok；无 source → ok）；
@@ -94,6 +108,28 @@ const seenKeyFor = (sourceId: string, topicId: string): string => `${sourceId}:$
 /** seen 键 → sourceId 部分（首个冒号前；pruneRetryMaps 判断键归属用，F5） */
 const sourceIdOfKey = (key: string): string => key.slice(0, key.indexOf(':'))
 
+/**
+ * topic id 的数值解析（W3 旧帖过滤）：纯数字字符串且落在安全整数范围才有效
+ * （`/^\d+$/` + Number.isSafeInteger；前导零容忍，超大数字串视为非法）。
+ * 非法（null）时该帖跳过过滤、不计入阈值计算。
+ */
+const NUMERIC_TOPIC_ID_RE = /^\d+$/
+function parseNumericTopicId(id: string): number | null {
+  if (!NUMERIC_TOPIC_ID_RE.test(id)) return null
+  const n = Number(id)
+  return Number.isSafeInteger(n) ? n : null
+}
+
+/** 整页最大合法数值 id（W3 阈值初始化/推进与 pageMax 观测的唯一输入）；无合法数值 id 时 null */
+function maxNumericTopicId(topics: Topic[]): number | null {
+  let max: number | null = null
+  for (const t of topics) {
+    const n = parseNumericTopicId(t.id)
+    if (n !== null && (max === null || n > max)) max = n
+  }
+  return max
+}
+
 /** 聚合 health 取最差的排序权重（challenged > backoff > ok） */
 const HEALTH_SEVERITY: Record<HealthState, number> = { ok: 0, backoff: 1, challenged: 2 }
 
@@ -109,6 +145,18 @@ interface SourceRuntime {
   cooldownUntilMs: number | null
   /** 是否已对该 source 执行过 re-baseline 检查（seen rebuiltFromCorrupt × baselineDone） */
   baselineChecked: boolean
+  /**
+   * W3 旧帖过滤豁免集：上一轮实际进入 unseen 处理循环的键集（含字面/语义/重试
+   * 所有路径）。推送失败重试与语义未决的帖子不入 seen，而轮末阈值会追上它们的
+   * id——下一轮若无豁免会被 "id ≤ 阈值" 当旧帖入 seen，重试/重评机会被永久吞掉。
+   * 每轮成功观测后整集替换为本轮 unseen 键集（替换即裁剪：滚出首页/已入 seen
+   * 的键自然消失；冷却或抓取失败的轮次不更新，保留到下一次成功观测——与
+   * pruneRetryMaps 同款生命周期）。内存态：进程重启后丢失（重启瞬间在途重试的
+   * 帖子会被阈值吞掉，可接受——重试窗口本来就有界）。
+   */
+  prevUnseenKeys: Set<string>
+  /** 上一轮页面的最大合法数值 id（W3 观测：pageMax 下降 warn 的比较基准）；null = 未观测过 */
+  lastPageMaxId: number | null
 }
 
 export interface EngineDeps {
@@ -298,7 +346,7 @@ export class MonitorEngine {
       if (rt.cooldownUntilMs !== null && this.now() < rt.cooldownUntilMs) continue
       observedSources.add(adapter.id)
       try {
-        await this.pollSource(adapter, cfg, roundTopicKeys)
+        await this.pollSource(adapter, rt, cfg, roundTopicKeys)
         this.succeedSource(rt)
       } catch (err) {
         this.failSource(adapter.id, rt, err, cfg.pollIntervalSec)
@@ -358,15 +406,17 @@ export class MonitorEngine {
 
   /**
    * 轮询单个 source 的完整管线（D4 匹配管线逐条）：
-   * 盖章 → 基线判断 → 新帖逆序处理（排除词否决 → literal → 语义候选收集）→
-   * 语义批评估（每批 ≤ MAX_SEMANTIC_BATCH，verdict 三态处理）→
-   * 轮末 flush/prune/按 source 持久化 totalHits。
+   * 盖章 → 基线判断（W3：基线轮末同轮初始化 id 阈值）→ 存量升级静默初始化轮
+   * （W3：baselineDone=true 但阈值 null 时整页入 seen 不推送）→ 新帖逆序处理
+   * （旧帖 id 过滤 → 排除词否决 → literal → 语义候选收集）→ 语义批评估 →
+   * 轮末 flush/prune/prevUnseenKeys 轮换/阈值推进与 totalHits 合并持久化。
    * 推送顺序：literal 命中按页面逆序（旧→新）在遍历中即时推送；语义命中在其后
    * 按批内顺序（旧→新）推送——批式评估天然滞后一轮内位置，跨档顺序不保证。
    * 异常上抛给 pollOnce 的 per-source catch。
    */
   private async pollSource(
     adapter: SourceAdapter,
+    rt: SourceRuntime,
     cfg: AppConfig,
     roundTopicKeys: Set<string>
   ): Promise<void> {
@@ -377,16 +427,67 @@ export class MonitorEngine {
     // 本轮观测到的 topic 键登记（F5 轮末清理的保留集）
     for (const t of topics) roundTopicKeys.add(seenKeyFor(adapter.id, t.id))
 
-    // 首启基线（ADR 8.5）：整页只入去重集不推送，防通知风暴（per-source 独立）
-    if (!this.deps.state.getFor(adapter.id).baselineDone) {
+    // ---- W3 id 阈值上下文（仅 creationOrderedIds 来源参与；其余来源零行为变化） --
+    const idFilter = adapter.creationOrderedIds === true
+    const pageMaxId = maxNumericTopicId(topics)
+    // pageMax 观测：下降 = id 单调性异常信号（阈值只升不降，不受影响；但值得告警
+    // ——可能页面结构变化/抓到异常页/站点 id 语义改变）
+    if (idFilter && pageMaxId !== null && rt.lastPageMaxId !== null && pageMaxId < rt.lastPageMaxId) {
+      this.deps.logger.warn(
+        `source ${adapter.id}: page max topic id decreased (${rt.lastPageMaxId} -> ${pageMaxId}), id monotonicity anomaly`
+      )
+    }
+    if (idFilter) rt.lastPageMaxId = pageMaxId
+    const sourceState = this.deps.state.getFor(adapter.id)
+    const threshold = idFilter ? sourceState.maxSeenTopicId : null
+
+    // 首启基线（ADR 8.5）：整页只入去重集不推送，防通知风暴（per-source 独立）。
+    // W3：基线轮末同轮初始化阈值（整页 max id），与 baselineDone 同 patch 原子写。
+    // 取 max(旧阈值, pageMax)——seen 损坏补基线时旧阈值仍在（阈值独立于 seen
+    // 重建），历史高点不该被当前页拉低。
+    if (!sourceState.baselineDone) {
       for (const t of topics) this.deps.seen.add(seenKeyFor(adapter.id, t.id))
       await this.flushSeenOrFail()
-      this.persistState(adapter.id, { baselineDone: true })
-      this.deps.logger.info(`source ${adapter.id}: baseline captured (${topics.length} topics)`)
+      this.persistState(adapter.id, {
+        baselineDone: true,
+        ...(idFilter && pageMaxId !== null
+          ? { maxSeenTopicId: Math.max(threshold ?? 0, pageMaxId) }
+          : {})
+      })
+      this.deps.logger.info(
+        `source ${adapter.id}: baseline captured (${topics.length} topics)` +
+          (idFilter && pageMaxId !== null ? `, id threshold initialized at ${pageMaxId}` : '')
+      )
+      rt.prevUnseenKeys = new Set() // 基线整页入集：无在途帖，豁免集清空
+      return
+    }
+
+    // ---- W3 存量升级静默初始化轮：baselineDone=true 但阈值缺失 ------------------
+    // 旧版升级用户首跑（state 里没有 maxSeenTopicId）：若直接走正常管线，页面上
+    // 所有"回复顶起/久未见过"的旧帖都会被当新帖评估推送（正是本特性要修的 bug
+    // 的存量版）。本轮整页 unseen 全部入 seen、写阈值、不推送不评估，正常收尾
+    // 返回（不算失败）；下轮起阈值过滤生效。pageMax 为 null（整页无合法数值 id，
+    // 对 NodeSeek 属异常形态）时不做初始化，落回正常管线（阈值仍 null = 不过滤）。
+    if (idFilter && threshold === null && pageMaxId !== null) {
+      const unseenCount = topics.filter(
+        (t) => !this.deps.seen.has(seenKeyFor(adapter.id, t.id))
+      ).length
+      for (const t of topics) this.deps.seen.add(seenKeyFor(adapter.id, t.id))
+      await this.flushSeenOrFail()
+      this.persistState(adapter.id, { maxSeenTopicId: pageMaxId })
+      this.deps.logger.info(
+        `source ${adapter.id}: id threshold initialized at ${pageMaxId}, ` +
+          `${unseenCount} topics swallowed (upgrade init)`
+      )
+      rt.prevUnseenKeys = new Set() // 整页已入集：无在途帖
       return
     }
 
     const unseen = topics.filter((t) => !this.deps.seen.has(seenKeyFor(adapter.id, t.id)))
+    /** W3：本轮 unseen 键集（轮末整集替换为下一轮的豁免集 prevUnseenKeys） */
+    const roundUnseenKeys = new Set(unseen.map((t) => seenKeyFor(adapter.id, t.id)))
+    /** W3：本轮被旧帖过滤吞并（入 seen 不推送）的帖子数（观测用） */
+    let swallowedOld = 0
     const effective = this.deriveAiStatus().effectiveMode
     const literalActive = effective === 'literal' || effective === 'both'
     const semanticActive =
@@ -398,6 +499,19 @@ export class MonitorEngine {
     // 页面最新在前 → 逆序处理，推送顺序旧→新
     for (const topic of [...unseen].reverse()) {
       const key = seenKeyFor(adapter.id, topic.id)
+      // W3 旧帖过滤（先于置顶/排除词分支）：首页按最后回复排序，被回复顶回首页
+      // 的旧帖满足 "unseen 且数值 id ≤ 阈值" → 入 seen 不推送。豁免：上一轮就在
+      // unseen 处理流里的帖子（prevUnseenKeys，含推送失败重试/语义未决——它们
+      // 不入 seen，而轮末阈值会追上其 id，不豁免会永久吞掉重试机会）。
+      // 非数字 id 不过滤（也不进阈值计算）。
+      if (idFilter && threshold !== null) {
+        const numericId = parseNumericTopicId(topic.id)
+        if (numericId !== null && numericId <= threshold && !rt.prevUnseenKeys.has(key)) {
+          this.deps.seen.add(key)
+          swallowedOld++
+          continue
+        }
+      }
       if (topic.pinned) {
         // 置顶是旧帖：入去重集但绝不推送
         this.deps.seen.add(key)
@@ -440,15 +554,38 @@ export class MonitorEngine {
       await this.evaluateSemantic(adapter.id, aiPending, cfg)
     }
 
+    // W3 轮末：本轮 unseen 键集整集替换为下一轮的豁免集（替换即裁剪，生命周期
+    // 对齐 pruneRetryMaps：滚出首页/已入 seen 的键自然消失；本轮冷却跳过或抓取
+    // 失败的 source 不走到这里，其豁免集原样保留到下一次成功观测）
+    rt.prevUnseenKeys = roundUnseenKeys
+    if (swallowedOld > 0) {
+      this.deps.logger.info(
+        `source ${adapter.id}: ${swallowedOld} old topic(s) swallowed ` +
+          `(bumped by replies, id <= threshold ${threshold})`
+      )
+    }
+
     await this.flushSeenOrFail()
     this.deps.seen.prune()
-    // totalHits 按 source 持久化（本轮 delta；无新增不写盘）
+    // 轮末持久化（合并为一次 setFor，避免双写）：totalHits delta（无新增不写）+
+    // W3 阈值推进 max(旧阈值 ?? 0, pageMax)——仅变化时写入，只升不降（pageMax
+    // 低于旧阈值 = 高 id 帖滚出首页，正常现象，不回撤）。
     const delta = this.pendingHits.get(adapter.id) ?? 0
+    const patch: Partial<SourceEngineState> = {}
+    if (idFilter && pageMaxId !== null && pageMaxId > (threshold ?? 0)) {
+      patch.maxSeenTopicId = pageMaxId
+    }
     if (delta > 0) {
-      this.persistState(adapter.id, {
-        totalHits: this.deps.state.getFor(adapter.id).totalHits + delta
-      })
+      patch.totalHits = this.deps.state.getFor(adapter.id).totalHits + delta
       this.pendingHits.set(adapter.id, 0)
+    }
+    if (patch.maxSeenTopicId !== undefined || patch.totalHits !== undefined) {
+      this.persistState(adapter.id, patch)
+    }
+    if (patch.maxSeenTopicId !== undefined) {
+      this.deps.logger.info(
+        `source ${adapter.id}: id threshold advanced to ${patch.maxSeenTopicId} (pageMax=${pageMaxId})`
+      )
     }
   }
 
@@ -526,7 +663,9 @@ export class MonitorEngine {
         lastErrorAtMs: 0,
         consecutiveFailures: 0,
         cooldownUntilMs: null,
-        baselineChecked: false
+        baselineChecked: false,
+        prevUnseenKeys: new Set(),
+        lastPageMaxId: null
       }
       this.runtimes.set(sourceId, rt)
       this.status.totalHits += this.deps.state.getFor(sourceId).totalHits

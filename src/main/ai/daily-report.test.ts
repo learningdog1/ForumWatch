@@ -1,7 +1,8 @@
 /**
  * DailyReportService 单测：provider.chat / hits.readDay / notifier.sendRaw /
  * getConfig 全 mock，reportsDir 走真实 tmpdir。
- * 覆盖：零命中固定文案（不调 LLM）/ 有命中 LLM 素材形状 / LLM 失败降级模板 /
+ * 覆盖：零命中固定文案（不调 LLM）/ 有命中 LLM 素材形状（含第三轮锐评
+ * commentary 有/无两态）/ LLM 失败降级模板（锐评「」附行尾）/
  * 推送条件 / 分段 / tick 条件矩阵 / attempts 上限与跨日清零 / nextCheckAt /
  * listReportDays / loadReport。
  */
@@ -122,11 +123,13 @@ describe('generate', () => {
     expect(h.onGenerated).toHaveBeenCalledWith({ date: '2026-09-19', markdown: md })
   })
 
-  it('有命中：LLM 被调，user JSON 含命中摘要（time/title/category/sourceId/matchedBy/pushed），markdown 落盘', async () => {
+  it('有命中：LLM 被调，user JSON 含命中摘要（time/title/category/sourceId/matchedBy/commentary/pushed），markdown 落盘', async () => {
     const hits = [
       makeHit('1', '羊毛 A'),
       makeHit('2', '语义 B', 'semantic'),
-      { ...makeHit('3', '推送失败 C'), notifiedAt: null, notifyError: 'telegram down' }
+      { ...makeHit('3', '推送失败 C'), notifiedAt: null, notifyError: 'telegram down' },
+      { ...makeHit('4', '带锐评 D', 'semantic'), commentary: '这价格怕不是钓鱼' },
+      { ...makeHit('5', '空锐评 E'), commentary: null }
     ]
     const h = makeHarness({ hitsForDay: hits })
     const md = await h.svc.generate(at(22, 30))
@@ -134,26 +137,35 @@ describe('generate', () => {
     expect(h.chat).toHaveBeenCalledTimes(1)
     const req = h.chat.mock.calls[0]![0] as { system: string; user: string; timeoutMs?: number; maxTokens?: number }
     expect(req.system).toContain('中文监控日报')
+    // 第三轮：system prompt 提示 LLM 在要点中引用锐评
+    expect(req.system).toContain('命中如带锐评（commentary 字段），在要点中用一句话引用它')
     expect(req.timeoutMs).toBe(30000)
     expect(req.maxTokens).toBe(1500)
     const payload = JSON.parse(req.user) as {
       date: string
       total: number
-      hits: Array<{ title: string; category: string; sourceId: string; matchedBy: string; pushed: boolean }>
+      hits: Array<{ title: string; category: string; sourceId: string; matchedBy: string; commentary: string | null; pushed: boolean }>
     }
     expect(payload.date).toBe('2026-09-19')
-    expect(payload.total).toBe(3)
-    expect(payload.hits).toHaveLength(3)
+    expect(payload.total).toBe(5)
+    expect(payload.hits).toHaveLength(5)
     expect(payload.hits[0]).toMatchObject({ title: '羊毛 A', category: '交易', sourceId: 'nodeseek', matchedBy: 'literal', pushed: true })
     expect(payload.hits[1]).toMatchObject({ matchedBy: 'semantic' })
     expect(payload.hits[2]).toMatchObject({ pushed: false })
+    // 第三轮锐评两态：有 → 原文；无（旧 jsonl 行缺字段 / 显式 null）→ 归一 null
+    expect(payload.hits[0]).toMatchObject({ commentary: null })
+    expect(payload.hits[3]).toMatchObject({ commentary: '这价格怕不是钓鱼' })
+    expect(payload.hits[4]).toMatchObject({ commentary: null })
     expect(md).toBe('# AI 日报\n\n总述内容。')
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
   })
 
-  it('LLM 抛错：降级固定模板仍成功落盘，log warn，推送照发', async () => {
+  it('LLM 抛错：降级固定模板仍成功落盘，log warn，推送照发（锐评「」附行尾，无锐评不加）', async () => {
     const h = makeHarness({
-      hitsForDay: [makeHit('1', '羊毛 A'), makeHit('2', '语义 B', 'semantic')],
+      hitsForDay: [
+        makeHit('1', '羊毛 A'),
+        { ...makeHit('2', '语义 B', 'semantic'), commentary: '这价格怕不是钓鱼' }
+      ],
       chatReply: () => new Error('AI provider network error')
     })
     const md = await h.svc.generate(at(22, 30))
@@ -163,6 +175,9 @@ describe('generate', () => {
     expect(md).toContain('羊毛 A')
     expect(md).toContain('语义 B')
     expect(md).toContain('语义命中')
+    // 第三轮锐评：有 → 「原文」附在命中行尾；无 → 命中行到（命中方式）即止
+    expect(md).toMatch(/语义 B（语义命中）「这价格怕不是钓鱼」$/m)
+    expect(md).toMatch(/羊毛 A（字面命中）$/m)
     expect(md).toContain('模板模式')
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
     expect(h.sendRaw).toHaveBeenCalledTimes(1)

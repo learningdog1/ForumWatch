@@ -88,6 +88,11 @@ export class HtmlSourceAdapter implements SourceAdapter {
   /** 稳定 slug：seen 前缀 `nodeseek:{id}`（与 v1 seen 迁移共用）、state 键、状态键 */
   readonly id = 'nodeseek'
   readonly name = 'NodeSeek'
+  /**
+   * W3 能力声明：NodeSeek topic id 随创建单调递增（/post-{id} 递增分配），
+   * engine 据此做 "新帖 vs 回复顶起旧帖" 的 id 阈值过滤。
+   */
+  readonly creationOrderedIds = true
 
   private readonly fetchHtml: FetchLike
   private readonly baseUrl: string
@@ -98,6 +103,10 @@ export class HtmlSourceAdapter implements SourceAdapter {
   }
 
   async fetchLatest(): Promise<Topic[]> {
+    // 勘误（2026-09-19 实测）：?sort=createTime 参数被服务端忽略——首页真实排序
+    // 是「最后回复时间」，旧帖被回复顶回首页属于正常行为。URL 参数保留无害；
+    // 「新帖 vs 回复顶起旧帖」的区分由 engine 侧 maxSeenTopicId 阈值过滤承担
+    // （W3，见 types.ts 的 creationOrderedIds 能力声明与 engine.ts）。
     const url = `${this.baseUrl}/?sort=createTime`
     // fetchHtml reject（网络错误 / 超时 abort）原样上抛，不吞不改
     const res = await this.fetchHtml(url, {

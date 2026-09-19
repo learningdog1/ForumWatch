@@ -207,6 +207,9 @@ async function main(): Promise<number | null> {
       out.push({
         id: source.id,
         name: source.name,
+        // W3：包装层必须透传能力声明，否则 --once 模式 engine 看不到
+        // creationOrderedIds、旧帖过滤整段失效
+        creationOrderedIds: source.creationOrderedIds,
         fetchLatest: async () => {
           const topics = await source.fetchLatest()
           fetchedCount = topics.length
