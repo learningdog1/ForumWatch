@@ -74,7 +74,7 @@ function makeHarness(
 ): Harness {
   const cfg: AppConfig = {
     ...structuredClone(DEFAULT_APP_CONFIG),
-    telegram: { botToken: 'T', chatId: 'C' },
+    channels: [{ id: 'telegram', type: 'telegram' as const, enabled: true, botToken: 'T', chatId: 'C' }],
     notifyEnabled: true,
     ai: {
       ...structuredClone(DEFAULT_APP_CONFIG.ai),
@@ -235,11 +235,11 @@ describe('generate', () => {
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
   })
 
-  it('推送条件：dailyReport.enabled=false / notifyEnabled=false / telegram 未配置 → 不调 sendRaw', async () => {
+  it('推送条件：dailyReport.enabled=false / notifyEnabled=false / 无就绪通道（R6-W1 通道化判定） → 不调 sendRaw', async () => {
     for (const patch of [
       { ai: { ...DEFAULT_APP_CONFIG.ai, dailyReport: { enabled: false, timeHHMM: '22:00' } } },
       { notifyEnabled: false },
-      { telegram: { botToken: '', chatId: '' } }
+      { channels: [{ id: 'telegram', type: 'telegram' as const, enabled: true, botToken: '', chatId: '' }] }
     ]) {
       const h = makeHarness({ cfg: patch })
       await h.svc.generate(at(22, 30))

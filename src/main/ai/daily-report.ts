@@ -8,7 +8,8 @@
  *   日报不许因 LLM 挂掉而失败；文件写失败才向上抛。
  * - 日期口径一律本地时区（formatLocalDate，D5 坑清单④：ISO slice 是 UTC）。
  * - 文件名 `YYYY-MM-DD.md`，直接 writeFile 覆盖（日报允许手动重新生成覆盖）。
- * - 推送条件：cfg.ai.dailyReport.enabled 且 telegram 配置完整且 notifyEnabled；
+ * - 推送条件：cfg.ai.dailyReport.enabled 且有就绪推送通道（R6-W1 起通道化判定）
+ *   且 notifyEnabled；
  *   推送失败只 log error 不影响返回值。分段：>3500（UTF-16 口径 text.length）
  *   按行边界聚合切分，续段尾缀"（续 N）"。
  * - tick（定时检查）：cfg.ai.dailyReport.enabled（功能总开关，关闭时到点不
@@ -31,6 +32,7 @@ import type {
   HitRecord
 } from '../../shared/types'
 import type { Logger } from '../logger'
+import { anyChannelReady } from '../notify/types'
 import type { AiProvider } from './provider'
 
 /** 日报 LLM 请求超时（D5） */
@@ -214,7 +216,10 @@ export class DailyReportService {
   /** 按配置推送：分段送 notifier.sendRaw；失败只 log error，不影响 generate 返回 */
   private async pushIfEnabled(markdown: string): Promise<void> {
     const cfg = this.deps.getConfig()
-    const configured = cfg.telegram.botToken !== '' && cfg.telegram.chatId !== ''
+    // R6-W1：configured 判定通道化（任一 enabled 且凭据齐备的已实现通道；本轮仅
+    // telegram，与旧 cfg.telegram 直读等价）。notifier 仍直连 TelegramNotifier
+    // （sendRaw），W4 才走路由。
+    const configured = anyChannelReady(cfg.channels)
     if (!cfg.ai.dailyReport.enabled || !cfg.notifyEnabled || !configured) return
     const chunks = splitForTelegram(markdown)
     try {
