@@ -107,3 +107,4 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 - **D7 已落地，一处执行期细化**：**16px 图标去青点**（looker 复核返修：青点折算 16px 后距环内缘不足 0.2px，抗锯齿后与环顶描边熔成糊团——16 档与 Template 对齐只留"环 + 针"，青点保留在 32 档）。npm run icons（sharp devDep）+ design/ SVG 源入库照裁定。
 - **D8 已落地**：三 tab（监控台/今日回顾/设置）、设置八卡片（关键词/Telegram/AI 模型/监控模式/每日总结/轮询/网络/行为）、命中列表来源徽标 + 字面/语义命中方式徽标 + 语义理由、AI 状态块看 effectiveMode 与 degraded 三态。
 - **坑清单 ①–⑧ 全部兑现**：含 ⑤ headless.ts 同款接线 AI 能力（aiClient/evaluator/hitsStore/DailyReportService）。
+- **审查后细化（第二轮代码审查）**：日报开关 `ai.dailyReport.enabled` 定为**功能总开关**——关闭时定时 tick 到点不生成（不调 LLM、不写文件、不消耗 attempts；「今日回顾 → 立即生成」的手动 generate 不受影响）。verdict 内存 Map 已按坑⑥补实现（语义命中×推送失败 → 缓存 reason，下轮绕过 AI 批直接按已判 hit 重试，成功/静音清除；轮末对滚出首页的键统一清理，与 pendingNotifyErrors 两套机制不串）。迁移拷贝顺序定为 **seen → state → config**（config.json 存在即「已迁移」标记，标记最后落位，防 kill 窗口内 seen/state 永久不补拷）。空 interests 时引擎侧直接跳过 AI 批（不计数）；手动 resume（IPC/托盘）desired 翻转后补跑一次日报 tick。

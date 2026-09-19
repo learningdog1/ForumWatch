@@ -11,8 +11,10 @@
  * - 推送条件：cfg.ai.dailyReport.enabled 且 telegram 配置完整且 notifyEnabled；
  *   推送失败只 log error 不影响返回值。分段：>3500（UTF-16 口径 text.length）
  *   按行边界聚合切分，续段尾缀"（续 N）"。
- * - tick（定时检查）：now >= 今天 timeHHMM 且 reports/<today>.md 不存在且
- *   desired==='running'（入参）且当日自动尝试 < 3 次 → generate。attempts 计数
+ * - tick（定时检查）：cfg.ai.dailyReport.enabled（功能总开关，关闭时到点不
+ *   生成——不调 LLM、不写文件、不消耗 attempts；手动 generate 不受影响）且
+ *   now >= 今天 timeHHMM 且 reports/<today>.md 不存在且 desired==='running'
+ *   （入参）且当日自动尝试 < 3 次 → generate。attempts 计数
  *   在内存，本地自然日翻转清零（formatLocalDate 判日）。
  * - nextCheckAt：下一次应检查的时刻（今天 timeHHMM 已过 → 明天同一时刻），
  *   装配方用它排 setTimeout（实际 sleep 由装配方 clamp，本模块不管节流）。
@@ -136,11 +138,16 @@ export class DailyReportService {
   }
 
   /**
-   * 定时检查（D5 触发条件四联）：now >= 今天 timeHHMM 且 reports/<today>.md
-   * 不存在且 desiredRunning 且当日自动尝试 < 3 → generate。
+   * 定时检查（D5 触发条件，审查后五联）：cfg.ai.dailyReport.enabled（总开关）
+   * 且 now >= 今天 timeHHMM 且 reports/<today>.md 不存在且 desiredRunning 且
+   * 当日自动尝试 < 3 → generate。开关关闭在最前——不生成、不调 LLM、不写
+   * 文件、不消耗 attempts；手动 generate（「今日回顾 → 立即生成」）不受影响。
    * @returns 是否执行了生成
    */
   async tick(desiredRunning: boolean, nowArg?: Date): Promise<boolean> {
+    // 功能总开关（F1）：关闭时到点也绝不自动生成（attempts 不动，重新开启后
+    // 当天仍可正常触发）
+    if (!this.deps.getConfig().ai.dailyReport.enabled) return false
     const now = nowArg ?? new Date(this.now())
     const today = formatLocalDate(now)
     this.rollAttemptsDay(today)

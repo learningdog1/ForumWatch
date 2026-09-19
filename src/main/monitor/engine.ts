@@ -20,8 +20,12 @@
  *   → degraded='quota-exhausted'，当日后续轮降级 literal-only，log 一次。
  * - evaluate 抛错（含 AiProviderError）→ 该批全部未决（不入 seen）、记
  *   lastAiError、**不动 consecutiveFailures**（AI 故障 ≠ 抓取故障，D4）。
- * - interests 为空且 mode 含 semantic → evaluator 返回全 false（不调 API），
- *   语义帖全部判 miss 入 seen，不算 unconfigured。
+ * - interests 为空 → 引擎侧直接跳过 AI 批（不调 evaluator、不计 callsToday，
+ *   F3）：语义帖全部按未命中入 seen（与 evaluator 快速全 miss 的现状一致），
+ *   不算 unconfigured。
+ * - verdict 缓存（D4 坑⑥，F2）：语义命中但推送失败的帖 reason 存内存 Map
+ *   （semanticVerdicts），下轮**不重进 AI 批**、按已判 hit 直接重试推送；
+ *   推送成功/转静音后清除；帖子滚出首页即随轮末清理回收（F5）。
  *
  * per-source 运行态（SourceRuntime，内存）：health / lastSuccessAt / lastError /
  * consecutiveFailures / cooldownUntilMs——同一退避曲线 computeBackoffMs（含
@@ -86,6 +90,9 @@ export const DAILY_AI_CALL_LIMIT = 300
  * 只在 v1 裸 id 迁移处使用，这里的一般化拼法与其一致，防漂移）。
  */
 const seenKeyFor = (sourceId: string, topicId: string): string => `${sourceId}:${topicId}`
+
+/** seen 键 → sourceId 部分（首个冒号前；pruneRetryMaps 判断键归属用，F5） */
+const sourceIdOfKey = (key: string): string => key.slice(0, key.indexOf(':'))
 
 /** 聚合 health 取最差的排序权重（challenged > backoff > ok） */
 const HEALTH_SEVERITY: Record<HealthState, number> = { ok: 0, backoff: 1, challenged: 2 }
@@ -153,6 +160,14 @@ export class MonitorEngine {
    * （防每轮刷屏），成功或转静音后清除并 emit 最终态。
    */
   private readonly pendingNotifyErrors = new Map<string, string>()
+  /**
+   * 已判 hit 但推送失败中的语义帖缓存（D4 坑⑥，F2）：seen 键 -> AI 判定理由。
+   * 下轮该帖仍在首页时不重进 AI 批（不耗配额、不冒改变判定风险），直接按
+   * 已判 hit 走 processHit 重试；推送成功/转静音清除；帖子滚出首页随轮末
+   * 清理回收（pruneRetryMaps，F5）。与 pendingNotifyErrors 是两套机制：后者
+   * 是全部命中共用的「失败原因去重 emit」表，前者只服务语义档的 verdict 复用。
+   */
+  private readonly semanticVerdicts = new Map<string, { reason: string | null }>()
   /** sourceId -> 运行态（含热更新后加入的 source；移除的 source 保留卡但退出聚合） */
   private readonly runtimes = new Map<string, SourceRuntime>()
   /** sourceId -> 本轮新增命中数（轮末按 source 持久化 totalHits 后清零） */
@@ -272,18 +287,24 @@ export class MonitorEngine {
     this.configLastError = null
 
     const activeIds: string[] = []
+    /** 本轮实际抓到的全部 topic 的 seen 键（F5 轮末清理的保留集） */
+    const roundTopicKeys = new Set<string>()
+    /** 本轮实际执行了 pollSource 的 source（冷却跳过的不算——没有观测） */
+    const observedSources = new Set<string>()
     for (const adapter of adapters) {
       const rt = this.ensureRuntime(adapter.id)
       if (!activeIds.includes(adapter.id)) activeIds.push(adapter.id)
       // 退避冷却中：本轮跳过该 source（sleep，不动 failures/health）
       if (rt.cooldownUntilMs !== null && this.now() < rt.cooldownUntilMs) continue
+      observedSources.add(adapter.id)
       try {
-        await this.pollSource(adapter, cfg)
+        await this.pollSource(adapter, cfg, roundTopicKeys)
         this.succeedSource(rt)
       } catch (err) {
         this.failSource(adapter.id, rt, err, cfg.pollIntervalSec)
       }
     }
+    this.pruneRetryMaps(roundTopicKeys, observedSources)
     this.finishRound(cfg.pollIntervalSec, activeIds)
   }
 
@@ -344,11 +365,17 @@ export class MonitorEngine {
    * 按批内顺序（旧→新）推送——批式评估天然滞后一轮内位置，跨档顺序不保证。
    * 异常上抛给 pollOnce 的 per-source catch。
    */
-  private async pollSource(adapter: SourceAdapter, cfg: AppConfig): Promise<void> {
+  private async pollSource(
+    adapter: SourceAdapter,
+    cfg: AppConfig,
+    roundTopicKeys: Set<string>
+  ): Promise<void> {
     const topics = await adapter.fetchLatest()
 
     // sourceId 盖章（处理前）：adapter 不感知来源归属（D2/D3）
     for (const t of topics) t.sourceId = adapter.id
+    // 本轮观测到的 topic 键登记（F5 轮末清理的保留集）
+    for (const t of topics) roundTopicKeys.add(seenKeyFor(adapter.id, t.id))
 
     // 首启基线（ADR 8.5）：整页只入去重集不推送，防通知风暴（per-source 独立）
     if (!this.deps.state.getFor(adapter.id).baselineDone) {
@@ -393,8 +420,15 @@ export class MonitorEngine {
           continue
         }
       }
-      // 语义档（mode 含 semantic 且 AI operational）：进批，verdict 决定去向
+      // 语义档（mode 含 semantic 且 AI operational）：进批，verdict 决定去向。
+      // 已判 hit 但推送失败中的帖（D4 坑⑥，F2）：不重进 AI 批——用缓存的
+      // verdict 直接按已判 hit 重试推送（省一次调用，也不冒判定翻转的风险）
       if (semanticActive) {
+        const cachedVerdict = this.semanticVerdicts.get(key)
+        if (cachedVerdict !== undefined) {
+          await this.processHit(topic, [], cfg, 'semantic', cachedVerdict.reason)
+          continue
+        }
         aiPending.push(topic)
         continue
       }
@@ -420,8 +454,12 @@ export class MonitorEngine {
 
   /**
    * 语义批评估（D4）：候选按 MAX_SEMANTIC_BATCH 切片逐批调 evaluator。
+   * interests 为空 → 直接短路（F3）：不调 evaluator、不计 callsToday，全部
+   * 按语义未命中入 seen（evaluator 本就快速全 miss，引擎侧跳过更干净，
+   * 行为一致只是不再空转计数）。
    * verdict 三态：
    * - hit=true → processHit(matchedBy='semantic'，semanticReason=reason)；
+   *   其中推送真失败的 reason 会进 semanticVerdicts 缓存（坑⑥，见 pollSource）；
    * - hit=false → 入 seen（与字面未命中同待遇，不再重评）；
    * - 无 verdict（未决）→ 不入 seen，下轮重评（帖子滚出首页即止，对齐 8.10）。
    * evaluate 整体抛错 → 该批全部未决 + 记 lastAiError + log warn，
@@ -436,6 +474,11 @@ export class MonitorEngine {
   ): Promise<void> {
     const evaluator = this.deps.semanticEvaluator
     if (evaluator === undefined) return
+    if (cfg.ai.interests.length === 0) {
+      // F3：空兴趣 = 语义档永不命中（镜像字面档防风暴规则）——不入 AI 批
+      for (const topic of topics) this.deps.seen.add(seenKeyFor(sourceId, topic.id))
+      return
+    }
     for (let i = 0; i < topics.length; i += MAX_SEMANTIC_BATCH) {
       const batch = topics.slice(i, i + MAX_SEMANTIC_BATCH)
       this.rollAiDay()
@@ -642,6 +685,29 @@ export class MonitorEngine {
   }
 
   /**
+   * 轮末清理重试缓存（F5）：pendingNotifyErrors / semanticVerdicts 只保留本轮
+   * 仍出现在页面上的帖子的键——帖子滚出首页后重试已无意义，删掉防 Map 常驻。
+   * 只裁本轮**实际抓取过**的 source（observedSources）：冷却中被跳过的 source
+   * 本轮没有观测，其键保留到下一轮，避免冷却窗口内误删仍在首页的帖子状态。
+   */
+  private pruneRetryMaps(roundTopicKeys: Set<string>, observedSources: Set<string>): void {
+    if (this.pendingNotifyErrors.size > 0) {
+      for (const key of [...this.pendingNotifyErrors.keys()]) {
+        if (!roundTopicKeys.has(key) && observedSources.has(sourceIdOfKey(key))) {
+          this.pendingNotifyErrors.delete(key)
+        }
+      }
+    }
+    if (this.semanticVerdicts.size > 0) {
+      for (const key of [...this.semanticVerdicts.keys()]) {
+        if (!roundTopicKeys.has(key) && observedSources.has(sourceIdOfKey(key))) {
+          this.semanticVerdicts.delete(key)
+        }
+      }
+    }
+  }
+
+  /**
    * 处理一条命中的新帖：尝试推送 → 组 HitRecord → 计数入环 → emit onHit。
    * 推送结果语义（ADR 8.10）：
    * - **成功 / 静音**（notifyEnabled=false 或 telegram 未配置）→ 入去重集。
@@ -679,8 +745,13 @@ export class MonitorEngine {
     if (notifyError !== null) {
       // 真实推送失败：不入去重集（下轮重试）；同失败态只 emit/log 一次
       const prevError = this.pendingNotifyErrors.get(key)
-      if (prevError === notifyError) return
-      this.pendingNotifyErrors.set(key, notifyError)
+      if (prevError !== notifyError) {
+        this.pendingNotifyErrors.set(key, notifyError)
+      } else {
+        return
+      }
+      // 语义命中额外缓存 verdict（D4 坑⑥，F2）：下轮绕过 AI 批直接重试本判定
+      if (matchedBy === 'semantic') this.semanticVerdicts.set(key, { reason: semanticReason })
       const hit: HitRecord = {
         topic,
         matchedKeywords,
@@ -698,8 +769,10 @@ export class MonitorEngine {
     }
 
     // 成功或静音：入去重集；曾在失败重试中的清除标记（上面已 emit 过失败态，
-    // 这里 emit 最终态），静音态两字段均 null（HitRecord 语义不变）
+    // 这里 emit 最终态），静音态两字段均 null（HitRecord 语义不变）。verdict
+    // 缓存一并清除（重试收口，防 Map 常驻，F2/F5）
     this.pendingNotifyErrors.delete(key)
+    this.semanticVerdicts.delete(key)
     this.deps.seen.add(key)
     const hit: HitRecord = {
       topic,

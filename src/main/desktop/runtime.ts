@@ -18,7 +18,9 @@
  * clamp(nextCheckAt - now, 60s, 30min)（下限保证跨天/补做及时，上限防休眠期
  * 漂移后空转密集唤醒）；到点调 reportSvc.tick(desired)。app quit（shutdown）
  * 清理。powerMonitor resume 时 onPowerResume() 补一轮 tick（睡眠跨过触发时刻
- * 的补偿路径，D5「启动/resume 时检查」）。
+ * 的补偿路径，D5「启动/resume 时检查」）；用户手动 resume（IPC/托盘）也补——
+ * emitStatus 里检测 desired paused→running 翻转即 void runReportTick()（F6，
+ * 暂停跨过 timeHHMM 的补偿路径）。
  *
  * 生命周期：startup() = engine.start()（launch 即开始监控，desired 默认 running）；
  * shutdown() 在 app 的 before-quit 与 will-quit 之间调用（退出路径统一走这里）：
@@ -68,6 +70,8 @@ export class DesktopRuntime {
   private lastAiProxy: string | null = null
   /** 日报定时器句柄（startup 起、shutdown 清；自循环重排） */
   private reportTimer: ReturnType<typeof setTimeout> | null = null
+  /** 上一帧 engine desired（F6：检测 paused→running 翻转补跑日报 tick；null=尚未见帧） */
+  private lastDesired: EngineStatus['desired'] | null = null
   private shutdownStarted = false
 
   /** 由 initRuntime 创建（必须在 app.whenReady 之后）；不要直接 new */
@@ -320,6 +324,14 @@ export class DesktopRuntime {
   }
 
   private emitStatus(s: EngineStatus): void {
+    // F6：手动 resume（IPC / 托盘「恢复监控」）desired paused→running 翻转时补跑
+    // 一次日报检查——暂停期间可能跨过当天 timeHHMM，恢复即补做（系统 resume 走
+    // onPowerResume 已有同款 tick）。runReportTick 内部尊重 desired 与触发条件，
+    // 不满足时是 no-op；shutdown 后不再触发新动作。
+    if (this.lastDesired === 'paused' && s.desired === 'running' && !this.shutdownStarted) {
+      void this.runReportTick()
+    }
+    this.lastDesired = s.desired
     for (const cb of [...this.statusListeners]) {
       try {
         cb(s)

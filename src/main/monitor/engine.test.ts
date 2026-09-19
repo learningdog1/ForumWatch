@@ -1084,7 +1084,7 @@ describe('语义评估管线（D4）', () => {
     expect(h.sendHit).not.toHaveBeenCalled()
   })
 
-  it('interests 为空且 mode 含 semantic：不降级 unconfigured，语义批照走（evaluator 自身全判 miss）', async () => {
+  it('interests 为空（F3）：不调 evaluator、callsToday 不涨，全部按语义未命中入 seen，不降级 unconfigured', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
         new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, reason: null }]])
@@ -1095,13 +1095,20 @@ describe('语义评估管线（D4）', () => {
       evaluator: { evaluate }
     })
     await h.engine.pollOnce()
-    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('3'), topic('1')])
     await h.engine.pollOnce()
 
-    expect(evaluate).toHaveBeenCalledTimes(1)
+    // 引擎侧短路：连 evaluator 都不进（快速全 miss 也不必走），更不计数
+    expect(evaluate).not.toHaveBeenCalled()
     const st = h.engine.getStatus()
-    expect(st.ai).toMatchObject({ configured: true, effectiveMode: 'both', degraded: 'none' })
-    expect(h.seen.has('nodeseek:2')).toBe(true) // miss 入 seen
+    expect(st.ai).toMatchObject({ configured: true, effectiveMode: 'both', degraded: 'none', callsToday: 0 })
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 按语义未命中入 seen
+    expect(h.seen.has('nodeseek:3')).toBe(true)
+    expect(h.sendHit).not.toHaveBeenCalled()
+
+    await h.engine.pollOnce() // 已入 seen：下轮不重评
+    expect(evaluate).not.toHaveBeenCalled()
+    expect(st.ai.callsToday).toBe(0)
   })
 
   it('hitsStore.append：每次命中被调用且收到 HitRecord；append 抛错只 warn，不影响推送与 onHit', async () => {
@@ -1130,5 +1137,161 @@ describe('语义评估管线（D4）', () => {
     expect(
       h.logger.getRecent().some((e) => e.level === 'warn' && e.msg.includes('hits append failed'))
     ).toBe(true)
+  })
+})
+
+describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮末清理（F5）', () => {
+  /** 已配置好的 AI 段（provider 三项齐备） */
+  function aiConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['ai'] {
+    return {
+      provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-k', model: 'm' },
+      matchMode: 'both',
+      interests: ['自建主机'],
+      dailyReport: { enabled: false, timeHHMM: '22:00' },
+      ...overrides
+    }
+  }
+
+  /** 观测引擎私有重试 Map 的尺寸（两 Map 无对外 API，测试专用观测面） */
+  function retryMapSize(
+    engine: MonitorEngine,
+    name: 'semanticVerdicts' | 'pendingNotifyErrors'
+  ): number {
+    return (engine as unknown as Record<string, Map<string, unknown>>)[name]!.size
+  }
+
+  it('语义命中×推送失败：reason 进缓存；下轮不进 AI 批直接重试；成功后缓存清除，再下轮不复活', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '与自建主机相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+
+    // 第 1 轮：AI 判 hit，推送失败 → 不入 seen，verdict 进缓存
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(1)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(1)
+
+    // 第 2 轮：同帖仍在首页 → 不调 evaluator（缓存生效），按已判 hit 重试推送成功
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1) // 未重进 AI 批
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    const hits = h.engine.getRecentHits()
+    expect(hits[1]).toMatchObject({
+      matchedBy: 'semantic',
+      matchedKeywords: [],
+      semanticReason: '与自建主机相关', // 缓存的 reason 透传
+      notifiedAt: expect.any(String),
+      notifyError: null
+    })
+    expect(h.onHit).toHaveBeenCalledTimes(2) // 失败态 + 最终态
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 成功入 seen
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(0) // 缓存清除
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(0)
+
+    // 第 3 轮：已入 seen 不会复活（不重评、不重推）
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.onHit).toHaveBeenCalledTimes(2)
+  })
+
+  it('重试仍失败：缓存保留继续重试（每轮都真推），同失败态仍只 emit 一次', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'semantic' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2'), topic('1')])
+    h.sendHit.mockRejectedValue(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce() // 首败：emit 1 次
+    await h.engine.pollOnce() // 重试仍败（同失败态）：不再 emit，但真重试了
+    expect(evaluate).toHaveBeenCalledTimes(1) // 仍不进 AI 批
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.onHit).toHaveBeenCalledTimes(1)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(1) // 缓存保留继续重试
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(1)
+
+    // 失败原因变化：再 emit 一次（缓存仍在）
+    h.sendHit.mockRejectedValue(new TelegramError('different failure'))
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(3)
+    expect(h.onHit).toHaveBeenCalledTimes(2)
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(1)
+  })
+
+  it('字面命中的推送失败不使用 verdict 缓存：照旧走 pendingNotifyErrors 路径，两套机制不串', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'both' }) }, // both：字面优先
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
+    h.sendHit.mockRejectedValueOnce(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce() // 字面命中推送失败
+
+    expect(evaluate).not.toHaveBeenCalled() // 字面命中从不进 AI
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(0) // 不写 verdict 缓存
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(1) // 只进失败表
+
+    // 第 2 轮：字面管线照旧重试（不走语义路径），成功后两表都清
+    await h.engine.pollOnce()
+    expect(h.sendHit).toHaveBeenCalledTimes(2)
+    expect(h.sendHit.mock.calls[1]![1]).toEqual(['羊毛']) // 仍是字面命中形态
+    const hits = h.engine.getRecentHits()
+    expect(hits[1]).toMatchObject({ matchedBy: 'literal', matchedKeywords: ['羊毛'] })
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(0)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(0)
+  })
+
+  it('F5：失败帖滚出首页 → 轮末清理，pendingNotifyErrors 与 semanticVerdicts 尺寸归零', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:2', { hit: true, reason: '相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'both' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce()
+    // 一条语义命中（推送失败）+ 一条字面命中（推送失败）
+    h.fetchLatest.mockImplementation(async () => [
+      topic('3', { title: '羊毛' }),
+      topic('2'),
+      topic('1')
+    ])
+    h.sendHit.mockRejectedValue(new TelegramError('telegram send failed'))
+    await h.engine.pollOnce()
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(1)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(2)
+
+    // 下一轮两条帖子都滚出首页：重试已无意义，轮末清理
+    h.fetchLatest.mockImplementation(async () => [topic('1')])
+    await h.engine.pollOnce()
+    expect(retryMapSize(h.engine, 'semanticVerdicts')).toBe(0)
+    expect(retryMapSize(h.engine, 'pendingNotifyErrors')).toBe(0)
+    expect(h.sendHit).toHaveBeenCalledTimes(2) // 滚出后不再重试
   })
 })

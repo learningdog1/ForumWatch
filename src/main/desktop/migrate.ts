@@ -3,9 +3,12 @@
  *
  * - 触发条件：旧目录存在 且 新目录 `config.json` 不存在（新 config.json 即
  *   "已迁移"标记——config 只在用户保存设置时才落盘，但迁移自身的拷贝就足以立标记）。
- * - 拷贝 `config.json` / `seen.json` / `state.json`（`logs/` 刻意不拷）：**字节级复制**
+ * - 拷贝 `seen.json` / `state.json` / `config.json`（`logs/` 刻意不拷）：**字节级复制**
  *   （Buffer 读 → 写目标目录 `.tmp-<pid>-<rand>` → chmod 0o600 → rename 原子落位），
  *   不做任何格式转换——v1/v2 的形状迁移由各自的 loader/ConfigStore 负责。
+ *   拷贝顺序 seen → state → config（F4）：config.json 存在 = 「已迁移」标记，标记
+ *   必须最后落位——若 config 先拷而进程在 seen/state 之前被 kill，下次启动会因
+ *   标记在场而永久跳过补拷。
  * - 单文件失败只 warn 并继续（落多少用多少）；**绝不删旧目录**；目标同名文件已
  *   存在时跳过（不覆盖，保证迁移幂等、无数据丢失方向的操作）。
  * - 不变式（防单页推送风暴）：最终 seen.json 不在新目录 而 state.json 在 →
@@ -27,8 +30,12 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 
-/** 参与迁移的文件（logs/ 不拷） */
-const MIGRATION_FILES = ['config.json', 'seen.json', 'state.json'] as const
+/**
+ * 参与迁移的文件（logs/ 不拷）。顺序敏感（F4）：config.json 是「已迁移」标记，
+ * 必须最后拷——kill 窗口内中断时已拷的 seen/state 下次还能补，反之标记先落位
+ * 会让剩余文件永久不补拷。
+ */
+const MIGRATION_FILES = ['seen.json', 'state.json', 'config.json'] as const
 
 export interface UserDataMigrationInput {
   /** 旧版 userData 目录（appData/NodeSeek Monitor） */

@@ -285,6 +285,40 @@ describe('tick（定时触发条件矩阵）', () => {
     await expect(h.svc.tick(true, at(22, 0, 20))).rejects.toThrow()
   })
 
+  it('dailyReport.enabled=false（功能总开关）：到点不生成、不调 LLM、不写文件、不计 attempts', async () => {
+    // 有命中：若 tick 走到 generate 必然会调 LLM——用它证伪「偷偷生成」
+    const h = makeHarness({
+      hitsForDay: [makeHit('1', '羊毛 A')],
+      cfg: { ai: { ...DEFAULT_APP_CONFIG.ai, dailyReport: { enabled: false, timeHHMM: '22:00' } } }
+    })
+    await expect(h.svc.tick(true, at(22, 30))).resolves.toBe(false)
+    expect(h.chat).not.toHaveBeenCalled()
+    expect(h.sendRaw).not.toHaveBeenCalled()
+    await expect(h.svc.loadReport('2026-09-19')).resolves.toBeNull()
+
+    // 手动 generate 不受总开关影响（「今日回顾 → 立即生成」仍可用；开关只拦
+    // 自动触发与推送）——照常写文件、照常调 LLM
+    const md = await h.svc.generate(at(22, 30))
+    expect(h.chat).toHaveBeenCalledTimes(1)
+    expect(md).toBe('# AI 日报\n\n总述内容。')
+    await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
+    expect(h.sendRaw).not.toHaveBeenCalled() // 推送仍被开关拦住
+  })
+
+  it('开关关闭期间不消耗 attempts：重新开启后当天到点仍正常生成（enabled=true 行为不变）', async () => {
+    const h = makeHarness({
+      hitsForDay: [makeHit('1', '羊毛 A')],
+      cfg: { ai: { ...DEFAULT_APP_CONFIG.ai, dailyReport: { enabled: false, timeHHMM: '22:00' } } }
+    })
+    await expect(h.svc.tick(true, at(22, 0))).resolves.toBe(false)
+    await expect(h.svc.tick(true, at(22, 30))).resolves.toBe(false)
+
+    h.cfg.ai.dailyReport.enabled = true // 热更新语义：getConfig 每次实时读
+    await expect(h.svc.tick(true, at(23, 0))).resolves.toBe(true)
+    expect(h.chat).toHaveBeenCalledTimes(1)
+    expect(h.sendRaw).toHaveBeenCalledTimes(1)
+  })
+
   it('timeHHMM 已过的当天时刻也触发（补做今天，不回溯昨天）', async () => {
     const h = makeHarness()
     // 生成时刻属于今天 23:59，命中桶 key 也是今天

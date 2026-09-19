@@ -81,7 +81,8 @@ describe('完整迁移', () => {
 
     const result = run()
     expect(result.ran).toBe(true)
-    expect(result.copied).toEqual(['config.json', 'seen.json', 'state.json'])
+    // 顺序（F4）：seen → state → config（config 是「已迁移」标记，最后落位）
+    expect(result.copied).toEqual(['seen.json', 'state.json', 'config.json'])
     expect(result.baselineReset).toBe(false)
 
     for (const name of ['config.json', 'seen.json', 'state.json']) {
@@ -122,7 +123,8 @@ describe('不变式：seen 缺席 × state 在场 → 重置 baselineDone', () =
     put(legacy, 'state.json', '{"schemaVersion":1,"baselineDone":true,"totalHits":42}')
 
     const result = run()
-    expect(result.copied).toEqual(['config.json', 'state.json'])
+    // state 先于 config（F4 顺序）
+    expect(result.copied).toEqual(['state.json', 'config.json'])
     expect(result.baselineReset).toBe(true)
     const state = readJson(target, 'state.json')
     expect(state['baselineDone']).toBe(false)
@@ -154,7 +156,8 @@ describe('不变式：seen 缺席 × state 在场 → 重置 baselineDone', () =
     mkdirSync(join(legacy, 'seen.json')) // 存在但读不出来：模拟读失败
 
     const result = run()
-    expect(result.copied).toEqual(['config.json', 'state.json'])
+    // seen 拷贝失败被跳过：state 与 config 照拷（state 先，F4 顺序）
+    expect(result.copied).toEqual(['state.json', 'config.json'])
     expect(result.baselineReset).toBe(true)
     expect(logs.some((m) => m.includes('seen.json'))).toBe(true)
     expect(readJson(target, 'state.json')['baselineDone']).toBe(false)
@@ -166,7 +169,7 @@ describe('不变式：seen 缺席 × state 在场 → 重置 baselineDone', () =
     put(legacy, 'state.json', '{"schemaVersion":1,"baselineDone":true,"totalHits":9}')
 
     const result = run()
-    expect(result.copied).toEqual(['config.json', 'seen.json', 'state.json'])
+    expect(result.copied).toEqual(['seen.json', 'state.json', 'config.json'])
     expect(result.baselineReset).toBe(false)
     expect(readJson(target, 'state.json')['baselineDone']).toBe(true)
   })
