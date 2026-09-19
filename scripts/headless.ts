@@ -40,6 +40,7 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
+import { PlainSecretBox } from '../src/main/config/secrets'
 import { watchConfigDir, type ConfigDirWatcher } from '../src/main/config/watch'
 import { HttpClient, redactProxyUrl } from '../src/main/net/http'
 import type { FetchLike } from '../src/main/net/http-types'
@@ -167,7 +168,12 @@ async function main(): Promise<number | null> {
   // 两层固定覆盖（env 凭据 / CLI interval），watch 重载只改 store 内存值即可
   // 全链路生效（与桌面 runtime 的 getConfig = store.get() 访问器同款）。
   const configPath = join(dir, 'config.json')
-  const store = new ConfigStore(configPath)
+  // R9-W2（DEC-10）凭据加密落盘：headless 显式注入 PlainSecretBox（明文读写，
+  // 无 OS 密钥库可用）。坑10 互操作：若本目录的 config.json 是桌面版写的密文盘
+  // （enc:v1: 字段），load 时这些字段按"未配置"处理（''）并报一条 error——
+  // 凭据干净地失效，而不是把 base64 密文当 token 发出去；用户在本机桌面版
+  // 重新保存或手工回填明文即可。
+  const store = new ConfigStore(configPath, { secretBox: new PlainSecretBox() })
   const firstRun = !existsSync(configPath)
   let diskConfig = store.load() // 热重载 diff 基准（盘上 sanitize 后配置，R8-C）
   if (firstRun) {

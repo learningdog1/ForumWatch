@@ -560,8 +560,12 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
       if (picked.canceled || picked.filePath === undefined || picked.filePath === '') {
         return { ok: false, error: '已取消导出' }
       }
-      // 四段各取已解析的 JSON 值；缺失/坏文件回退到与内核读路径同口径的默认信封
-      const config = readSegment(CONFIG_FILE, { schemaVersion: 3, config: rt.store.get() })
+      // 四段各取已解析的 JSON 值；缺失/坏文件回退到与内核读路径同口径的默认信封。
+      // config 段**不走盘上 parse**（R9-W2/DEC-10）：盘上敏感字段是 enc:v1: 密文
+      // （OS 密钥库绑定本机，导出密文毫无用处），改从 rt.store.get() 取**内存明文**
+      // ——单一事实源（应用实际会加载到的内容），导出件仍是明文凭据 + UI 警告
+      // （DEC-10：导出明文并警告，见备份文案），导入端读回明文、下次 save 自动再加密。
+      const config = { schemaVersion: 3, config: rt.store.get() }
       const seen = readSegment(SEEN_FILE, { schemaVersion: 2, seen: [] })
       const state = readSegment(STATE_FILE, { schemaVersion: 2, sources: {} })
       const feedback = readSegment(FEEDBACK_FILE, undefined) // 缺文件 → undefined → 不落键

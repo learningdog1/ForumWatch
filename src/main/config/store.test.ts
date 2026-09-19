@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_APP_CONFIG,
   type AppConfig,
@@ -10,6 +10,7 @@ import {
   type SourceConfig,
   type TelegramChannelConfig
 } from '../../shared/types'
+import { SECRET_MARKER, type SecretBox } from './secrets'
 import { ConfigStore, sanitizeConfig } from './store'
 
 let dir: string
@@ -1334,5 +1335,164 @@ describe('ConfigStore', () => {
     store.save(cfg({ channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'secret', chatId: '1' }] }))
     const mode = statSync(configPath).mode & 0o777
     expect(mode).toBe(0o600)
+  })
+})
+
+// ---- R9-W2 凭据加密落盘（DEC-10 / 坑10 顺序：读=先解密后 sanitize；写=先 sanitize 后加密） ---
+
+/**
+ * fake SecretBox：密文 `enc:v1:fake(<plain>)`；cipherPrefix 可自定（含空格的
+ * 版本用于证明 sanitize 不会跑到密文上；不同 prefix 的 box 解不开对方的密文，
+ * 用于"解密失败"场景）。
+ */
+function fakeSecretBox(cipherPrefix = 'fake('): SecretBox {
+  return {
+    isAvailable: () => true,
+    encrypt: (plain) => `${SECRET_MARKER}${cipherPrefix}${plain})`,
+    decrypt: (stored) => {
+      if (!stored.startsWith(SECRET_MARKER)) return stored
+      const inner = stored.slice(SECRET_MARKER.length)
+      return inner.startsWith(cipherPrefix) && inner.endsWith(')')
+        ? inner.slice(cipherPrefix.length, -1)
+        : null
+    }
+  }
+}
+
+/** 四种敏感字段齐备的配置（telegram/bark/webhook + ai；ntfy 无敏感字段） */
+function secretLadenCfg(): AppConfig {
+  return cfg({
+    ai: { ...cfg().ai, provider: { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-live', model: 'm1' } },
+    channels: [
+      { id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' },
+      { id: 'bark', type: 'bark', enabled: true, deviceKey: 'dk-1' },
+      { id: 'ntfy', type: 'ntfy', enabled: true, topic: 'forumwatch' },
+      { id: 'hook', type: 'webhook', enabled: true, url: 'https://example.com/hook', secret: 's3cret' }
+    ]
+  })
+}
+
+describe('ConfigStore × SecretBox（R9-W2 凭据加密落盘）', () => {
+  it('读写往返：明文进 → 盘上密文（带 marker）→ 内存/重载均明文', async () => {
+    const store = new ConfigStore(configPath, { secretBox: fakeSecretBox() })
+    store.save(secretLadenCfg())
+
+    // 盘上四种敏感字段全是密文；非敏感字段明文
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8')) as {
+      config: { ai: { provider: { apiKey: string } }; channels: Array<Record<string, unknown>> }
+    }
+    expect(onDisk.config.ai.provider.apiKey).toBe(`${SECRET_MARKER}fake(sk-live)`)
+    expect(onDisk.config.channels[0]!['botToken']).toBe(`${SECRET_MARKER}fake(111:abc)`)
+    expect(onDisk.config.channels[1]!['deviceKey']).toBe(`${SECRET_MARKER}fake(dk-1)`)
+    expect(onDisk.config.channels[3]!['secret']).toBe(`${SECRET_MARKER}fake(s3cret)`)
+    expect(onDisk.config.channels[2]!['topic']).toBe('forumwatch') // ntfy 非敏感
+    // 信封不写加密标志（派生态不落盘，坑10）
+    expect('secretsEncrypted' in onDisk).toBe(false)
+
+    // 内存与重载都是明文（save 后 get 不需要重新 load）
+    expect(store.get().ai.provider.apiKey).toBe('sk-live')
+    const reloaded = new ConfigStore(configPath, { secretBox: fakeSecretBox() }).load()
+    expect(reloaded).toEqual(sanitizeConfig(secretLadenCfg()))
+    expect(reloaded.ai.provider.apiKey).toBe('sk-live')
+    expect(tg0(reloaded.channels).botToken).toBe('111:abc')
+  })
+
+  it('update 后内存仍明文、盘上仍密文（update 内部走 save 同一写路径）', async () => {
+    const store = new ConfigStore(configPath, { secretBox: fakeSecretBox() })
+    store.save(cfg())
+    const next = store.update({
+      channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: 'new-token', chatId: 'c1' }]
+    })
+    expect(tg0(next.channels).botToken).toBe('new-token')
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8')) as {
+      config: { channels: Array<Record<string, unknown>> }
+    }
+    expect(onDisk.config.channels[0]!['botToken']).toBe(`${SECRET_MARKER}fake(new-token)`)
+  })
+
+  it('旧明文盘兼容读：不带 marker 的值原样透传（不注入 box 的既有语义零变化）', async () => {
+    // 用不加密的 store 落一份明文盘（等价于历史版本写出的文件）
+    new ConfigStore(configPath).save(secretLadenCfg())
+    // 用加密 box 读：明文字段无 marker → 原样
+    const loaded = new ConfigStore(configPath, { secretBox: fakeSecretBox() }).load()
+    expect(loaded.ai.provider.apiKey).toBe('sk-live')
+    expect(tg0(loaded.channels).botToken).toBe('111:abc')
+  })
+
+  it('box 不可用（PlainSecretBox）：全程明文读写（缺省注入 = 既有测试语义）', async () => {
+    const store = new ConfigStore(configPath)
+    store.save(secretLadenCfg())
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8')) as {
+      config: { ai: { provider: { apiKey: string } } }
+    }
+    expect(onDisk.config.ai.provider.apiKey).toBe('sk-live') // 无 marker 明文
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.ai.provider.apiKey).toBe('sk-live')
+  })
+
+  it('解密失败：字段置空（未配置）+ 整次 load 恰一条 error 日志', async () => {
+    // 用 fake box 落密文盘，再用不同 prefix 的 box 读（全部解不开）
+    new ConfigStore(configPath, { secretBox: fakeSecretBox() }).save(secretLadenCfg())
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const loaded = new ConfigStore(configPath, { secretBox: fakeSecretBox('other(') }).load()
+      expect(loaded.ai.provider.apiKey).toBe('')
+      expect(tg0(loaded.channels).botToken).toBe('')
+      expect((loaded.channels[1] as { deviceKey: string }).deviceKey).toBe('')
+      // webhook secret 置 '' 后被 sanitize 剔键（未配置态）
+      expect('secret' in (loaded.channels[3] as object)).toBe(false)
+      // 非敏感字段不受影响
+      expect(loaded.ai.provider.model).toBe('m1')
+      expect((loaded.channels[2] as { topic: string }).topic).toBe('forumwatch')
+      // 去重：多字段失败也只报一条
+      const msg = errSpy.mock.calls.map((args) => String(args[0])).filter((m) => m.includes('解密失败'))
+      expect(msg).toHaveLength(1)
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('坑10 互操作：PlainSecretBox 读密文盘 = 字段未配置 + 一条 error（headless 语义）', () => {
+    new ConfigStore(configPath, { secretBox: fakeSecretBox() }).save(secretLadenCfg())
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const loaded = new ConfigStore(configPath).load() // 缺省 PlainSecretBox
+      expect(loaded.ai.provider.apiKey).toBe('')
+      expect(tg0(loaded.channels).botToken).toBe('')
+      expect(
+        errSpy.mock.calls.some((args) => String(args[0]).includes('解密失败'))
+      ).toBe(true)
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('坑10 写序证明：sanitize 只接触明文——输入凭据先 trim 再加密；密文含空格也原样落盘', async () => {
+    // 密文含首尾空格的 box：若 sanitize 在加密之后跑，trim 会吃掉这些空格
+    const spacedBox: SecretBox = {
+      isAvailable: () => true,
+      encrypt: (plain) => `${SECRET_MARKER} cipher ${plain} tail `,
+      decrypt: (stored) => {
+        if (!stored.startsWith(SECRET_MARKER)) return stored
+        const inner = stored.slice(SECRET_MARKER.length)
+        return inner.startsWith(' cipher ') && inner.endsWith(' tail ')
+          ? inner.slice(' cipher '.length, -' tail '.length)
+          : null
+      }
+    }
+    const store = new ConfigStore(configPath, { secretBox: spacedBox })
+    store.save(
+      cfg({
+        channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: ' 111:abc ', chatId: '-100' }]
+      })
+    )
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8')) as {
+      config: { channels: Array<Record<string, unknown>> }
+    }
+    // 写序：sanitize（trim 成 111:abc）→ 加密 → 落盘（此后不再有清洗）
+    expect(onDisk.config.channels[0]!['botToken']).toBe(`${SECRET_MARKER} cipher 111:abc tail `)
+    // 读序：解密（还原 111:abc）→ sanitize（明文上再走一遍也不破坏）
+    const loaded = new ConfigStore(configPath, { secretBox: spacedBox }).load()
+    expect(tg0(loaded.channels).botToken).toBe('111:abc')
   })
 })

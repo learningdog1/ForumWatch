@@ -1,14 +1,21 @@
 /**
- * 配置存储（ADR 3 / ADR 8.7 / D2）。
+ * 配置存储（ADR 3 / ADR 8.7 / D2；R9-W2 凭据加密落盘 DEC-10）。
  *
  * - `config.json` 含 bot token / apiKey 等敏感信息：**绝不入 git**，文件权限 `0o600`
  *   （在 tmp 上先 chmod 再 rename，文件从不存在的那一刻起就是 600）。
+ * - 凭据加密落盘（R9-W2 / DEC-10，坑10 顺序纪律）：敏感字段（ai.provider.apiKey /
+ *   channels 的 botToken·deviceKey·secret，见 secrets.ts SECRET_FIELD_PATHS）经注入的
+ *   SecretBox 以 `enc:v1:` 密文落盘；**内存中永远是明文**（消费方零改动）。
+ *   读 = migrate → **decrypt** → sanitize；写 = sanitize → **encrypt** → serialize
+ *   ——两个方向上 sanitize 看到的都只能是明文，密文不会被 trim 破坏。信封不写
+ *   `secretsEncrypted` 标志（字段值自带 marker，派生态不落盘成第二事实源）。
+ *   构造不注入 secretBox 时缺省 PlainSecretBox（明文读写，既有测试/headless 语义）。
  * - 纯 JSON + `schemaVersion`，原子写（同目录 tmp + `renameSync`）。
  * - 损坏容错：读不出 / 非法 JSON / 迁移函数拒认 → 备份成 `{file}.corrupt-{ts}`
  *   后返回默认配置的深拷贝，绝不抛（ADR 3）。
  * - 盘上格式：`{ "schemaVersion": 3, "config": AppConfig }`（缩进 2 空格）。
  *   load 路径：JSON.parse → `migrateConfigEnvelope`（v1/v2 → v3 链式，见
- *   migrations.ts）→ 合并 DEFAULT → sanitize。
+ *   migrations.ts）→ 合并 DEFAULT → decryptSecretFields → sanitize。
  *
  * 零 electron 依赖，可在 node 下单测与 headless 直跑（ADR 2）。
  */
@@ -35,6 +42,12 @@ import {
   type V2exSourceConfig
 } from '../../shared/types'
 import { migrateConfigEnvelope } from './migrations'
+import {
+  decryptSecretFields,
+  encryptSecretFields,
+  PlainSecretBox,
+  type SecretBox
+} from './secrets'
 
 /** 轮询间隔下限（秒），低于此值按服务器友好频率钳制 */
 export const MIN_POLL_INTERVAL_SEC = 15
@@ -158,10 +171,17 @@ export function sanitizeConfig(cfg: AppConfig): AppConfig {
 
 export class ConfigStore {
   private readonly filePath: string
+  private readonly secretBox: SecretBox
   private config: AppConfig | null = null
 
-  constructor(filePath: string) {
+  /**
+   * @param opts.secretBox 凭据加密容器（R9-W2/DEC-10）：缺省 PlainSecretBox
+   *   （明文读写——既有测试与 headless 语义零变化）；desktop 装配传
+   *   createSafeStorageBox()（safe-storage-box.ts，主进程 ready 后构造）。
+   */
+  constructor(filePath: string, opts: { secretBox?: SecretBox } = {}) {
     this.filePath = filePath
+    this.secretBox = opts.secretBox ?? new PlainSecretBox()
   }
 
   /**
@@ -169,27 +189,31 @@ export class ConfigStore {
    * - 文件缺失 → 默认配置深拷贝；
    * - 损坏（读失败 / 非法 JSON / 信封形状或版本被迁移函数拒认）→
    *   备份 `{file}.corrupt-{ts}` + 默认配置深拷贝，不抛；
-   * - 合法（v1/v2 先沿迁移链升到 v3）→ 合并到默认值上再 sanitize（盘上缺字段也能得到
-   *   完整合法的配置）。
+   * - 合法（v1/v2 先沿迁移链升到 v3）→ 合并默认 → **解密**（坑10：先解密后
+   *   sanitize）→ sanitize（盘上缺字段也能得到完整合法的配置）。内存中得到
+   *   的永远是明文；带 marker 但解密失败的字段置 ''（未配置）并报一条 error。
    */
   load(): AppConfig {
     this.config = this.readFromDisk()
     return structuredClone(this.config)
   }
 
-  /** 取当前配置；未 load 过则先 load。返回深拷贝，调用方改动不会污染内部状态。 */
+  /** 取当前配置（内存明文）；未 load 过则先 load。返回深拷贝，调用方改动不会污染内部状态。 */
   get(): AppConfig {
     return structuredClone(this.config ?? this.load())
   }
 
   /**
    * 清洗后原子写盘（tmp + rename，chmod 0o600），并更新内存值。
-   * 与 FileSeenStore.flush 不同：配置写失败**向上抛**（用户刚改的设置落不了盘
-   * 不该被吞掉，由调用方决定如何提示）。
+   * 坑10 写序：sanitize（明文上）→ encryptSecretFields → 序列化——盘上敏感
+   * 字段是 `enc:v1:` 密文，信封不写加密标志；**内存值存 sanitize 后的明文**
+   * （this.config = clean，不是加密副本）。与 FileSeenStore.flush 不同：配置
+   * 写失败**向上抛**（用户刚改的设置落不了盘不该被吞掉，由调用方决定如何提示）。
    */
   save(cfg: AppConfig): void {
     const clean = sanitizeConfig(cfg)
-    const payload = JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION, config: clean }, null, 2)
+    const onDisk = encryptSecretFields(clean, this.secretBox)
+    const payload = JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION, config: onDisk }, null, 2)
     const tmpPath = `${this.filePath}.tmp-${process.pid}-${randomInt(0, 0xffffff).toString(36)}`
     mkdirSync(dirname(this.filePath), { recursive: true })
     try {
@@ -253,7 +277,17 @@ export class ConfigStore {
     // migrated.channels 由迁移链保证非空；notify/routing 缺失（旧盘）由 defaults
     // 兜底。盘上残留的旧顶层 telegram 键（迁移链读兼容的输入侧）在 sanitize
     // 重建对象时自然消失——写路径只写新形状（DEC-9）。
-    return sanitizeConfig({ ...defaults, ...migrated })
+    const merged = { ...defaults, ...migrated }
+    // 坑10 读序：**先解密后 sanitize**——盘上 enc:v1: 密文在这里还原成明文，
+    // sanitize 的 trim 等清洗只接触明文；解密失败的字段置 ''（未配置）且整次
+    // load 只报一条 error（PlainSecretBox 读到密文同样走到这里 = headless 坑10
+    // 互操作语义）。不带 marker 的明文值原样透传（旧盘兼容）。
+    const report: { anyFailed: boolean } = { anyFailed: false }
+    const decrypted = decryptSecretFields(merged, this.secretBox, report)
+    if (report.anyFailed) {
+      console.error('[config] 加密凭据解密失败，按未配置处理')
+    }
+    return sanitizeConfig(decrypted)
   }
 
   private backupCorruptAndDefault(content: string): AppConfig {

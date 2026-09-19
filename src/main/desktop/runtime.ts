@@ -91,6 +91,7 @@ import type { FetchLike, HttpRequestInit, HttpResponse } from '../net/http-types
 import type { AppConfig, ChannelConfig, EngineStatus, HitRecord } from '../../shared/types'
 import type { EventBroadcaster } from './ipc'
 import { EngineWatchdog } from './watchdog'
+import { createSafeStorageBox } from './safe-storage-box'
 
 /** 日报定时器 sleep 下限：即使 nextCheckAt 很近也至少 60s 一查（防空转） */
 const REPORT_TIMER_MIN_SLEEP_MS = 60_000
@@ -171,7 +172,14 @@ export class DesktopRuntime {
     this.userDataDir = app.getPath('userData')
     this.logger = createLogger({ fileDir: join(this.userDataDir, 'logs') })
 
-    this.store = new ConfigStore(join(this.userDataDir, 'config.json'))
+    // R9-W2（DEC-10）凭据加密落盘：safeStorage 适配在 desktop 层构造（唯一
+    // electron import 点，safe-storage-box.ts）。时机：DesktopRuntime 由
+    // index.ts 在 app.whenReady() 之后经 initRuntime 创建，safeStorage 的
+    // OS 密钥库此刻已可用——无需懒初始化；不可用（Linux 无密钥库等）时适配
+    // 内部降级 PlainSecretBox + warn 一次（凭据明文落盘，0o600 口径不变）。
+    this.store = new ConfigStore(join(this.userDataDir, 'config.json'), {
+      secretBox: createSafeStorageBox(this.logger)
+    })
     const initial = this.store.load()
 
     // 三 client（ADR 6 / D6 / headless 同款）：'telegram-only' → site/ai 直连、
