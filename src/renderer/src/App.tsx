@@ -1,6 +1,6 @@
 /**
- * 应用外壳：左侧栏（品牌 + 监控台/今日回顾/设置 三个 tab + 底部迷你运行状态）
- * + 右侧内容区。
+ * 应用外壳：左侧栏（品牌 + 监控台/今日回顾/历史命中/流水/设置 五个 tab + 底部
+ * 迷你运行状态）+ 右侧内容区。
  *
  * - 状态数据只在壳层 useApi 一次，向下传给监控台（避免双份订阅/双份全量拉取）。
  * - 设置页 dirty 通过 onDirtyChange 上报；dirty 时切走 tab 不直接切换，
@@ -13,10 +13,61 @@ import { IconPulse, IconRadar, IconReport, IconSliders } from './components/icon
 import { useApi } from './hooks/useApi'
 import { deriveRunState } from './lib/status'
 import { Dashboard } from './pages/Dashboard'
+import { Dispositions } from './pages/Dispositions'
+import { History } from './pages/History'
 import { Reports } from './pages/Reports'
 import { Settings } from './pages/Settings'
 
-type Tab = 'dashboard' | 'reports' | 'settings'
+type Tab = 'dashboard' | 'reports' | 'history' | 'dispositions' | 'settings'
+
+/**
+ * 流水 tab 的放大镜图标（R7-W1）。components/icons.tsx 不在本工作包允许改动
+ * 清单内，故按该文件的同款约定（16×16 栅格 / stroke 1.5 / currentColor /
+ * aria-hidden）在本地定义。
+ */
+function IconSearch(props: { size?: number; className?: string }) {
+  const size = props.size ?? 16
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.4 10.4 14 14" />
+    </svg>
+  )
+}
+
+/**
+ * 历史命中 tab 的卷轴/时钟图标（R7-W2）。同 IconSearch 的本地定义约定
+ * （components/icons.tsx 不在允许改动清单内）。
+ */
+function IconHistory(props: { size?: number; className?: string }) {
+  const size = props.size ?? 16
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 5v3l2 2" />
+    </svg>
+  )
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('dashboard')
@@ -75,6 +126,22 @@ export default function App() {
           </button>
           <button
             type="button"
+            className={`nav-btn${tab === 'history' ? ' active' : ''}`}
+            onClick={() => switchTab('history')}
+          >
+            <IconHistory size={16} />
+            历史命中
+          </button>
+          <button
+            type="button"
+            className={`nav-btn${tab === 'dispositions' ? ' active' : ''}`}
+            onClick={() => switchTab('dispositions')}
+          >
+            <IconSearch size={16} />
+            流水
+          </button>
+          <button
+            type="button"
             className={`nav-btn${tab === 'settings' ? ' active' : ''}`}
             onClick={() => switchTab('settings')}
           >
@@ -114,6 +181,10 @@ export default function App() {
           <Dashboard status={status} hits={hits} logs={logs} />
         ) : tab === 'reports' ? (
           <Reports />
+        ) : tab === 'history' ? (
+          <History />
+        ) : tab === 'dispositions' ? (
+          <Dispositions />
         ) : (
           <Settings onDirtyChange={handleDirtyChange} />
         )}

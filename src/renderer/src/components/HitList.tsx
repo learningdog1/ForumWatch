@@ -3,9 +3,11 @@
  * 来源的域会被主进程放行）· 命中方式徽标（字面/语义/规则）· 命中词 chips、
  * AI 判定理由或命中规则名 · 锐评行（commentary 非空时，💬 前缀 + ai-reason
  * 同款斜体小字；旧 hits/*.jsonl 行无该字段，?? null 归一后不展示）· 推送状态
- * （✓已推送 / ✗推送失败[hover 见原因] / −静音[hover 见说明]）。
+ * （✓已推送 / ✗推送失败[hover 见原因] / −静音[hover 见说明]）· 反馈按钮
+ * （R7-W4：👍/👎 三态，见 VoteButtons）。
  * 时间取 notifiedAt（推送时间）；静音/失败命中没有推送时间，退而取帖子 lastActiveAt。
  */
+import { useState, type CSSProperties } from 'react'
 import type { HitRecord } from '@shared/types'
 import { sourceLabel } from '../lib/status'
 import { formatClock } from '../lib/time'
@@ -110,6 +112,94 @@ function MatchInfo(props: { hit: HitRecord }) {
   )
 }
 
+/** 反馈按钮基础样式（内联：本轮 global.css 不在改动清单，History 内联样式先例） */
+const VOTE_BTN_BASE: CSSProperties = {
+  flex: 'none',
+  border: '1px solid transparent',
+  background: 'none',
+  padding: '0 5px',
+  lineHeight: '17px',
+  fontSize: 'var(--fs-12)',
+  borderRadius: 'var(--radius-s)',
+  cursor: 'pointer',
+  opacity: 0.5
+}
+
+/**
+ * 命中行反馈按钮（R7-W4，DEC-5）：右下角 👍/👎 三态——
+ * 未投 = 记票；已投当前方向（高亮）再点同方向 = undo 撤销；已投另一方向 =
+ * 改票（store 同键覆盖）。三态语义写在按钮 title 提示里。投票即发即忘：
+ * 乐观更新本地高亮，失败回滚 + console.warn（无侵入提示，不打断 UI）。
+ * 本地高亮是会话级的——与最近命中列表的内存口径一致（重启清空）；盘上
+ * feedback.json 里的票跨会话进 prompt，UI 不回读（无查询 IPC）。
+ */
+function VoteButtons(props: { hit: HitRecord }) {
+  const { hit } = props
+  const [voted, setVoted] = useState<'positive' | 'negative' | null>(null)
+
+  const vote = (direction: 'positive' | 'negative'): void => {
+    const action = voted === direction ? 'undo' : direction
+    const prev = voted
+    setVoted(action === 'undo' ? null : direction)
+    void window.api
+      .hitFeedback({
+        sourceId: hit.topic.sourceId,
+        topicId: hit.topic.id,
+        title: hit.topic.title,
+        direction: action
+      })
+      .then((r) => {
+        if (!r.ok) {
+          setVoted(prev)
+          console.warn('[HitList] 反馈提交失败：', r.error)
+        }
+      })
+      .catch((err: unknown) => {
+        setVoted(prev)
+        console.warn('[HitList] 反馈请求异常：', err)
+      })
+  }
+
+  const thumbTitle =
+    voted === 'positive'
+      ? '已标记为想要：再点一次撤销反馈'
+      : voted === 'negative'
+        ? '改为想要（撤销"不想要"标记）'
+        : '标记为想要：同类新帖更可能被判相关（AI 反馈）'
+  const downTitle =
+    voted === 'negative'
+      ? '已标记为不想要：再点一次撤销反馈'
+      : voted === 'positive'
+        ? '改为不想要（撤销"想要"标记）'
+        : '标记为不想要：同类新帖更可能被判不相关（AI 反馈）'
+  const active = (on: boolean, color: string): CSSProperties =>
+    on ? { ...VOTE_BTN_BASE, opacity: 1, color, borderColor: `color-mix(in srgb, ${color} 45%, transparent)` } : VOTE_BTN_BASE
+
+  return (
+    <span
+      className="vote-group"
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flex: 'none' }}
+    >
+      <button
+        type="button"
+        title={thumbTitle}
+        style={active(voted === 'positive', 'var(--ok)')}
+        onClick={() => vote('positive')}
+      >
+        👍
+      </button>
+      <button
+        type="button"
+        title={downTitle}
+        style={active(voted === 'negative', 'var(--err)')}
+        onClick={() => vote('negative')}
+      >
+        👎
+      </button>
+    </span>
+  )
+}
+
 export function HitList(props: {
   hits: HitRecord[]
   /** 持久累计命中数（EngineStatus.totalHits）：与内存列表口径不同，空态联动展示 */
@@ -171,6 +261,7 @@ export function HitList(props: {
               </button>
               <MatchInfo hit={hit} />
               <PushState hit={hit} />
+              <VoteButtons hit={hit} />
             </div>
           ))
         )}

@@ -5,7 +5,8 @@
  *   每轮轮询 1-2 条，无需批量节流），历史用 logs:get 拉全量。
  * - registerIpcHandlers：invoke handler 注册（getConfig / saveConfig / getStatus /
  *   getHits / getLogs / engineControl / openExternal / testAiProvider /
- *   getDailyReport / generateDailyReport / listDailyReports），失败一律收敛为返回值，
+ *   getDailyReport / generateDailyReport / listDailyReports / dispositionsRecent /
+ *   dispositionsDay / queryHits / getStats / hitFeedback），失败一律收敛为返回值，
  *   绝不向渲染进程抛异常。
  * - AI / 日报通道（W2-c 接入）：testAiProvider 走 provider.testConnection（错误
  *   消息已脱敏，无 apiKey 明文）；getDailyReport/loadReport/list 走
@@ -18,10 +19,14 @@ import {
   type AiTestResult,
   type DailyReportListResult,
   type EngineControlResult,
+  type HitFeedbackResult,
+  type HitQueryOptions,
+  type HitQueryResult,
   type MatchTestRequest,
   type MatchTestResult,
   type OpenExternalResult,
-  type SaveConfigResult
+  type SaveConfigResult,
+  type StatsResult
 } from '../../shared/ipc'
 import type {
   AppConfig,
@@ -34,6 +39,7 @@ import type {
 import type { DesktopRuntime } from './runtime'
 import { allowedExternalDomains, isHostAllowed } from '../monitor/sources/registry'
 import { formatLocalDate } from '../monitor/hits-store'
+import { computeStats } from '../monitor/stats'
 import { normalizeTitle } from '../monitor/similarity'
 import { runMatchTest, type SemanticTestInput } from '../monitor/testbench'
 
@@ -191,6 +197,109 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
   ipcMain.handle(IPC.listDailyReports, (): DailyReportListResult => ({
     dates: rt.reportService.listReportDays()
   }))
+
+  // ---- 处置流水（R7-W1"为什么没推送"观测面） -------------------------------
+
+  /** invoke() → Disposition[]：内存环最近 200 条（旧→新）；查询面不抛 */
+  ipcMain.handle(IPC.dispositionsRecent, () => rt.dispositions.recent(200))
+
+  /**
+   * invoke(dateLocal) → Disposition[]：某本地日的持久化记录（旧→新）。
+   * 参数缺省/非字符串按今天处理；文件缺失/坏行由 store 按空/跳过收口。
+   */
+  ipcMain.handle(IPC.dispositionsDay, (_event, dateLocal: unknown) => {
+    const date =
+      typeof dateLocal === 'string' && dateLocal !== '' ? dateLocal : formatLocalDate()
+    return rt.dispositions.readDay(date)
+  })
+
+  // ---- 历史命中浏览器 + 统计面板（R7-W2 / W3） -----------------------------
+
+  /** getStats 的 days 钳位：缺省 14（UI 统计区固定口径），下限 1，上限 90 */
+  const STATS_DAYS_DEFAULT = 14
+  const STATS_DAYS_MAX = 90
+
+  /** 'YYYY-MM-DD' 形状（queryHits 的日期入参校验；非法 → 空结果） */
+  const DATE_SHAPE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+  /**
+   * 渲染进程传来的 unknown 载荷 → HitQueryOptions（不信任 renderer 内存）。
+   * 非法日期 → 空区间（toDate 形状不过 → 恒空；fromDate 形状不过 → 保持 toDate
+   * 为上界）。字段缺省按"不过滤 / 第一页 / 50 条"处理。
+   */
+  const normalizeHitQuery = (raw: unknown): HitQueryOptions => {
+    const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+    const fromDate =
+      typeof o['fromDate'] === 'string' && DATE_SHAPE_RE.test(o['fromDate']) ? o['fromDate'] : ''
+    const toDate =
+      typeof o['toDate'] === 'string' && DATE_SHAPE_RE.test(o['toDate']) ? o['toDate'] : ''
+    const sourceId = typeof o['sourceId'] === 'string' && o['sourceId'] !== '' ? o['sourceId'] : undefined
+    const matchedBy = Array.isArray(o['matchedBy'])
+      ? o['matchedBy'].filter(
+          (v): v is 'literal' | 'semantic' | 'rule' =>
+            v === 'literal' || v === 'semantic' || v === 'rule'
+        )
+      : undefined
+    const text = typeof o['text'] === 'string' && o['text'].trim() !== '' ? o['text'] : undefined
+    const limit = typeof o['limit'] === 'number' && Number.isFinite(o['limit']) ? o['limit'] : 50
+    const offset = typeof o['offset'] === 'number' && Number.isFinite(o['offset']) ? o['offset'] : 0
+    return { fromDate, toDate, sourceId, matchedBy, text, limit, offset }
+  }
+
+  /**
+   * invoke(HitQueryOptions) → HitQueryResult：hitsStore.query 跨日 JSONL 合并
+   * 查询（过滤 + 分页，items 新→旧）。查询面不抛；readDay 单日失败按空处理。
+   */
+  ipcMain.handle(
+    IPC.queryHits,
+    (_event, opts: unknown): Promise<HitQueryResult> => rt.hitsStore.query(normalizeHitQuery(opts))
+  )
+
+  /**
+   * invoke(days?) → StatsResult：近 N 天（缺省 14，钳 [1,90]）命中的纯读聚合。
+   * readRecent 以当前时刻起算本地自然日窗口；includeKeywords 取当前生效配置
+   * （零命中关键词检出基准）。读取失败按空数据聚合（不抛）。
+   */
+  ipcMain.handle(IPC.getStats, async (_event, days: unknown): Promise<StatsResult> => {
+    const n =
+      typeof days === 'number' && Number.isFinite(days)
+        ? Math.min(Math.max(Math.floor(days), 1), STATS_DAYS_MAX)
+        : STATS_DAYS_DEFAULT
+    const hits = await rt.hitsStore.readRecent(n)
+    return computeStats(hits, { includeKeywords: rt.store.get().includeKeywords })
+  })
+
+  // ---- 命中反馈（R7-W4 AI 反馈闭环，DEC-5） ---------------------------------
+
+  /**
+   * invoke(HitFeedbackRequest) → HitFeedbackResult：命中行 👍/👎 落
+   * rt.feedbackStore（正/负例各环形 100，同键再投=改票），SemanticEvaluator 的
+   * system prompt 尾部注入最近各 ≤8 条（下一次语义评估生效）。undo 幂等
+   * （键不存在也 ok）。载荷不信任 renderer 内存：逐字段判型，非法 → {ok:false}。
+   */
+  ipcMain.handle(IPC.hitFeedback, (_event, raw: unknown): HitFeedbackResult => {
+    const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+    const sourceId = typeof o['sourceId'] === 'string' ? o['sourceId'] : ''
+    const topicId = typeof o['topicId'] === 'string' ? o['topicId'] : ''
+    const title = typeof o['title'] === 'string' ? o['title'].trim() : ''
+    const direction = o['direction']
+    if (sourceId === '' || topicId === '' || title === '') {
+      return { ok: false, error: 'invalid feedback payload: need non-empty sourceId/topicId/title' }
+    }
+    if (direction !== 'positive' && direction !== 'negative' && direction !== 'undo') {
+      return { ok: false, error: `unknown direction: ${String(direction)}` }
+    }
+    try {
+      if (direction === 'undo') {
+        rt.feedbackStore.undo(`${sourceId}:${topicId}`)
+      } else {
+        rt.feedbackStore.vote(`${sourceId}:${topicId}`, title, direction)
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   // ---- 匹配测试台（R5-P2c） -----------------------------------------------
 
