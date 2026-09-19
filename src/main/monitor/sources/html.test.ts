@@ -36,6 +36,7 @@ describe('parseHomepage', () => {
     const second = parseHomepage(fixtureHtml)[1]
     expect(second).toEqual({
       id: '936634',
+      sourceId: '', // adapter 不盖章，engine 处理时按来源补（D2/D3）
       title: '收一个oracle圣荷西',
       url: 'https://www.nodeseek.com/post-936634-1',
       author: '没想好',

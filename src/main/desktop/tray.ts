@@ -1,7 +1,9 @@
 /**
  * 托盘（ADR 8.3 / 8.4）：常驻形态的主入口。
- * - 图标 resources/icons/tray.png：同目录 tray@2x.png 由 Electron 按 DPI 自动取。
- *   Template 命名才跟随深浅色——本应用用彩色图标，接受不跟随（ADR 8.3）。
+ * - 图标按平台选择：darwin → `icons/trayTemplate.png`（Template 命名自动跟随菜单栏
+ *   深浅色；@2x 走同目录 `trayTemplate@2x.png` 命名约定，Electron 按 DPI 自动取）；
+ *   其他平台 → 彩色 `icons/tray.png`（+ `tray@2x.png`）。
+ *   图源与生产管线见 design/*.svg 与 scripts/gen-icons.ts（npm run icons）。
  * - tooltip 与"暂停/恢复"菜单文案由 (desired, health) 派生（deriveTrayLabel），
  *   每次 engine onStatus 后 rebuild setContextMenu。
  * - mac 点击托盘 = 切换主窗口显隐。
@@ -19,8 +21,11 @@ let tray: Tray | null = null
 let iconPath = ''
 let currentStatus: EngineStatus | null = null
 
+/** darwin 用 Template 图（纯黑+alpha，自动跟随菜单栏深浅色）；其余平台用彩色托盘图 */
+const TRAY_ICON_REL = process.platform === 'darwin' ? 'icons/trayTemplate.png' : 'icons/tray.png'
+
 export function createTray(rt: DesktopRuntime): Tray {
-  iconPath = resolveResource('icons/tray.png')
+  iconPath = resolveResource(TRAY_ICON_REL)
   const icon = nativeImage.createFromPath(iconPath)
   if (icon.isEmpty()) rt.logger.warn(`tray icon missing or empty: ${iconPath}`)
 

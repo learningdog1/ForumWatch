@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- macOS 托盘 Template 简化版（16 自然尺寸，渲染为 trayTemplate.png）。
+       16px 做减法：外环 + 扫描针 + 一个信号点，笔画加粗保证可辨认。 -->
+  <circle cx="8" cy="8.3" r="6.6" fill="none" stroke="#000000" stroke-width="1.8"/>
+  <path d="M8 8.3 L13.83 5.2" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="4.34" cy="9.63" r="1.5" fill="#000000"/>
+</svg>

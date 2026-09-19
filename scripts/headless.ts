@@ -19,7 +19,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
 import { HttpClient, redactProxyUrl } from '../src/main/net/http'
-import { FileSeenStore } from '../src/main/monitor/dedup'
+import { FileSeenStore, NODESEEK_SEEN_KEY_PREFIX } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
 import { PollScheduler } from '../src/main/monitor/poller'
 import { HtmlSourceAdapter } from '../src/main/monitor/sources/html'
@@ -166,7 +166,8 @@ async function main(): Promise<number | null> {
         fetchLatest: async () => {
           const topics = await source.fetchLatest()
           fetchedCount = topics.length
-          freshCount = topics.filter((t) => !seen.has(t.id)).length
+          // 去重键与 engine 同口径：`${sourceId}:${topic.id}`（D2）
+          freshCount = topics.filter((t) => !seen.has(NODESEEK_SEEN_KEY_PREFIX + t.id)).length
           return topics
         }
       }

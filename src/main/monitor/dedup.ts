@@ -1,11 +1,15 @@
 /**
- * 去重存储（ADR 3 / ADR 8.5）。
+ * 去重存储（ADR 3 / ADR 8.5 / D2）。
  *
- * - 去重键 = NodeSeek 帖子 ID（字符串）。
+ * - 去重键 = `${sourceId}:${topic.id}`（v2 起带来源前缀；v1 时代的裸 NodeSeek
+ *   帖子 ID 在 load 时前缀化为 `nodeseek:{id}`，见 NODESEEK_SEEN_KEY_PREFIX）。
  * - 内存态：`{id, addedAt}` 顺序队列，超容量时最老的条目被环形淘汰（默认 1000 条，
  *   防止常驻进程无限膨胀）。
- * - 持久化：纯 JSON（`schemaVersion: 1`），原子写（同目录 tmp + `rename`），
- *   损坏文件备份成 `{file}.corrupt-{ts}` 后从空集开始，绝不抛出（ADR 3）。
+ * - 持久化：纯 JSON，原子写（同目录 tmp + `rename`），损坏文件备份成
+ *   `{file}.corrupt-{ts}` 后从空集开始，绝不抛出（ADR 3）。
+ * - 盘上版本兼容：v1（`schemaVersion:1`，裸 id）与 v2（`schemaVersion:2`，带前缀
+ *   id）都能加载。v1 视为**成功加载**（不置 rebuiltFromCorrupt、无需补基线——
+ *   键空间只是换了写法，集合没有丢失），下次 flush 自然落 v2。
  *
  * 零 electron 依赖，可在 node 下单测与 headless 直跑（ADR 2）。
  */
@@ -14,17 +18,28 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-/** 去重条目：帖子 ID + 入集时间戳（ms epoch） */
+/** 去重条目：全局去重键（`${sourceId}:${topic.id}`）+ 入集时间戳（ms epoch） */
 export interface SeenEntry {
   id: string
   addedAt: number
 }
 
-/** 序列化格式（写盘 JSON 的形状） */
+/** 序列化格式（写盘 JSON 的形状；v2 = id 带来源前缀） */
 export interface SeenStoreData {
-  schemaVersion: 1
+  schemaVersion: 2
   seen: SeenEntry[]
 }
+
+/**
+ * nodeseek 的去重键前缀（D2）。两个消费方共用一个常量，防止漂移：
+ * - v1 seen.json 裸 id 加载时前缀化为 `nodeseek:{id}`；
+ * - v2 阶段 engine 组装 nodeseek 的去重键（W2 泛化为 `${sourceId}:${topicId}`）。
+ * 两处必须一致，否则升级用户的旧集合作废、整页重推。
+ */
+export const NODESEEK_SEEN_KEY_PREFIX = 'nodeseek:'
+
+/** 当前写盘版本 */
+const SEEN_SCHEMA_VERSION = 2
 
 /** 默认去重集容量（ADR 8.5：环形淘汰上限 1000 条） */
 export const DEFAULT_SEEN_CAPACITY = 1000
@@ -83,28 +98,31 @@ export class SeenStore {
     return pruned
   }
 
-  /** 序列化为可 JSON 化的 plain object（按旧→新顺序） */
+  /** 序列化为可 JSON 化的 plain object（按旧→新顺序；写盘恒为 v2 形状） */
   serialize(): SeenStoreData {
     const seen: SeenEntry[] = []
     for (const [id, addedAt] of this.entries) seen.push({ id, addedAt })
-    return { schemaVersion: 1, seen }
+    return { schemaVersion: SEEN_SCHEMA_VERSION, seen }
   }
 
   /**
    * 从未知数据反序列化，坏数据不抛：
    * - 整体形状错误（非对象 / schemaVersion 不认识 / seen 非数组）→ 空 store；
+   * - v1（`schemaVersion:1`，裸 id）→ 每条 id 前缀化 `nodeseek:{id}`（D2）；
    * - 单条坏条目（id 非非空字符串、addedAt 非有限数字）→ 跳过该条；
    * - 条数超出 capacity → 只保留最新的 capacity 条（环形淘汰语义）。
    */
   static deserialize(raw: unknown, capacity: number = DEFAULT_SEEN_CAPACITY): SeenStore {
     const store = new SeenStore(capacity)
     if (!looksCorrupt(raw)) {
-      for (const item of (raw as SeenStoreData).seen) {
+      const data = raw as SeenFileShape
+      const prefixIds = data.schemaVersion === 1 // v1 裸 id → nodeseek:{id}
+      for (const item of data.seen) {
         if (typeof item !== 'object' || item === null) continue
         const { id, addedAt } = item as Partial<SeenEntry>
         if (typeof id !== 'string' || id.length === 0) continue
         if (typeof addedAt !== 'number' || !Number.isFinite(addedAt)) continue
-        store.entries.set(id, addedAt)
+        store.entries.set(prefixIds ? NODESEEK_SEEN_KEY_PREFIX + id : id, addedAt)
       }
       store.evictOverflow()
     }
@@ -121,11 +139,15 @@ export class SeenStore {
   }
 }
 
-/** 整体形状校验：`{schemaVersion:1, seen: SeenEntry[]}` 之外的都算坏数据 */
+/** 盘上文件的读取形状（v1|v2 共用；schemaVersion 放宽为 number 以便版本判别） */
+type SeenFileShape = { schemaVersion: number; seen: unknown[] }
+
+/** 整体形状校验：`{schemaVersion:1|2, seen: SeenEntry[]}` 之外的都算坏数据 */
 function looksCorrupt(raw: unknown): boolean {
   if (typeof raw !== 'object' || raw === null) return true
-  const data = raw as Partial<SeenStoreData>
-  return data.schemaVersion !== 1 || !Array.isArray(data.seen)
+  const data = raw as Partial<SeenFileShape>
+  if (data.schemaVersion !== 1 && data.schemaVersion !== SEEN_SCHEMA_VERSION) return true
+  return !Array.isArray(data.seen)
 }
 
 /**
@@ -164,6 +186,8 @@ export class FileSeenStore {
   /**
    * 同步从磁盘加载（保证 load 返回后 has/add 立即可用）：
    * - 文件缺失 = 空集（首启基线，配合"首轮只入集不推送"）；
+   * - v1 文件（裸 id）= **成功加载**：id 前缀化后入集，不置 rebuiltFromCorrupt、
+   *   不补基线（集合没丢，只是键的写法升级），下次 flush 自然落 v2；
    * - 文件存在但损坏（非法 JSON / schema 不认识 / 其他读失败）=
    *   备份成 `{file}.corrupt-{ts}` 后从空集开始，不抛（ADR 3），
    *   并置 `rebuiltFromCorrupt = true`（ADR 8.9）。

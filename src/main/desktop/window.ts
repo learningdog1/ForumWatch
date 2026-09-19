@@ -30,7 +30,7 @@ export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 980,
     height: 700,
-    title: 'NodeSeek Monitor',
+    title: 'ForumWatch',
     webPreferences: {
       // electron-vite 的 preload 产物是 CJS：sandbox 默认开启时沙箱 preload 白名单
       // 模块里就有 contextBridge / ipcRenderer，无需关 sandbox。

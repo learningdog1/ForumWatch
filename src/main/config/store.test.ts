@@ -3,7 +3,7 @@ import { statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_APP_CONFIG, type AppConfig } from '../../shared/types'
+import { DEFAULT_APP_CONFIG, type AppConfig, type SourceConfig } from '../../shared/types'
 import { ConfigStore, sanitizeConfig } from './store'
 
 let dir: string
@@ -88,6 +88,147 @@ describe('sanitizeConfig', () => {
     expect(input).toEqual(snapshot) // 入参原样
     expect(out).not.toBe(input)
     expect(out.telegram).not.toBe(input.telegram)
+    expect(out.ai).not.toBe(input.ai)
+    expect(out.sources).not.toBe(input.sources)
+  })
+
+  it('ai.baseUrl：trim、去尾斜杠、必须 http(s):// 开头否则置空', () => {
+    const aiOf = (url: unknown): string =>
+      sanitizeConfig(
+        cfg({
+          ai: {
+            ...cfg().ai,
+            provider: { ...cfg().ai.provider, baseUrl: url as string }
+          }
+        })
+      ).ai.provider.baseUrl
+    expect(aiOf('  https://api.deepseek.com/v1  ')).toBe('https://api.deepseek.com/v1')
+    expect(aiOf('https://api.deepseek.com/v1/')).toBe('https://api.deepseek.com/v1')
+    expect(aiOf('https://api.deepseek.com/v1///')).toBe('https://api.deepseek.com/v1')
+    expect(aiOf('HTTP://localhost:8000/v1/')).toBe('HTTP://localhost:8000/v1')
+    expect(aiOf('ftp://nope')).toBe('')
+    expect(aiOf('api.deepseek.com/v1')).toBe('')
+    expect(aiOf('http://')).toBe('') // 去尾斜杠后只剩 'http:'：不保留
+    expect(aiOf('   ')).toBe('')
+  })
+
+  it('ai.provider.apiKey/model trim', () => {
+    const out = sanitizeConfig(
+      cfg({
+        ai: {
+          ...cfg().ai,
+          provider: { baseUrl: '', apiKey: ' sk-abc \n', model: ' deepseek-chat ' }
+        }
+      })
+    )
+    expect(out.ai.provider.apiKey).toBe('sk-abc')
+    expect(out.ai.provider.model).toBe('deepseek-chat')
+  })
+
+  it("ai.matchMode：只认 literal/semantic/both，非法回退 'literal'", () => {
+    const modeOf = (m: unknown) =>
+      sanitizeConfig(
+        cfg({ ai: { ...cfg().ai, matchMode: m as AppConfig['ai']['matchMode'] } })
+      ).ai.matchMode
+    expect(modeOf('literal')).toBe('literal')
+    expect(modeOf('semantic')).toBe('semantic')
+    expect(modeOf('both')).toBe('both')
+    expect(modeOf('Literal')).toBe('literal')
+    expect(modeOf('everything')).toBe('literal')
+    expect(modeOf(undefined)).toBe('literal')
+  })
+
+  it('ai.interests：每条 trim 去空、单条超 500 字符截断、最多 20 条', () => {
+    const interests = [
+      '  便宜大内存 VPS  ',
+      '', // 去空
+      '   ',
+      'x'.repeat(600), // 截断到 500
+      ...Array.from({ length: 25 }, (_, i) => `interest-${i}`)
+    ]
+    const out = sanitizeConfig(cfg({ ai: { ...cfg().ai, interests } }))
+    expect(out.ai.interests).toHaveLength(20)
+    expect(out.ai.interests[0]).toBe('便宜大内存 VPS')
+    expect(out.ai.interests[1]).toBe('x'.repeat(500))
+    expect(out.ai.interests[19]).toBe('interest-17') // 20 条封顶：interest-18/19 被裁掉
+  })
+
+  it('ai.dailyReport：enabled 强制布尔；timeHHMM 非法回 22:00，合法保留', () => {
+    const hhmmOf = (t: unknown) =>
+      sanitizeConfig(
+        cfg({
+          ai: {
+            ...cfg().ai,
+            dailyReport: { enabled: 1 as unknown as boolean, timeHHMM: t as string }
+          }
+        })
+      ).ai.dailyReport
+    expect(hhmmOf('09:05')).toEqual({ enabled: false, timeHHMM: '09:05' })
+    expect(hhmmOf('23:59').timeHHMM).toBe('23:59')
+    expect(hhmmOf('00:00').timeHHMM).toBe('00:00')
+    expect(hhmmOf('24:00').timeHHMM).toBe('22:00')
+    expect(hhmmOf('12:60').timeHHMM).toBe('22:00')
+    expect(hhmmOf('9:05').timeHHMM).toBe('22:00') // 非两位
+    expect(hhmmOf('1205').timeHHMM).toBe('22:00')
+    expect(hhmmOf('').timeHHMM).toBe('22:00')
+    expect(hhmmOf(undefined).timeHHMM).toBe('22:00')
+    // enabled 真布尔保留
+    const out = sanitizeConfig(
+      cfg({ ai: { ...cfg().ai, dailyReport: { enabled: true, timeHHMM: '08:30' } } })
+    )
+    expect(out.ai.dailyReport).toEqual({ enabled: true, timeHHMM: '08:30' })
+  })
+
+  it('sources：非数组/空数组 → 默认单项 nodeseek', () => {
+    expect(sanitizeConfig(cfg({ sources: [] })).sources).toEqual([
+      { id: 'nodeseek', type: 'nodeseek', enabled: true }
+    ])
+    expect(
+      sanitizeConfig(cfg({ sources: undefined as unknown as [] })).sources
+    ).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+    expect(
+      sanitizeConfig(cfg({ sources: 'nope' as unknown as [] })).sources
+    ).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+  })
+
+  it('sources：id slug 化（非法字符替换 -、trim、空则丢弃）、type 恒 nodeseek、enabled 布尔化、按 id 去重', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: ' nodeseek ', type: 'rss' as never, enabled: 1 as unknown as boolean },
+          { id: 'node_seek!', type: 'nodeseek', enabled: false },
+          { id: 'nodeseek', type: 'nodeseek', enabled: true }, // 重复 id：保留首个
+          { id: '   ', type: 'nodeseek', enabled: true }, // trim 后空：丢弃
+          { id: 42 as unknown as string, type: 'nodeseek', enabled: true }, // 非字符串：丢弃
+          null as unknown as never, // 非对象：丢弃
+          { type: 'nodeseek', enabled: true } as unknown as SourceConfig // 缺 id：丢弃
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      { id: 'nodeseek', type: 'nodeseek', enabled: false }, // 首个：enabled=1 → false（强制布尔）
+      { id: 'node_seek-', type: 'nodeseek', enabled: false }
+    ])
+  })
+
+  it('sources 全部项非法：回默认单项（绝不落空列表）', () => {
+    const out = sanitizeConfig(
+      cfg({ sources: [{ id: '', type: 'nodeseek', enabled: true }, 'junk' as unknown as never] })
+    )
+    expect(out.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+  })
+
+  it('ai 字段整体损坏（非对象）：sanitize 回全默认 AI 配置', () => {
+    const out = sanitizeConfig(cfg({ ai: 'broken' as unknown as AppConfig['ai'] }))
+    expect(out.ai).toEqual(DEFAULT_APP_CONFIG.ai)
+    const out2 = sanitizeConfig(cfg({ ai: { matchMode: 'both' } as unknown as AppConfig['ai'] }))
+    expect(out2.ai).toEqual({
+      ...DEFAULT_APP_CONFIG.ai,
+      matchMode: 'both',
+      provider: { baseUrl: '', apiKey: '', model: '' },
+      interests: [],
+      dailyReport: { enabled: false, timeHHMM: '22:00' }
+    })
   })
 })
 
@@ -150,8 +291,44 @@ describe('ConfigStore', () => {
     expect(loaded.telegram.chatId).toBe('-100200')
     // 盘上是带 schemaVersion 的信封
     const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
-    expect(onDisk.schemaVersion).toBe(1)
+    expect(onDisk.schemaVersion).toBe(2)
     expect(onDisk.config.telegram.botToken).toBe('111:abc')
+  })
+
+  it('v1 config 文件落盘后 load 出 v2：v1 字段保留 + sources/ai 补默认', async () => {
+    // v1 时代的盘上文件（无 sources/ai 字段）
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        config: {
+          includeKeywords: ['vps'],
+          excludeKeywords: ['广告'],
+          pollIntervalSec: 45,
+          proxyUrl: 'http://127.0.0.1:7890',
+          proxyScope: 'all',
+          telegram: { botToken: '111:abc', chatId: '-100200' },
+          notifyEnabled: false,
+          launchAtLogin: true
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    // v1 字段全部保留
+    expect(loaded.includeKeywords).toEqual(['vps'])
+    expect(loaded.pollIntervalSec).toBe(45)
+    expect(loaded.telegram).toEqual({ botToken: '111:abc', chatId: '-100200' })
+    expect(loaded.notifyEnabled).toBe(false)
+    expect(loaded.launchAtLogin).toBe(true)
+    // v2 新增字段为默认值
+    expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+    expect(loaded.ai).toEqual(DEFAULT_APP_CONFIG.ai)
+
+    // 保存回写的是 v2 信封（迁移完成后不再回落 v1）
+    new ConfigStore(configPath).save(loaded)
+    const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
+    expect(onDisk.schemaVersion).toBe(2)
   })
 
   it('update：浅合并顶层字段，telegram 子对象整体替换', () => {
@@ -218,7 +395,7 @@ describe('ConfigStore', () => {
     expect((await readdir(dir)).some((f) => f.startsWith('config.json.corrupt-'))).toBe(true)
   })
 
-  it('盘上合法信封缺字段：合并默认值得到完整配置', async () => {
+  it('盘上合法信封缺字段：合并默认值得到完整配置（v1 信封同样迁移到 v2）', async () => {
     await writeFile(
       configPath,
       JSON.stringify({ schemaVersion: 1, config: { pollIntervalSec: 45 } }),
@@ -228,6 +405,31 @@ describe('ConfigStore', () => {
     expect(loaded.pollIntervalSec).toBe(45)
     expect(loaded.telegram).toEqual({ botToken: '', chatId: '' })
     expect(loaded.notifyEnabled).toBe(true)
+    expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+    expect(loaded.ai).toEqual(DEFAULT_APP_CONFIG.ai)
+  })
+
+  it('盘上 v2 信封缺字段：同样合并默认值（迁移函数透传残缺 config）', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ schemaVersion: 2, config: { pollIntervalSec: 30 } }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.pollIntervalSec).toBe(30)
+    expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+    expect(loaded.ai).toEqual(DEFAULT_APP_CONFIG.ai)
+  })
+
+  it('盘上信封 schemaVersion 未知（3）：按损坏备份并回默认', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ schemaVersion: 3, config: { includeKeywords: ['vps'] } }),
+      'utf-8'
+    )
+    const store = new ConfigStore(configPath)
+    expect(store.load()).toEqual(DEFAULT_APP_CONFIG)
+    expect((await readdir(dir)).some((f) => f.startsWith('config.json.corrupt-'))).toBe(true)
   })
 
   it('保存后没有 .tmp- 残留', async () => {

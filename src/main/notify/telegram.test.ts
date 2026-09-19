@@ -9,6 +9,7 @@ import { escapeHtml, formatHitMessage, TelegramError, TelegramNotifier } from '.
 
 const topic: Topic = {
   id: '936634',
+  sourceId: '',
   title: '出 <script>& 海尔冰箱 "9成新"',
   url: 'https://www.nodeseek.com/post-936634-1',
   author: '张三<b>',
@@ -126,7 +127,7 @@ describe('TelegramNotifier', () => {
     const h = makeHarness(() => okRes)
     await h.notifier.sendTest()
     const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as { text: string }
-    expect(body.text).toBe('✅ NodeSeek Monitor 测试消息')
+    expect(body.text).toBe('✅ ForumWatch 测试消息')
   })
 
   it('429 后按 min(retry_after, 60)+0.5s 等待并重试成功', async () => {

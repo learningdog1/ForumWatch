@@ -92,7 +92,7 @@ export class TelegramNotifier {
   }
 
   async sendTest(): Promise<void> {
-    await this.enqueue(() => this.deliver('✅ NodeSeek Monitor 测试消息'))
+    await this.enqueue(() => this.deliver('✅ ForumWatch 测试消息'))
   }
 
   /** 排队执行；前一个任务失败不阻塞后一个 */

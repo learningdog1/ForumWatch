@@ -1,8 +1,15 @@
-# NodeSeek Monitor
+# ForumWatch
 
 常驻系统托盘的 [NodeSeek](https://www.nodeseek.com) 论坛监控工具：按设定间隔轮询 NodeSeek 首页新帖，标题命中关键词时立即推送到 Telegram。macOS / Windows 双平台。
 
 <!-- TODO: screenshot -->
+
+## 从 NodeSeek Monitor 更名与数据迁移
+
+本应用原名 **NodeSeek Monitor**，现已更名为 **ForumWatch**。
+
+- **老用户升级**：新版首次启动会自动把旧版的配置（关键词/Telegram/代理）、已读去重记录与运行状态迁移到新的数据目录；旧目录保留不动，随时可以回退装回旧版。
+- **Windows 用户务必先退出旧版**（托盘菜单 → 退出）再安装新版：新版与旧版是两个独立应用，同时运行会对同一批帖子**重复推送**。
 
 ## 功能特性
 
@@ -29,13 +36,13 @@
 
 应用没有做代码签名和公证，首次打开会被 Gatekeeper 拦截，这是预期现象：
 
-1. 下载 `.dmg`，把 **NodeSeek Monitor** 拖入「应用程序」文件夹。
+1. 下载 `.dmg`，把 **ForumWatch** 拖入「应用程序」文件夹。
 2. 在「应用程序」里找到它，**右键点击 → 打开 → 再点"打开"**（不要直接双击）。
    只需要做一次，之后可正常双击打开。
 3. 如果仍提示"已损坏"，可在「终端」执行（把路径换成实际安装位置）后，再右键打开：
 
    ```bash
-   xattr -cr /Applications/NodeSeek\ Monitor.app
+   xattr -cr /Applications/ForumWatch.app
    ```
 
 ### Windows：SmartScreen 提示"已保护你的电脑"怎么办
@@ -58,7 +65,7 @@
       - 方法一：给 [@userinfobot](https://t.me/userinfobot) 发任意消息，它回复里的 `Id` 就是你的 Chat ID。个人聊天是正数；群组是负数（通常是 `-100` 开头），需先把 bot 拉进群并在群里发条消息。
       - 方法二：浏览器打开 `https://api.telegram.org/bot<你的Token>/getUpdates`（把 `<你的Token>` 换成第 1 步的 token），返回 JSON 里 `message.chat.id` 字段就是 Chat ID。
 4. **填写 Telegram 配置**：「设置 → Telegram 推送」里填入 Bot Token 与 Chat ID，点「保存设置」。
-5. **点「✈ 发送测试消息」**：Telegram 里收到 `✅ NodeSeek Monitor 测试消息` 即配置成功。之后保持应用运行（窗口可以关，托盘常驻），新帖命中关键词就会推送。
+5. **点「✈ 发送测试消息」**：Telegram 里收到 `✅ ForumWatch 测试消息` 即配置成功。之后保持应用运行（窗口可以关，托盘常驻），新帖命中关键词就会推送。
 
 > 大陆用户请先阅读下面的「网络与代理」一节，api.telegram.org 通常需要代理才能访问。
 

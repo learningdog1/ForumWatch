@@ -4,8 +4,8 @@
  * 职责（ADR 2：内核零 electron 依赖，本文件只做生命周期胶水）：
  * - 单实例锁（ADR 8.4）：抢不到锁直接退出；second-instance 唤起主窗口。
  * - mac 隐藏 Dock 图标（ADR 8.3，托盘常驻形态）。
- * - whenReady 装配顺序：broadcaster → runtime → IPC handler → 主窗口 → 托盘 →
- *   电源钩子 → runtime.startup()（launch 即开始监控）。
+ * - whenReady 装配顺序：userData 迁移（D1）→ broadcaster → runtime → IPC handler →
+ *   主窗口 → 托盘 → 电源钩子 → runtime.startup()（launch 即开始监控）。
  * - window-all-closed 不退出（托盘常驻，win 也是；退出走托盘菜单 / Cmd+Q）。
  * - 退出路径统一：before-quit 置 quitting 标志 + 异步 runtime.shutdown()，
  *   完成后再次 app.quit() 放行——shutdown 恰发生在 before-quit 与 will-quit 之间。
@@ -13,7 +13,9 @@
  *   不让内核异常弹原生崩溃框。
  */
 import { app } from 'electron'
+import { join } from 'node:path'
 import { createBroadcaster, registerIpcHandlers } from './desktop/ipc'
+import { migrateUserDataFiles } from './desktop/migrate'
 import { attachPowerHooks } from './desktop/power'
 import { initRuntime } from './desktop/runtime'
 import type { DesktopRuntime } from './desktop/runtime'
@@ -24,6 +26,19 @@ import type { Logger } from './logger'
 // runtime 就绪前用 console 兜底，就绪后写结构化日志
 let loggerRef: Logger | null = null
 let runtimeRef: DesktopRuntime | null = null
+
+/**
+ * userData 首启迁移（D1：NodeSeek Monitor → ForumWatch）。
+ * appData 在三平台都是 userData 的父目录，旧目录即 `appData/NodeSeek Monitor`。
+ * 必须在 initRuntime 之前执行（runtime 构造即读 userData 下的文件）；
+ * 此时 logger 尚未初始化，内部用 console 记录。任何失败只 warn，绝不删旧目录。
+ */
+function migrateLegacyUserData(): void {
+  migrateUserDataFiles({
+    legacyDir: join(app.getPath('appData'), 'NodeSeek Monitor'),
+    targetDir: app.getPath('userData')
+  })
+}
 
 function describeError(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -89,6 +104,7 @@ if (!gotSingleInstanceLock) {
   })
 
   void app.whenReady().then(() => {
+    migrateLegacyUserData() // D1：更名首启迁移，先于一切 userData 读取
     const broadcaster = createBroadcaster()
     const runtime = initRuntime(broadcaster)
     runtimeRef = runtime

@@ -6,6 +6,11 @@
  * → 尝试推送（单个失败不中断本轮；真实失败不入集下轮重试，ADR 8.10）→
  * 轮末 flush/prune/持久化 totalHits。
  *
+ * v2 适配（D2/D3，最小改动版）：去重键 = `nodeseek:{topic.id}`（SOURCE_ID 常量，
+ * 与 seen.json v1 迁移共用前缀）；引擎状态按 source 拆分（getFor/setFor）；
+ * HitRecord 补 matchedBy='literal' / semanticReason=null（语义管线 W2 接入）。
+ * 多来源循环（getSources 访问器、per-source 退避、EngineStatus.sources）留给 W2。
+ *
  * 状态模型（ADR 7）：desired（用户意图，唯一可写）× health（内核观测，自动流转）正交。
  * pause 只改 desired 并 stop 排程器，health 不动；getStatus 返回实时快照。
  *
@@ -26,8 +31,8 @@
  */
 import { matchTopic } from './matcher'
 import { computeBackoffMs, type PollScheduler } from './poller'
-import type { FileSeenStore } from './dedup'
-import type { FileEngineState, EngineState } from './state'
+import { NODESEEK_SEEN_KEY_PREFIX, type FileSeenStore } from './dedup'
+import { NODESEEK_SOURCE_ID, type FileEngineState, type SourceEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
 import type { Logger } from '../logger'
 import {
@@ -41,6 +46,16 @@ import {
 
 /** 命中记录内存环形容量（getRecentHits 给 UI 的上限） */
 export const HIT_RING_CAPACITY = 200
+
+/**
+ * v2 阶段唯一来源的固定 id（W2 多来源引擎时泛化为 per-source：
+ * `EngineDeps.getSources()` 的 adapter.id / config.sources 驱动，D3）。
+ * seen 键与 state 键都以它为前缀/键名。
+ */
+const SOURCE_ID = NODESEEK_SOURCE_ID
+
+/** 全局去重键 = `${sourceId}:${topic.id}`（D2/D3；前缀常量与 seen v1 迁移共用防漂移） */
+const seenKeyFor = (topicId: string): string => NODESEEK_SEEN_KEY_PREFIX + topicId
 
 export interface EngineDeps {
   /** 数据源（HtmlSourceAdapter 或未来 RSS/API 备选实现） */
@@ -85,8 +100,8 @@ export class MonitorEngine {
   constructor(deps: EngineDeps) {
     this.deps = deps
     this.now = deps.now ?? (() => Date.now())
-    // totalHits 跨进程累计：从持久化 state 恢复（未 load 过则 get 内部会 load）
-    this.status = { ...INITIAL_ENGINE_STATUS, totalHits: deps.state.get().totalHits }
+    // totalHits 跨进程累计：从持久化 state 恢复（未 load 过则 getFor 内部会 load）
+    this.status = { ...INITIAL_ENGINE_STATUS, totalHits: deps.state.getFor(SOURCE_ID).totalHits }
     this.rebaselineIfNeeded()
   }
 
@@ -97,9 +112,9 @@ export class MonitorEngine {
    */
   private rebaselineIfNeeded(): void {
     if (!this.deps.seen.rebuiltFromCorrupt) return
-    if (!this.deps.state.get().baselineDone) return // 本来就要做基线，无需处理
+    if (!this.deps.state.getFor(SOURCE_ID).baselineDone) return // 本来就要做基线，无需处理
     try {
-      this.deps.state.set({ baselineDone: false })
+      this.deps.state.setFor(SOURCE_ID, { baselineDone: false })
       this.deps.logger.warn('seen store rebuilt, re-baselining')
     } catch (err) {
       this.deps.logger.error(
@@ -178,8 +193,8 @@ export class MonitorEngine {
       const topics = await this.deps.source.fetchLatest()
 
       // 首启基线（ADR 8.5）：整页只入去重集不推送，防通知风暴
-      if (!this.deps.state.get().baselineDone) {
-        for (const t of topics) this.deps.seen.add(t.id)
+      if (!this.deps.state.getFor(SOURCE_ID).baselineDone) {
+        for (const t of topics) this.deps.seen.add(seenKeyFor(t.id))
         await this.flushSeenOrFail()
         this.persistState({ baselineDone: true })
         this.deps.logger.info(`baseline captured (${topics.length} topics)`)
@@ -187,12 +202,12 @@ export class MonitorEngine {
         return
       }
 
-      const unseen = topics.filter((t) => !this.deps.seen.has(t.id))
+      const unseen = topics.filter((t) => !this.deps.seen.has(seenKeyFor(t.id)))
       // 页面最新在前 → 逆序处理，推送顺序旧→新
       for (const topic of [...unseen].reverse()) {
         if (topic.pinned) {
           // 置顶是旧帖：入去重集但绝不推送
-          this.deps.seen.add(topic.id)
+          this.deps.seen.add(seenKeyFor(topic.id))
           continue
         }
         const { matched, matchedKeywords } = matchTopic(
@@ -201,7 +216,7 @@ export class MonitorEngine {
           cfg.excludeKeywords
         )
         if (!matched) {
-          this.deps.seen.add(topic.id)
+          this.deps.seen.add(seenKeyFor(topic.id))
           continue
         }
         await this.processHit(topic, matchedKeywords, cfg)
@@ -258,7 +273,16 @@ export class MonitorEngine {
       const prevError = this.pendingNotifyErrors.get(topic.id)
       if (prevError === notifyError) return
       this.pendingNotifyErrors.set(topic.id, notifyError)
-      const hit: HitRecord = { topic, matchedKeywords, notifiedAt: null, notifyError }
+      // v2 阶段匹配只走字面管线（matchedBy='literal'，semanticReason=null）；
+      // 语义评估管线（D4）在 W2 接入
+      const hit: HitRecord = {
+        topic,
+        matchedKeywords,
+        matchedBy: 'literal',
+        semanticReason: null,
+        notifiedAt: null,
+        notifyError
+      }
       this.recordHit(hit)
       this.deps.logger.error(
         `notify failed for topic ${topic.id} "${topic.title}": ${notifyError} (will retry next poll)`
@@ -270,8 +294,15 @@ export class MonitorEngine {
     // 成功或静音：入去重集；曾在失败重试中的清除标记（上面已 emit 过失败态，
     // 这里 emit 最终态），静音态两字段均 null（HitRecord 语义不变）
     this.pendingNotifyErrors.delete(topic.id)
-    this.deps.seen.add(topic.id)
-    const hit: HitRecord = { topic, matchedKeywords, notifiedAt, notifyError: null }
+    this.deps.seen.add(seenKeyFor(topic.id))
+    const hit: HitRecord = {
+      topic,
+      matchedKeywords,
+      matchedBy: 'literal',
+      semanticReason: null,
+      notifiedAt,
+      notifyError: null
+    }
     this.recordHit(hit)
     if (notifiedAt !== null) {
       this.deps.logger.info(
@@ -321,9 +352,9 @@ export class MonitorEngine {
   }
 
   /** 持久化引擎状态；落盘失败只记日志不改变本轮健康判定（下一轮再试） */
-  private persistState(patch: Partial<EngineState>): void {
+  private persistState(patch: Partial<SourceEngineState>): void {
     try {
-      this.deps.state.set(patch)
+      this.deps.state.setFor(SOURCE_ID, patch)
     } catch (err) {
       this.deps.logger.error(
         `persist engine state failed: ${err instanceof Error ? err.message : String(err)}`

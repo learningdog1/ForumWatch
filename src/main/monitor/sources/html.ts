@@ -62,6 +62,8 @@ export function parseHomepage(html: string, baseUrl: string = DEFAULT_BASE_URL):
 
     topics.push({
       id,
+      // adapter 不感知来源归属：engine 处理时按来源盖章（D2/D3）
+      sourceId: '',
       title: titleLink.text().trim(),
       url: `${baseUrl}/post-${id}-1`,
       author: item.find(SELECTORS.author).first().text().trim(),

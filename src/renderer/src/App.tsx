@@ -47,7 +47,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-icon">📡</span>
-          <span>NodeSeek Monitor</span>
+          <span>ForumWatch · 论坛监控</span>
         </div>
         <nav className="nav">
           <button

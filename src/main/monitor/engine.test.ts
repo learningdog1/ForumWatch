@@ -32,6 +32,7 @@ afterEach(async () => {
 function topic(id: string, overrides: Partial<Topic> = {}): Topic {
   return {
     id,
+    sourceId: '', // adapter 不盖章；engine v2 阶段不感知 sourceId（W2 盖章）
     title: `title-${id}`,
     url: `https://example.com/post-${id}-1`,
     author: 'alice',
@@ -139,14 +140,14 @@ describe('首启基线（防通知风暴）', () => {
 
     expect(h.sendHit).not.toHaveBeenCalled()
     expect(h.onHit).not.toHaveBeenCalled()
-    expect(h.seen.has('1')).toBe(true)
-    expect(h.seen.has('2')).toBe(true)
-    expect(h.seen.has('3')).toBe(true)
+    expect(h.seen.has('nodeseek:1')).toBe(true)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
+    expect(h.seen.has('nodeseek:3')).toBe(true)
     // 去重集已落盘（新实例可见）
     const seen2 = new FileSeenStore(join(dir, 'seen.json'))
     seen2.load()
     expect(seen2.size()).toBe(3)
-    expect(h.state.get().baselineDone).toBe(true)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
 
     const st = h.engine.getStatus()
     expect(st.health).toBe('ok')
@@ -166,20 +167,20 @@ describe('首启基线（防通知风暴）', () => {
     })
     await h.engine.pollOnce()
     expect(h.engine.getStatus().health).toBe('backoff')
-    expect(h.state.get().baselineDone).toBe(false)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(false)
 
     h.fetchLatest.mockImplementation(async () => [topic('1', { title: '羊毛大促' })])
     await h.engine.pollOnce()
     expect(h.sendHit).not.toHaveBeenCalled() // 补做基线，不是推送
-    expect(h.seen.has('1')).toBe(true)
-    expect(h.state.get().baselineDone).toBe(true)
+    expect(h.seen.has('nodeseek:1')).toBe(true)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
   })
 
   it('seen 损坏重建 + baselineDone=true → 强制补基线（ADR 8.9）：首轮无 sendHit、全部入集', async () => {
     // 第一个引擎完成基线：state.baselineDone=true，seen 已落盘
     const h = build({ impl: async () => [topic('1')] })
     await h.engine.pollOnce()
-    expect(h.state.get().baselineDone).toBe(true)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
 
     // seen.json 损坏 → FileSeenStore 重建（rebuiltFromCorrupt=true）
     await writeFile(join(dir, 'seen.json'), '{ corrupt !!!', 'utf-8')
@@ -197,7 +198,7 @@ describe('首启基线（防通知风暴）', () => {
       scheduler: h.scheduler,
       logger: h.logger
     })
-    expect(h.state.get().baselineDone).toBe(false)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(false)
     expect(
       h.logger.getRecent().some((e) => e.level === 'warn' && e.msg.includes('seen store rebuilt'))
     ).toBe(true)
@@ -207,19 +208,19 @@ describe('首启基线（防通知风暴）', () => {
     await engine2.pollOnce()
     expect(h.sendHit).not.toHaveBeenCalled()
     expect(h.onHit).not.toHaveBeenCalled()
-    expect(seen2.has('1')).toBe(true)
-    expect(seen2.has('2')).toBe(true)
-    expect(h.state.get().baselineDone).toBe(true)
+    expect(seen2.has('nodeseek:1')).toBe(true)
+    expect(seen2.has('nodeseek:2')).toBe(true)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
   })
 
   it('seen 损坏重建但 baselineDone=false：无需重置，行为不变（首启基线照做）', async () => {
     await writeFile(join(dir, 'seen.json'), '{ corrupt !!!', 'utf-8')
     const h = build({ impl: async () => [topic('1', { title: '羊毛' })] })
     expect(h.seen.rebuiltFromCorrupt).toBe(true)
-    expect(h.state.get().baselineDone).toBe(false)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(false)
     await h.engine.pollOnce() // 基线
     expect(h.sendHit).not.toHaveBeenCalled()
-    expect(h.seen.has('1')).toBe(true)
+    expect(h.seen.has('nodeseek:1')).toBe(true)
   })
 })
 
@@ -243,8 +244,8 @@ describe('正常轮', () => {
     expect(h.sendHit.mock.calls[0][1]).toEqual(['羊毛'])
 
     // 置顶与被排除的都只入去重集
-    expect(h.seen.has('4')).toBe(true)
-    expect(h.seen.has('3')).toBe(true)
+    expect(h.seen.has('nodeseek:4')).toBe(true)
+    expect(h.seen.has('nodeseek:3')).toBe(true)
 
     const st = h.engine.getStatus()
     expect(st.totalHits).toBe(1)
@@ -254,6 +255,9 @@ describe('正常轮', () => {
     expect(hits).toHaveLength(1)
     expect(hits[0].topic.id).toBe('5')
     expect(hits[0].matchedKeywords).toEqual(['羊毛'])
+    // v2：当前只有字面管线；语义评估（D4）W2 接入后此处按模式断言
+    expect(hits[0].matchedBy).toBe('literal')
+    expect(hits[0].semanticReason).toBeNull()
     expect(hits[0].notifiedAt).not.toBeNull() // 推送成功态
     expect(hits[0].notifyError).toBeNull()
     expect(h.onHit).toHaveBeenCalledTimes(1)
@@ -298,9 +302,9 @@ describe('正常轮', () => {
     expect(h.engine.getStatus().health).toBe('ok') // 推送失败 ≠ 轮询失败
     expect(h.engine.getStatus().totalHits).toBe(3)
     // ADR 8.10：真实失败的 2 不入去重集（下轮重试）；成功的 3/4 入集
-    expect(h.seen.has('2')).toBe(false)
-    expect(h.seen.has('3')).toBe(true)
-    expect(h.seen.has('4')).toBe(true)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    expect(h.seen.has('nodeseek:3')).toBe(true)
+    expect(h.seen.has('nodeseek:4')).toBe(true)
   })
 
   it('notifyEnabled=false：命中不推送，notifiedAt/notifyError 均为 null（静音态）', async () => {
@@ -316,7 +320,7 @@ describe('正常轮', () => {
     expect(hits[0].notifyError).toBeNull()
     expect(h.engine.getStatus().totalHits).toBe(1)
     // 静音是用户主动行为：照常入集，不进入重试
-    expect(h.seen.has('2')).toBe(true)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
   })
 
   it('telegram 未配置：同静音态，不调用 sendHit', async () => {
@@ -366,7 +370,7 @@ describe('推送失败重试（ADR 8.10）', () => {
     // 第 1 轮：真实推送失败 → 不入集，emit 失败态一次
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.seen.has('2')).toBe(false)
+    expect(h.seen.has('nodeseek:2')).toBe(false)
     expect(h.onHit).toHaveBeenCalledTimes(1)
     let hits = h.engine.getRecentHits()
     expect(hits).toHaveLength(1)
@@ -376,7 +380,7 @@ describe('推送失败重试（ADR 8.10）', () => {
     // 第 2 轮：同帖仍在首页 → 重试成功 → 入集，emit 最终态一次
     await h.engine.pollOnce()
     expect(h.sendHit).toHaveBeenCalledTimes(2)
-    expect(h.seen.has('2')).toBe(true)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
     expect(h.onHit).toHaveBeenCalledTimes(2) // 失败一次 + 成功一次
     hits = h.engine.getRecentHits()
     expect(hits).toHaveLength(2)
@@ -400,7 +404,7 @@ describe('推送失败重试（ADR 8.10）', () => {
     await h.engine.pollOnce() // 同失败态：不再 emit
     expect(h.onHit).toHaveBeenCalledTimes(1)
     expect(h.sendHit).toHaveBeenCalledTimes(3) // 但每轮都真重试了
-    expect(h.seen.has('2')).toBe(false) // 始终不入集
+    expect(h.seen.has('nodeseek:2')).toBe(false) // 始终不入集
 
     // 失败原因变化（不同失败态）：再 emit 一次
     h.sendHit.mockRejectedValue(new TelegramError('different failure'))
@@ -419,7 +423,7 @@ describe('推送失败重试（ADR 8.10）', () => {
     h.config.notifyEnabled = false
     await h.engine.pollOnce() // 静音最终态：emit 1 次并入集
     expect(h.sendHit).toHaveBeenCalledTimes(1) // 静音轮不调用 sendHit
-    expect(h.seen.has('2')).toBe(true)
+    expect(h.seen.has('nodeseek:2')).toBe(true)
     expect(h.onHit).toHaveBeenCalledTimes(2)
     const last = h.onHit.mock.calls[h.onHit.mock.calls.length - 1]![0] as {
       notifiedAt: string | null
@@ -479,8 +483,8 @@ describe('失败与健康流转', () => {
     h.fetchLatest.mockRejectedValueOnce(new Error('boom'))
     await h.engine.pollOnce()
     expect(h.seen.size()).toBe(2)
-    expect(h.state.get().baselineDone).toBe(true)
-    expect(h.state.get().totalHits).toBe(0)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
+    expect(h.state.getFor('nodeseek').totalHits).toBe(0)
   })
 
   it('getConfig 抛错也走失败收尾：health=backoff、lastError 记录、按上次间隔退避', async () => {
@@ -532,7 +536,7 @@ describe('失败与健康流转', () => {
         .getRecent()
         .some((e) => e.level === 'warn' && e.msg.includes('seen flush failed'))
     ).toBe(true)
-    expect(h.state.get().baselineDone).toBe(true)
+    expect(h.state.getFor('nodeseek').baselineDone).toBe(true)
   })
 })
 
@@ -597,7 +601,7 @@ describe('生命周期与 desired 状态', () => {
     h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
     await h.engine.pollOnce()
     expect(h.engine.getStatus().totalHits).toBe(1)
-    expect(h.state.get().totalHits).toBe(1)
+    expect(h.state.getFor('nodeseek').totalHits).toBe(1)
 
     const state2 = new FileEngineState(join(dir, 'state.json'))
     state2.load()

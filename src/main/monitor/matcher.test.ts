@@ -5,6 +5,7 @@ import { matchTopic } from './matcher'
 function topic(title: string): Topic {
   return {
     id: '1',
+    sourceId: '',
     title,
     url: 'https://www.nodeseek.com/post-1-1',
     author: 'someone',

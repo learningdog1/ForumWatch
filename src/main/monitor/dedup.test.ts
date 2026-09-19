@@ -78,21 +78,21 @@ describe('SeenStore（纯内存）', () => {
     expect(s.size()).toBe(1)
   })
 
-  it('serialize/deserialize 往返保持条目与顺序', () => {
+  it('serialize/deserialize 往返保持条目与顺序（盘上恒为 v2）', () => {
     const s = new SeenStore(10)
     const t = 1_700_000_000_000
-    s.add('x', t)
-    s.add('y', t + 1)
+    s.add('nodeseek:x', t)
+    s.add('nodeseek:y', t + 1)
     const raw = s.serialize()
-    expect(raw.schemaVersion).toBe(1)
+    expect(raw.schemaVersion).toBe(2)
     expect(raw.seen).toEqual([
-      { id: 'x', addedAt: t },
-      { id: 'y', addedAt: t + 1 }
+      { id: 'nodeseek:x', addedAt: t },
+      { id: 'nodeseek:y', addedAt: t + 1 }
     ])
     const revived = SeenStore.deserialize(JSON.parse(JSON.stringify(raw)), 10)
     expect(revived.size()).toBe(2)
-    expect(revived.has('x')).toBe(true)
-    expect(revived.has('y')).toBe(true)
+    expect(revived.has('nodeseek:x')).toBe(true)
+    expect(revived.has('nodeseek:y')).toBe(true)
     expect(revived.serialize()).toEqual(raw)
   })
 
@@ -104,9 +104,11 @@ describe('SeenStore（纯内存）', () => {
       'nope',
       [],
       {},
-      { schemaVersion: 2, seen: [] },
+      { schemaVersion: 3, seen: [] }, // 未知版本（v2 起合法版本是 1|2）
       { schemaVersion: '1', seen: [] },
       { seen: [] },
+      { schemaVersion: 2, seen: 'not-array' },
+      { schemaVersion: 2, seen: null },
       { schemaVersion: 1, seen: 'not-array' },
       { schemaVersion: 1, seen: null }
     ]
@@ -114,6 +116,22 @@ describe('SeenStore（纯内存）', () => {
       const s = SeenStore.deserialize(g)
       expect(s.size()).toBe(0)
     }
+  })
+
+  it('deserialize v1（裸 id）：每条前缀化为 nodeseek:{id}', () => {
+    const raw = {
+      schemaVersion: 1,
+      seen: [
+        { id: '936634', addedAt: 123 },
+        { id: '936635', addedAt: 456 }
+      ]
+    }
+    const s = SeenStore.deserialize(raw)
+    expect(s.size()).toBe(2)
+    expect(s.has('nodeseek:936634')).toBe(true)
+    expect(s.has('nodeseek:936635')).toBe(true)
+    expect(s.has('936634')).toBe(false) // 裸 id 不再命中
+    expect(s.serialize().schemaVersion).toBe(2) // 再落盘即 v2
   })
 
   it('deserialize 跳过单条坏条目，只收合法条目', () => {
@@ -131,41 +149,76 @@ describe('SeenStore（纯内存）', () => {
     }
     const s = SeenStore.deserialize(raw)
     expect(s.size()).toBe(1)
-    expect(s.has('ok')).toBe(true)
+    expect(s.has('nodeseek:ok')).toBe(true)
   })
 
-  it('deserialize 超出 capacity 时只保留最新的部分', () => {
+  it('deserialize 超出 capacity 时只保留最新的部分（v1 前缀化不改变淘汰语义）', () => {
     const seen = Array.from({ length: 10 }, (_, i) => ({ id: `i${i}`, addedAt: i }))
     const s = SeenStore.deserialize({ schemaVersion: 1, seen }, 3)
     expect(s.size()).toBe(3)
-    expect(s.has('i0')).toBe(false)
-    expect(s.has('i1')).toBe(false)
-    expect(s.has('i7')).toBe(true)
-    expect(s.has('i8')).toBe(true)
-    expect(s.has('i9')).toBe(true)
+    expect(s.has('nodeseek:i0')).toBe(false)
+    expect(s.has('nodeseek:i1')).toBe(false)
+    expect(s.has('nodeseek:i7')).toBe(true)
+    expect(s.has('nodeseek:i8')).toBe(true)
+    expect(s.has('nodeseek:i9')).toBe(true)
   })
 })
 
 describe('FileSeenStore（文件 backed）', () => {
-  it('load→add→flush→重新 new+load 能读到', async () => {
+  it('load→add→flush→重新 new+load 能读到（盘上 schemaVersion 2）', async () => {
     const s1 = new FileSeenStore(storePath)
     s1.load()
-    expect(s1.has('936634')).toBe(false)
-    s1.add('936634')
-    s1.add('936635')
+    expect(s1.has('nodeseek:936634')).toBe(false)
+    s1.add('nodeseek:936634')
+    s1.add('nodeseek:936635')
     await s1.flush()
 
     const s2 = new FileSeenStore(storePath)
     s2.load()
-    expect(s2.has('936634')).toBe(true)
-    expect(s2.has('936635')).toBe(true)
-    expect(s2.has('999999')).toBe(false)
+    expect(s2.has('nodeseek:936634')).toBe(true)
+    expect(s2.has('nodeseek:936635')).toBe(true)
+    expect(s2.has('nodeseek:999999')).toBe(false)
     expect(s2.size()).toBe(2)
 
-    // 盘上文件带 schemaVersion
+    // 盘上文件带 schemaVersion（v2）
     const onDisk = JSON.parse(await readFile(storePath, 'utf-8'))
-    expect(onDisk.schemaVersion).toBe(1)
+    expect(onDisk.schemaVersion).toBe(2)
     expect(onDisk.seen).toHaveLength(2)
+  })
+
+  it('v1 文件（裸 id）：load 前缀化成功、不置 rebuiltFromCorrupt；flush 落 v2', async () => {
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        seen: [
+          { id: '123', addedAt: 1_700_000_000_000 },
+          { id: '456', addedAt: 1_700_000_000_001 }
+        ]
+      }),
+      'utf-8'
+    )
+    const s = new FileSeenStore(storePath)
+    expect(() => s.load()).not.toThrow()
+    // 裸 id 视为 nodeseek:{id}
+    expect(s.has('nodeseek:123')).toBe(true)
+    expect(s.has('nodeseek:456')).toBe(true)
+    expect(s.has('123')).toBe(false)
+    expect(s.has('456')).toBe(false)
+    expect(s.size()).toBe(2)
+    // v1 是成功加载，不是损坏重建（不触发补基线）
+    expect(s.rebuiltFromCorrupt).toBe(false)
+    // 无 .corrupt- 备份产生
+    expect((await readdir(dir)).some((f) => f.includes('.corrupt-'))).toBe(false)
+
+    // 下次 flush 自然落 v2（id 已带前缀）
+    await s.flush()
+    const onDisk = JSON.parse(await readFile(storePath, 'utf-8'))
+    expect(onDisk.schemaVersion).toBe(2)
+    expect(onDisk.seen).toEqual([
+      { id: 'nodeseek:123', addedAt: 1_700_000_000_000 },
+      { id: 'nodeseek:456', addedAt: 1_700_000_000_001 }
+    ])
   })
 
   it('文件缺失 = 空集，load 不抛不建文件', () => {
@@ -266,12 +319,12 @@ describe('FileSeenStore（文件 backed）', () => {
     )
     const s = new FileSeenStore(storePath)
     s.load()
-    expect(s.has('stale')).toBe(true)
+    expect(s.has('nodeseek:stale')).toBe(true)
     s.prune(now)
-    expect(s.has('stale')).toBe(false)
-    expect(s.has('recent')).toBe(true)
+    expect(s.has('nodeseek:stale')).toBe(false)
+    expect(s.has('nodeseek:recent')).toBe(true)
     await s.flush()
     const onDisk = JSON.parse(await readFile(storePath, 'utf-8'))
-    expect(onDisk.seen).toEqual([{ id: 'recent', addedAt: now - 60_000 }])
+    expect(onDisk.seen).toEqual([{ id: 'nodeseek:recent', addedAt: now - 60_000 }])
   })
 })

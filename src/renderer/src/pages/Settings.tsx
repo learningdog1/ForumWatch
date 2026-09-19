@@ -100,6 +100,9 @@ export function Settings(props: { onDirtyChange: (dirty: boolean) => void }) {
     setSaving(true)
     try {
       const cfg: AppConfig = {
+        // sources / ai 本页暂不可编辑（AI 设置 UI 属后续轮次）：透传已保存值，
+        // 只覆盖本表单管理的字段
+        ...saved,
         includeKeywords: draft.includeKeywords,
         excludeKeywords: draft.excludeKeywords,
         pollIntervalSec: intervalValid ? Math.floor(intervalNum) : 15,

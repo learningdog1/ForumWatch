@@ -78,8 +78,8 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 
 桌面版所有数据在 Electron userData 目录下（托盘菜单「在 Finder 中打开配置目录」直达）：
 
-- macOS 默认：`~/Library/Application Support/NodeSeek Monitor/`
-- Windows 默认：`%APPDATA%\NodeSeek Monitor\`
+- macOS 默认：`~/Library/Application Support/ForumWatch/`
+- Windows 默认：`%APPDATA%\ForumWatch\`
 
 | 文件 | 作用 | 说明 |
 | --- | --- | --- |

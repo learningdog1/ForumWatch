@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- macOS 托盘 Template 图形（32 自然尺寸，渲染为 trayTemplate@2x.png）。
+       仅图形无底板，纯黑 + alpha。外环 + 半透明扫描扇形 + 扫描针 + 信号点。 -->
+  <circle cx="16" cy="16.5" r="13" fill="none" stroke="#000000" stroke-width="2.8"/>
+  <path d="M16 16.5 L20.45 4.28 A13 13 0 0 1 27.88 11.21 Z" fill="#000000" fill-opacity="0.4"/>
+  <path d="M16 16.5 L27.88 11.21" fill="none" stroke="#000000" stroke-width="2.8" stroke-linecap="round"/>
+  <circle cx="16" cy="16.5" r="1.8" fill="#000000"/>
+  <circle cx="21.05" cy="9.31" r="2.6" fill="#000000"/>
+</svg>
