@@ -33,7 +33,9 @@ jobs:
         run: npm run build
 
       - name: Package dmg (unsigned)
-        run: npx electron-builder --mac dmg --arm64 --x64
+        # --publish never：tag 构建时 electron-builder 会隐式发布（要 GH_TOKEN，v27 起移除）；
+        # 产物统一由下方 release job 用 softprops 挂到 Release，这里只打包。
+        run: npx electron-builder --mac dmg --arm64 --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -67,7 +69,7 @@ jobs:
         run: npm run build
 
       - name: Package nsis installer (unsigned)
-        run: npx electron-builder --win nsis --x64
+        run: npx electron-builder --win nsis --x64 --publish never
 
       - name: Upload nsis artifact
         uses: actions/upload-artifact@v4
