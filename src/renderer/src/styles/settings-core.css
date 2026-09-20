@@ -1,0 +1,306 @@
+/* ── 设置页骨架（Zone A 子导航 pill 列 + Zone B 六组滚动 + Zone C 吸底保存栏）──
+   R12 版式（简报 §R12.2-5）：子导航「去卡片化」——透明面上的 pill 列表，与主侧栏
+   nav 同语言（wash 底 + 600 字，不用左竖条——竖条专属数据行 .row-selected）；
+   列宽 152→200；内容列限宽 680→760；页面限宽居中随 --content-max。
+   裁决 3：dirty 指示两模式统一琥珀 --warn 族，禁红。
+   页自身不滚（覆盖 .page 的 overflow/padding）：滚动下放给 Zone B 唯一容器；
+   relative 为整页错误覆盖层（.settings-error）的定位锚。 */
+.page-settings {
+  position: relative;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: var(--space-2xl);
+  overflow: hidden;
+  padding: var(--space-2xl) max(var(--space-2xl), calc((100% - var(--content-max)) / 2)) 0;
+  max-width: none;
+  width: 100%;
+}
+
+/* Zone A · 子导航：200px 锚点栏（非路由，保住 draft 单源），sticky 全高、栏内自滚。
+   R12 透明面 pill：不再用 raised 卡片（去一层盒子=多一分大气） */
+.settings-nav {
+  align-self: start;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.snav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  min-height: 44px;
+  padding: 0 var(--space-lg);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-14);
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.snav-item:hover:not(:disabled) {
+  background: var(--card-alt);
+  color: var(--fg);
+}
+.snav-item:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text-3) 14%, transparent);
+}
+/* 选中态 = pill wash（与侧栏 nav / radios-card 同一族，无竖条；wash 底上 fg 实算 14.47） */
+.snav-item.active {
+  background: var(--primary-wash);
+  color: var(--color-foreground);
+  font-weight: 600;
+}
+.snav-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* 组级 dirty 圆点（12 段 → 组映射驱动）：裁决 3——未保存=中间态 → 琥珀 --warn 档，
+   两模式统一禁红；与侧栏 .dirty-dot 同语义同档 */
+.snav-dot {
+  margin-left: auto;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+/* Zone B · 唯一滚动容器：组间距 32px 在 .settings-col；底部 88px 让位吸底保存栏；
+   左右内距由 .page-settings 的居中算式统一给出 */
+.settings-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-lg) 88px 0;
+}
+.settings-col {
+  max-width: 760px; /* R12 大气档：表单列 680→760 */
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xl);
+}
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  scroll-margin-top: var(--space-xl);
+}
+
+/* 卡片锚点槽：id 承载子导航/深链跳转；radius 仅为高亮环随卡圆角 */
+.set-slot {
+  scroll-margin-top: var(--space-xl);
+  border-radius: var(--r-card);
+}
+@keyframes set-flash {
+  0% {
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.set-slot.flash {
+  animation: set-flash 800ms var(--ease-out) 1;
+}
+
+/* 设置页字段文字档（四级节奏：组头 16/600 · 卡题 14/600 · 标签 13/500 · hint 12） */
+.page-settings .field-label {
+  color: var(--text-2);
+}
+.page-settings .input:not(.mono) {
+  font-size: var(--fs-14);
+}
+
+/* 零配置语义警示条（包含词为空常显）：warn-chip 底 + 左 3px warn 条 */
+.warn-strip {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: flex-start;
+  margin: var(--space-lg) var(--space-2xl) 0;
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  border-left: 3px solid var(--warn);
+  color: var(--warn-text);
+  font-size: var(--fs-12);
+  line-height: var(--lh-base);
+}
+
+/* 首载轻量骨架（>300ms 才出现）。加载谱系注记：骨架仅用于结构已知的整页表单
+   占位（设置页）；本地 IPC 毫秒级返回的列表页不做骨架，避免闪跳。
+   card-alt 底 + shimmer 一次性扫过（不循环；reduced-motion 由全局规则转
+   0.01ms 直渲终态）。.skel 为通用别名供后续复用 */
+.settings-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+@keyframes skel-sweep {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -60% 0;
+  }
+}
+.set-skel,
+.skel {
+  height: 120px;
+  border-radius: var(--r-card);
+  background: linear-gradient(
+    100deg,
+    var(--card-alt) 32%,
+    color-mix(in srgb, var(--text-3) 12%, var(--card-alt)) 50%,
+    var(--card-alt) 68%
+  );
+  background-size: 200% 100%;
+  animation: skel-sweep 900ms var(--ease-out) 1;
+}
+
+/* 整页错误态（audit #6，getConfig 失败不再永久 loading）：覆盖层
+   z-index 98——盖 savebar(95)、不盖 leavebar(100)，REDESIGN §1.3 核销值 */
+.settings-error {
+  position: absolute;
+  inset: 0;
+  z-index: 98;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2xl);
+  background: var(--bg);
+  overflow: auto;
+}
+.settings-error-card {
+  flex: none;
+  max-width: 560px;
+}
+.settings-error-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  padding: var(--space-2xl);
+  font-size: var(--fs-13);
+  color: var(--text-2);
+  line-height: var(--lh-read);
+}
+.settings-error-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ── 离开设置页的行内提示条 ────────────────────────────────────── */
+
+.leavebar {
+  /* 层叠纪律（REDESIGN §1.3）：leavebar 100 > 错误覆盖层 98 > savebar 95 */
+  position: relative;
+  z-index: 100;
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin: var(--space-lg) var(--space-2xl) 0;
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip); /* 裁决 3：dirty 提示条琥珀（非红） */
+  border-left: 3px solid var(--warn);
+  color: var(--warn-text);
+  font-size: var(--fs-13);
+}
+.leavebar .btn {
+  min-height: 28px; /* sm 档 */
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+
+/* ── 保存栏（Zone C 吸底，三态互斥）───────────────────────────────
+   「托盘上漂浮的控件条」：raised 底 + shadow-xl + edge-top；圆角随令牌放大 */
+
+.savebar {
+  position: sticky;
+  bottom: 0;
+  /* 层叠纪律（REDESIGN §1.3）：错误覆盖层(98) 盖本栏，leavebar(100) 盖两者 */
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  /* 负边距吃掉 .settings-scroll 的右 padding，撑满滚动容器内宽 */
+  margin: var(--space-lg) calc(-1 * var(--space-lg)) 0 0;
+  padding: var(--space-lg) var(--space-2xl);
+  border: 1px solid var(--color-border);
+  border-bottom: 0;
+  border-radius: var(--r-card) var(--r-card) 0 0;
+  background: var(--raised);
+  box-shadow: var(--shadow-xl), var(--edge-top);
+}
+
+/* 状态区三态：dirty（互斥优先） / ok（已保存·时刻） / err（保存失败可重试）。
+   裁决 3：dirty 两模式统一 --warn-text 琥珀 + 600，禁红 */
+.sb-status {
+  font-size: var(--fs-13);
+  color: var(--text-2);
+}
+.sb-status.dirty {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+.sb-status.ok {
+  color: var(--ok-text);
+}
+.sb-status.err {
+  color: var(--err-text);
+}
+.sb-status.pending {
+  color: var(--text-3);
+}
+
+/* 放弃修改 · 行内确认（L2 立即不可逆：首击后原地变形，非弹窗） */
+.sb-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  font-size: var(--fs-13);
+  color: var(--warn-text); /* 放弃=中间态警示，琥珀系（非 danger 红文字） */
+  animation: fade-in var(--t-glide) var(--ease-out);
+}
+.sb-confirm .sb-esc {
+  font-size: var(--fs-12);
+}
+
+/* danger 确认态（实底）：底 --danger-solid-bg（两模式 #DC2626）；
+   文字 --on-danger（#FFFFFF 4.83:1 实测）；hover --hover-danger-bg。
+   与 primary 蓝明确区分，两按钮永不邻位同强（继承）。 */
+.btn-danger-solid {
+  background: var(--danger-solid-bg);
+  border-color: transparent;
+  color: var(--on-danger);
+  font-weight: 600;
+}
+.btn-danger-solid:hover:not(:disabled) {
+  background: var(--hover-danger-bg);
+  border-color: transparent;
+  color: var(--on-danger);
+}
+.btn-danger-solid:active:not(:disabled) {
+  transform: translateY(0.5px);
+  box-shadow: none;
+}

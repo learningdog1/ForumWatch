@@ -8,8 +8,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import {
-  DAILY_AI_CALL_LIMIT,
-  DAILY_COMMENTARY_LIMIT,
   MonitorEngine,
   PAGE2_TRIGGER_EFFECTIVE_NEW,
   SIMILARITY_WINDOW_MS
@@ -1129,47 +1127,6 @@ describe('语义评估管线（D4）', () => {
     expect(h.engine.getStatus().ai.lastAiError).toBeNull()
   })
 
-  it('每日配额 300：达限后降级 literal-only（不再调 evaluate），未决帖按字面语义入 seen，log 一次', async () => {
-    const evaluate = vi.fn(
-      async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
-    ) // 全部未决 → 每轮重评
-    const h = build({
-      impl: async () => [topic('0')],
-      config: { ai: aiConfig({ matchMode: 'semantic' }) },
-      evaluator: { evaluate }
-    })
-    await h.engine.pollOnce() // 基线
-    // 13 条新帖 = 2 批/轮；未决不入 seen → 每轮固定 2 次调用
-    const fresh = Array.from({ length: 13 }, (_, i) => topic(String(20 - i)))
-    h.fetchLatest.mockImplementation(async () => [...fresh, topic('0')])
-    await h.engine.pollOnce() // callsToday = 2
-    // 再跑 148 轮 → 2 + 148*2 = 298
-    for (let r = 0; r < 148; r++) await h.engine.pollOnce()
-    expect(h.engine.getStatus().ai.callsToday).toBe(298)
-    expect(h.seen.size()).toBe(1) // 13 帖全部未决，仍在集外
-
-    // 第 150 轮：页面新增 25 条（共 38 未决 = 4 批）；批 1/2 调用后 callsToday=300，
-    // 批 3 触发达限 break + log（剩余 14 帖保持未决）
-    const more = Array.from({ length: 25 }, (_, i) => topic(String(50 - i)))
-    h.fetchLatest.mockImplementation(async () => [...more, ...fresh, topic('0')])
-    await h.engine.pollOnce()
-    expect(evaluate).toHaveBeenCalledTimes(300)
-    expect(h.engine.getStatus().ai.callsToday).toBe(300)
-    expect(h.engine.getStatus().ai.degraded).toBe('quota-exhausted')
-    expect(h.seen.size()).toBe(1)
-
-    // 下一轮：配额耗尽 → 降级 literal-only，evaluate 不再被调，未命中帖全部入 seen
-    await h.engine.pollOnce()
-    expect(evaluate).toHaveBeenCalledTimes(300)
-    const st = h.engine.getStatus()
-    expect(st.ai).toMatchObject({ degraded: 'quota-exhausted', effectiveMode: 'literal', callsToday: 300 })
-    expect(h.seen.size()).toBe(39) // 38 新帖 + 基线帖
-    const quotaLogs = h.logger
-      .getRecent()
-      .filter((e) => e.msg.includes('AI daily call limit reached'))
-    expect(quotaLogs).toHaveLength(1)
-  })
-
   it('unconfigured：mode=semantic 但 provider 未配 → effectiveMode=literal、degraded=unconfigured、不算失败', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) => new Map<string, SemanticVerdict>()
@@ -1970,7 +1927,7 @@ describe('AI 锐评集成（第三轮）', () => {
 
   /**
    * 直接操纵引擎内部 AI 计数器（fake 时钟冻结在同一天，不触发翻转清零；
-   * 与 retryMapSize 同款"测试专用观测面"先例——跑 300 次语义调用来耗尽配额不划算）。
+   * 与 retryMapSize 同款"测试专用观测面"先例——计数是纯观测面，直接写值省事）。
    */
   function setAiCounters(
     engine: MonitorEngine,
@@ -2084,27 +2041,8 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(h.engine.getStatus().ai.commentaryToday).toBe(0)
   })
 
-  it('总配额耗尽（callsToday=300）：不调 generate（锐评静默降级），推送照常', async () => {
-    const gen = commentMock()
-    const h = build({
-      impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
-      commentaryGenerator: gen
-    })
-    await h.engine.pollOnce() // 基线（计数器已按今日登记）
-    setAiCounters(h.engine, DAILY_AI_CALL_LIMIT, 0)
-    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛大促' }), topic('1')])
-    await h.engine.pollOnce()
-
-    expect(gen.generate).not.toHaveBeenCalled()
-    expect(h.sendHit).toHaveBeenCalledTimes(1)
-    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull()
-    expect(h.engine.getRecentHits()[0].commentary).toBeNull()
-    expect(h.engine.getStatus().ai.callsToday).toBe(DAILY_AI_CALL_LIMIT) // 不再增长
-  })
-
-  it('子限额耗尽（commentaryToday=100）：不调 generate；总桶有余量时语义评估照常可用', async () => {
-    const gen = commentMock()
+  it('无独立子限额（commentaryToday 已 100+）：总桶有余量时锐评照常生成并双计数', async () => {
+    const gen = commentMock('犀利点评')
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
         new Map<string, SemanticVerdict>([['nodeseek:2', { hit: false, score: 1, reason: null }]])
@@ -2118,8 +2056,9 @@ describe('AI 锐评集成（第三轮）', () => {
       commentaryGenerator: gen
     })
     await h.engine.pollOnce() // 基线
-    setAiCounters(h.engine, 100, DAILY_COMMENTARY_LIMIT)
-    // 3 = literal 命中（推送、锐评降级）；2 = 非字面帖进语义批（miss 入集）
+    // commentaryToday 已超旧子限额 100：只看总桶（100+100=200 < 300 仍有余量）
+    setAiCounters(h.engine, 100, 150)
+    // 3 = literal 命中（推送、锐评生成）；2 = 非字面帖进语义批（miss 入集）
     h.fetchLatest.mockImplementation(async () => [
       topic('3', { title: '羊毛大促' }),
       topic('2', { title: '闲聊杂谈' }),
@@ -2127,18 +2066,17 @@ describe('AI 锐评集成（第三轮）', () => {
     ])
     await h.engine.pollOnce()
 
-    // 子限额只约束锐评：语义评估照常调（总桶 100/300 未耗尽）——两用途无需调序
+    // 锐评与语义评估共享 300 总桶（先到先得）：两用途都照常调用
     expect(evaluate).toHaveBeenCalledTimes(1)
     expect(h.seen.has('nodeseek:2')).toBe(true)
-    // 锐评被静默降级：不打 LLM、无锐评推送，但命中本身照常推
-    expect(gen.generate).not.toHaveBeenCalled()
+    expect(gen.generate).toHaveBeenCalledTimes(1)
     expect(h.sendHit).toHaveBeenCalledTimes(1)
     expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('3')
-    expect(h.sendHit.mock.calls[0]![0].commentary).toBeNull()
-    expect(h.engine.getRecentHits()[0].commentary).toBeNull()
+    expect(h.sendHit.mock.calls[0]![0].commentary).toBe('犀利点评')
+    expect(h.engine.getRecentHits()[0].commentary).toBe('犀利点评')
     expect(h.engine.getStatus().ai).toMatchObject({
-      callsToday: 101, // 语义评估 +1；锐评不再计数
-      commentaryToday: DAILY_COMMENTARY_LIMIT
+      callsToday: 102, // 锐评 +1、语义评估 +1
+      commentaryToday: 151
     })
   })
 
@@ -2300,13 +2238,6 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(chat).toHaveBeenCalledTimes(2)
     expect(h.sendHit).toHaveBeenCalledTimes(2)
     expect(h.sendHit.mock.calls[1]![0].commentary).toBe('原句锐评')
-  })
-
-  it('F4：ai.commentaryLimit 随状态下发（锐评上限单一事实源，渲染层不硬编码）', async () => {
-    const h = build({ impl: async () => [topic('1')] })
-    await h.engine.pollOnce()
-    expect(h.engine.getStatus().ai.commentaryLimit).toBe(DAILY_COMMENTARY_LIMIT)
-    expect(h.engine.getStatus().ai.commentaryLimit).toBe(100)
   })
 
   it('deps 未注入 commentaryGenerator：行为与升级前一致（恒 null、sendHit 第三参 null、零计数）', async () => {
@@ -3671,7 +3602,12 @@ describe('处置流水插桩（R7-W1：dispositions record/prune 的分支出口
     await h.engine.pollOnce()
     expect(recorded(h)).toEqual([
       { key: 'nodeseek:2', outcome: 'pushed', detail: undefined },
-      { key: 'nodeseek:3', outcome: 'similar-swallowed', detail: '与 48h 内已推送的帖子相似' }
+      {
+        key: 'nodeseek:3',
+        outcome: 'similar-swallowed',
+        // 命中明细：与它自己（同标题已推）相似，score 1.00
+        detail: '与 48h 内已推送的「yearly 88 vps deal today」相似（1.00 ≥ 阈值 0.72）'
+      }
     ])
   })
 

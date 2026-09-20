@@ -1,9 +1,12 @@
 /**
- * 「推送通道」卡片（R6-W4，取代旧「Telegram 推送」卡）：
- * - 通道列表：类型徽标 + id + 就绪状态点（enabled × 凭据齐备）+ 启停开关 +
- *   删除（至少保留一条：列表删空 sanitize 会回默认 telegram 项，UI 直接禁删）+
+ * 「推送通道」卡片（R6-W4，取代旧「Telegram 推送」卡；阶段 5b 改为 L2 实体行）：
+ * - 通道列表（EntityList 外壳）：就绪状态点（enabled × 凭据齐备）+ 类型徽标 +
+ *   id + 按类型摘要 + 启停开关 + 删除（至少保留一条：列表删空 sanitize 会回
+ *   默认 telegram 项，UI 直接禁删；下限按剔除待删除行后的生效列表算）+
  *   「编辑」展开按类型的凭据表单（telegram: botToken/chatId；bark: deviceKey +
  *   可选 serverUrl；ntfy: topic + 可选 serverUrl；webhook: url + 可选 secret）。
+ * - L1 删除不弹确认（settings.md §3.5）：已保存过的行转「待删除」态（删除线 +
+ *   琥珀徽标 + 撤销删除）；未保存过的新行直接从 draft 移除。
  * - 添加通道：类型下拉 → 按类型渲染对应字段；id 由类型派生、冲突加 -2/-3 后缀
  *   （与主进程 sanitizeChannels 同口径，保存后 id 不会被二次改写）。
  * - 「发送测试消息」按钮宿主在本卡（按钮行为 = 广播全部就绪通道，经
@@ -17,12 +20,27 @@
  */
 import { useState, type ReactNode } from 'react'
 import type { ChannelConfig, ChannelType } from '@shared/types'
+import { EntityList, useEscCollapse, type PendingDeleteSlot } from './EntityList'
 import { Field } from './Field'
-import { IconDot, IconEye, IconEyeOff, IconSend, IconX } from './icons'
+import { IconCheck, IconDot, IconEye, IconEyeOff, IconSend, IconX } from './icons'
 
 /** 类型徽标文案（判别联合的 type 判别值收窄入口） */
 function typeBadge(ch: ChannelConfig): string {
   return ch.type === 'telegram' ? 'Telegram' : ch.type === 'bark' ? 'Bark' : ch.type === 'ntfy' ? 'ntfy' : 'Webhook'
+}
+
+/** 列表行摘要：按类型给最有辨识度的一眼信息（凭据脱敏——token/key 只露前段） */
+function channelSummary(ch: ChannelConfig): string {
+  switch (ch.type) {
+    case 'telegram':
+      return `chat ${ch.chatId.trim() !== '' ? ch.chatId : '—'}`
+    case 'bark':
+      return ch.deviceKey.trim() !== '' ? `key ${ch.deviceKey.slice(0, 8)}…` : '未配置 deviceKey'
+    case 'ntfy':
+      return `topic ${ch.topic.trim() !== '' ? ch.topic : '—'}`
+    case 'webhook':
+      return ch.url.trim() !== '' ? ch.url : '未配置 URL'
+  }
 }
 
 /** 各类型凭据是否齐备（main 侧 channelCredentialsComplete 的复刻；enabled 不在此判断） */
@@ -83,17 +101,20 @@ export interface ChannelTestSlot {
   onSend: () => void
 }
 
-export function ChannelsCard(props: {
-  channels: ChannelConfig[]
-  onChange: (channels: ChannelConfig[]) => void
-  test: ChannelTestSlot
-}) {
-  const { channels, onChange, test } = props
+export function ChannelsCard(
+  props: {
+    channels: ChannelConfig[]
+    onChange: (channels: ChannelConfig[]) => void
+    test: ChannelTestSlot
+  } & PendingDeleteSlot
+) {
+  const { channels, onChange, test, pendingDelete, onMarkDelete, onUndoDelete } = props
   const [addType, setAddType] = useState<ChannelType>('telegram')
   const [form, setForm] = useState<AddFormState>(EMPTY_ADD_FORM)
   const [addError, setAddError] = useState<string | null>(null)
   /** 当前展开编辑的通道 id（一次一个） */
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  useEscCollapse(expandedId != null, () => setExpandedId(null))
   /** Bot Token / Secret 的明文切换（编辑与添加共用） */
   const [showSecret, setShowSecret] = useState(false)
 
@@ -111,12 +132,14 @@ export function ChannelsCard(props: {
     patchChannel(id, { enabled: !ch.enabled })
   }
 
-  /** 至少保留一条通道（删空 sanitize 会回默认 telegram 项） */
-  const canRemove = channels.length > 1
+  /** 生效列表（剔除待删除行）：至少保留一条的下限与 aux 计数按保存后口径算 */
+  const liveChannels = channels.filter((ch) => !pendingDelete.has(ch.id))
+  const canRemove = liveChannels.length > 1
 
-  function remove(id: string): void {
-    onChange(channels.filter((ch) => ch.id !== id))
-    if (expandedId === id) setExpandedId(null)
+  function removeTitle(id: string): string {
+    return canRemove
+      ? `标记删除「${id}」（保存后生效；放弃修改可还原）`
+      : '至少保留一条通道：删空会被重置回默认 Telegram'
   }
 
   function addChannel(): void {
@@ -159,15 +182,18 @@ export function ChannelsCard(props: {
   /** 按类型渲染一组凭据输入（编辑与添加共用；ch=null 表示添加表单） */
   function renderFields(ch: ChannelConfig | null): ReactNode {
     const type = ch?.type ?? addType
+    // 控件 id 前缀（Field htmlFor 关联用）：编辑行走通道 id，添加表单走 add 前缀
+    const pid = ch === null ? 'ch-add' : `ch-${ch.id}`
     if (type === 'telegram') {
       const tg = ch?.type === 'telegram' ? ch : null
       const tokenVal = tg ? tg.botToken : form.botToken
       const chatVal = tg ? tg.chatId : form.chatId
       return (
         <>
-          <Field label="Bot Token" hint="来自 @BotFather，形如 123456:ABC-DEF...">
+          <Field label="Bot Token" htmlFor={`${pid}-bot-token`} hint="来自 @BotFather，形如 123456:ABC-DEF...">
             <div className="pw-wrap">
               <input
+                id={`${pid}-bot-token`}
                 className="input mono"
                 type={showSecret ? 'text' : 'password'}
                 spellCheck={false}
@@ -190,8 +216,9 @@ export function ChannelsCard(props: {
               </button>
             </div>
           </Field>
-          <Field label="Chat ID" hint="个人或群组 id，来自 @userinfobot 或类似机器人。">
+          <Field label="Chat ID" htmlFor={`${pid}-chat-id`} hint="个人或群组 id，来自 @userinfobot 或类似机器人。">
             <input
+              id={`${pid}-chat-id`}
               className="input mono"
               type="text"
               spellCheck={false}
@@ -211,8 +238,9 @@ export function ChannelsCard(props: {
       const bark = ch?.type === 'bark' ? ch : null
       return (
         <>
-          <Field label="Device Key" hint="Bark App「首页→复制」里的 key；官方网关或自建服务器均可。">
+          <Field label="Device Key" htmlFor={`${pid}-device-key`} hint="Bark App「首页→复制」里的 key；官方网关或自建服务器均可。">
             <input
+              id={`${pid}-device-key`}
               className="input mono"
               type="text"
               spellCheck={false}
@@ -225,8 +253,9 @@ export function ChannelsCard(props: {
               }
             />
           </Field>
-          <Field label="服务器（可选）" hint="自建 Bark 服务器地址；留空 = 官方 https://api.day.app。">
+          <Field label="服务器（可选）" htmlFor={`${pid}-server-url`} hint="自建 Bark 服务器地址；留空 = 官方 https://api.day.app。">
             <input
+              id={`${pid}-server-url`}
               className="input mono"
               type="text"
               spellCheck={false}
@@ -247,8 +276,9 @@ export function ChannelsCard(props: {
       const ntfy = ch?.type === 'ntfy' ? ch : null
       return (
         <>
-          <Field label="Topic" hint="ntfy 的订阅主题名（自建服务器上需已创建/可发布）。">
+          <Field label="Topic" htmlFor={`${pid}-topic`} hint="ntfy 的订阅主题名（自建服务器上需已创建/可发布）。">
             <input
+              id={`${pid}-topic`}
               className="input mono"
               type="text"
               spellCheck={false}
@@ -261,8 +291,9 @@ export function ChannelsCard(props: {
               }
             />
           </Field>
-          <Field label="服务器（可选）" hint="自建 ntfy 地址；留空 = 官方 https://ntfy.sh。">
+          <Field label="服务器（可选）" htmlFor={`${pid}-server-url`} hint="自建 ntfy 地址；留空 = 官方 https://ntfy.sh。">
             <input
+              id={`${pid}-server-url`}
               className="input mono"
               type="text"
               spellCheck={false}
@@ -284,9 +315,11 @@ export function ChannelsCard(props: {
       <>
         <Field
           label="接收地址"
+          htmlFor={`${pid}-url`}
           hint="命中打包成结构化 JSON POST 到该地址（鉴权头 X-ForumWatch-Secret）；供自建自动化/归档消费。"
         >
           <input
+            id={`${pid}-url`}
             className="input mono"
             type="text"
             spellCheck={false}
@@ -300,8 +333,9 @@ export function ChannelsCard(props: {
             }
           />
         </Field>
-        <Field label="Secret（可选）" hint="非空时随请求发送 X-ForumWatch-Secret 头供消费端校验。">
+        <Field label="Secret（可选）" htmlFor={`${pid}-secret`} hint="非空时随请求发送 X-ForumWatch-Secret 头供消费端校验。">
           <input
+            id={`${pid}-secret`}
             className="input mono"
             type={showSecret ? 'text' : 'password'}
             spellCheck={false}
@@ -318,14 +352,19 @@ export function ChannelsCard(props: {
     )
   }
 
-  const readyCount = channels.filter(isChannelReadyUi).length
+  const readyCount = liveChannels.filter(isChannelReadyUi).length
 
   return (
-    <section className="card">
+    <section className="card snot">
       <div className="card-head">
         <span className="card-title">推送通道</span>
-        <span className="card-title-aux">{readyCount}/{channels.length} 就绪</span>
+        <span className="card-title-aux num">{readyCount}/{liveChannels.length} 就绪</span>
       </div>
+      {readyCount === 0 && (
+        <div className="warn-strip">
+          还没有就绪通道：凭据齐备且启用的通道才会推送。展开行内编辑填好凭据。
+        </div>
+      )}
       <Field
         label="已配置通道"
         hint={
@@ -337,11 +376,16 @@ export function ChannelsCard(props: {
           </span>
         }
       >
-        <div className="card-scroll">
-          {channels.map((ch) => {
+        <div className="ch-list">
+        <EntityList
+          items={channels}
+          rowKey={(ch) => ch.id}
+          rowClass={(ch) => (pendingDelete.has(ch.id) ? ' del' : '')}
+          render={(ch) => {
+            const del = pendingDelete.has(ch.id)
             const ready = isChannelReadyUi(ch)
             const credsOk = credentialsCompleteUi(ch)
-            const open = expandedId === ch.id
+            const open = expandedId === ch.id && !del
             // tone-* 复用现有 CSS 语气类（ok / backoff=已停用 / challenged=凭据缺失）
             const dotTone = ready ? 'ok' : credsOk ? 'backoff' : 'challenged'
             const dotTitle = ready
@@ -349,69 +393,81 @@ export function ChannelsCard(props: {
               : credsOk
                 ? '凭据齐备但已停用（不参与推送）'
                 : '凭据未配齐（填好并保存后才参与推送）'
+            const summary = channelSummary(ch)
             return (
-              <div key={ch.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                <div className="hit" style={{ borderBottom: open ? 0 : undefined }}>
-                  <span className={`src-dot tone-${dotTone}`} title={dotTitle}>
+              <>
+                <div className={`ent-main tone-${dotTone}`}>
+                  <span className="src-dot" title={dotTitle}>
                     <IconDot size={8} />
                   </span>
                   <span className="src-badge" title={`类型：${typeBadge(ch)}`}>
                     {typeBadge(ch)}
                   </span>
-                  <span className="ai-reason mono" title={`通道 id：${ch.id}（命中明细 notifyDetail 的键）`}>
+                  <span className="ent-name" title={`通道 id：${ch.id}（命中明细 notifyDetail 的键）`}>
                     {ch.id}
                   </span>
-                  <span className="src-last switch-row">
-                    <button
-                      type="button"
-                      className={`btn${open ? ' active' : ''}`}
-                      aria-expanded={open}
-                      onClick={() => setExpandedId(open ? null : ch.id)}
-                    >
-                      编辑
-                    </button>
-                    <button
-                      type="button"
-                      role="switch"
-                      className="switch"
-                      aria-checked={ch.enabled}
-                      aria-label={`${ch.enabled ? '停用' : '启用'}通道 ${ch.id}`}
-                      title={ch.enabled ? '点击停用该通道' : '点击启用该通道'}
-                      onClick={() => toggle(ch.id)}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-danger"
-                      disabled={!canRemove}
-                      title={canRemove ? `删除通道「${ch.id}」（保存后生效）` : '至少保留一条通道：删空会被重置回默认 Telegram'}
-                      aria-label={`删除通道 ${ch.id}`}
-                      onClick={() => remove(ch.id)}
-                    >
-                      <IconX size={14} />
-                      删除
-                    </button>
+                  <span className="ent-sum" title={summary}>
+                    {summary}
+                  </span>
+                  <span className="ch-state">{ready ? '就绪' : credsOk ? '已停用' : '未配齐'}</span>
+                  {del && <span className="badge-del">待删除</span>}
+                  <span className="ent-ops">
+                    {!del ? (
+                      <>
+                        <button
+                          type="button"
+                          className={`ent-btn${open ? ' active' : ''}`}
+                          aria-expanded={open}
+                          title={open ? '收起凭据编辑' : '展开凭据编辑'}
+                          onClick={() => setExpandedId(open ? null : ch.id)}
+                        >
+                          {open ? '收起' : '编辑'}
+                        </button>
+                        <button
+                          type="button"
+                          role="switch"
+                          className="switch"
+                          aria-checked={ch.enabled}
+                          aria-label={`${ch.enabled ? '停用' : '启用'}通道 ${ch.id}`}
+                          title={ch.enabled ? '点击停用该通道' : '点击启用该通道'}
+                          onClick={() => toggle(ch.id)}
+                        />
+                        <button
+                          type="button"
+                          className="ent-btn danger"
+                          disabled={!canRemove}
+                          title={removeTitle(ch.id)}
+                          aria-label={`删除通道 ${ch.id}`}
+                          onClick={() => onMarkDelete(ch.id)}
+                        >
+                          <IconX size={14} />
+                          删除
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ent-btn"
+                        title={`撤销删除「${ch.id}」`}
+                        onClick={() => onUndoDelete(ch.id)}
+                      >
+                        撤销删除
+                      </button>
+                    )}
                   </span>
                 </div>
-                {open && (
-                  <div
-                    style={{
-                      padding: 'var(--space-2) var(--space-3) var(--space-3)',
-                      background: 'var(--card-alt)'
-                    }}
-                  >
-                    {renderFields(ch)}
-                  </div>
-                )}
-              </div>
+                {open && <div className="ent-expand">{renderFields(ch)}</div>}
+              </>
             )
-          })}
+          }}
+        />
         </div>
       </Field>
-      <Field label="添加通道" hint="选择类型后填写对应凭据；id 由类型自动生成，保存后生效。">
+      <Field label="添加通道" htmlFor="ch-add-type" hint="选择类型后填写对应凭据；id 由类型自动生成，保存后生效。">
         <div className="input-row">
           <select
-            className="input"
-            style={{ width: 'auto' }}
+            id="ch-add-type"
+            className="input input-auto"
             value={addType}
             aria-label="通道类型"
             onChange={(e) => {
@@ -425,8 +481,8 @@ export function ChannelsCard(props: {
             <option value="webhook">Webhook（JSON）</option>
           </select>
         </div>
-        <div style={{ marginTop: 'var(--space-2)' }}>{renderFields(null)}</div>
-        <div className="input-row" style={{ marginTop: 'var(--space-2)' }}>
+        <div className="mt-md">{renderFields(null)}</div>
+        <div className="input-row mt-md">
           <button
             type="button"
             className="btn"
@@ -443,11 +499,24 @@ export function ChannelsCard(props: {
         hint="按已保存的配置向**全部就绪通道**各发一条测试消息（不走路由规则；日报同样广播全部通道）。"
       >
         <div className="input-row">
-          <button type="button" className="btn" disabled={test.testing} onClick={test.onSend}>
-            <IconSend size={14} />
-            {test.testing ? '发送中…' : '发送测试消息'}
+          <button
+            type="button"
+            className={`btn${test.testing ? ' busy' : ''}`}
+            disabled={test.testing}
+            onClick={test.onSend}
+          >
+            {test.testing ? null : <IconSend size={14} />}
+            发送测试消息
           </button>
-          {test.msg != null && <span className={`feedback ${test.msg.kind}`}>{test.msg.text}</span>}
+        </div>
+        {/* 反馈位常驻（.op-feedback）：消息出现/消失不推动布局 */}
+        <div className="op-feedback">
+          {test.msg != null && (
+            <span className={`feedback ${test.msg.kind}`}>
+              {test.msg.kind === 'ok' && <IconCheck size={12} />}
+              {test.msg.text}
+            </span>
+          )}
         </div>
       </Field>
     </section>

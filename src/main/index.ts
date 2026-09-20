@@ -4,15 +4,15 @@
  * 职责（ADR 2：内核零 electron 依赖，本文件只做生命周期胶水）：
  * - 单实例锁（ADR 8.4）：抢不到锁直接退出；second-instance 唤起主窗口。
  * - mac 隐藏 Dock 图标（ADR 8.3，托盘常驻形态）。
- * - whenReady 装配顺序：userData 迁移（D1）→ broadcaster → runtime → IPC handler →
- *   主窗口 → 托盘 → 电源钩子 → runtime.startup()（launch 即开始监控）。
+ * - whenReady 装配顺序：钉死浅色（R12）→ userData 迁移（D1）→ broadcaster → runtime →
+ *   IPC handler → 主窗口 → 托盘 → 电源钩子 → runtime.startup()（launch 即开始监控）。
  * - window-all-closed 不退出（托盘常驻，win 也是；退出走托盘菜单 / Cmd+Q）。
  * - 退出路径统一：before-quit 置 quitting 标志 + 异步 runtime.shutdown()，
  *   完成后再次 app.quit() 放行——shutdown 恰发生在 before-quit 与 will-quit 之间。
  * - 进程级兜底：uncaughtException / unhandledRejection 只记日志，
  *   不让内核异常弹原生崩溃框。
  */
-import { app } from 'electron'
+import { app, nativeTheme } from 'electron'
 import { join } from 'node:path'
 import { createBroadcaster, registerIpcHandlers } from './desktop/ipc'
 import { migrateUserDataFiles } from './desktop/migrate'
@@ -53,6 +53,10 @@ process.on('unhandledRejection', (reason) => {
   const sink = loggerRef ?? console
   sink.error(`unhandledRejection: ${describeError(reason)}`)
 })
+
+// R12.7：关掉 Chromium 自动反色（auto-dark/force-dark）。固定浅色交付后,若内核仍把
+// 浅色页面按系统暗色反相渲染,会出现「钉了浅色仍是黑」的症状；显式禁用该 blink 特性。
+app.commandLine.appendSwitch('disable-blink-features', 'WebContentsForceDark')
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 
@@ -104,6 +108,10 @@ if (!gotSingleInstanceLock) {
   })
 
   void app.whenReady().then(() => {
+    // R12.7：界面固定浅色（「霁蓝平台」以浅色为唯一交付面）。CSS 层已把暗档
+    // 覆盖块停用为主防线；此处同时钉住原生面（菜单/通知等走 AppKit 外观）。
+    // 解除钉死：themeSource 改回 'system' 且恢复渲染层三处 @media 原样。
+    nativeTheme.themeSource = 'light'
     migrateLegacyUserData() // D1：更名首启迁移，先于一切 userData 读取
     const broadcaster = createBroadcaster()
     const runtime = initRuntime(broadcaster)

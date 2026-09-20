@@ -17,8 +17,9 @@
  * - configured = provider 三项齐备（每轮从 cfg.ai.provider 读，热更新）；
  * - unconfigured（mode 含语义但 provider 未配）→ effectiveMode='literal'，
  *   不算失败；语义帖按字面档处理（未命中入 seen）。
- * - callsToday 本地自然日滚动（formatLocalDate 判日）；达 DAILY_AI_CALL_LIMIT(300)
- *   → degraded='quota-exhausted'，当日后续轮降级 literal-only，log 一次。
+ * - callsToday 本地自然日滚动（formatLocalDate 判日）；**纯观测计数，不设每日
+ *   上限**（调用频率自然受轮询间隔与每批 cap 12 约束，超量风险由 API 侧
+ *   计费/限流兜底）。
  * - evaluate 抛错（含 AiProviderError）→ 该批全部未决（不入 seen）、记
  *   lastAiError、**不动 consecutiveFailures**（AI 故障 ≠ 抓取故障，D4）。
  * - interests 为空 → 引擎侧直接跳过 AI 批（不调 evaluator、不计 callsToday，
@@ -27,11 +28,11 @@
  * - verdict 缓存（D4 坑⑥，F2）：语义命中但推送失败的帖 reason 存内存 Map
  *   （semanticVerdicts），下轮**不重进 AI 批**、按已判 hit 直接重试推送；
  *   推送成功/转静音后清除；帖子滚出首页即随轮末清理回收（F5）。
- * - 锐评（第三轮）：processHit 内 sendHit 之前按四条件生成（开关开 / provider
- *   已配置 / 总配额未耗尽 / 子限额 100 未耗尽），任一不满足 → commentary=null
- *   不打 LLM；真调 generate 即双计数（callsToday 与 commentaryToday 各 +1，
- *   成败都计——generate 内部消化异常）。子限额 100 保证语义评估在总桶里至少
- *   剩 200 容量，两用途无需调序（literal 命中先于语义批烧配额是有意的先到先得）。
+ * - 锐评（第三轮）：processHit 内 sendHit 之前按三条件生成（开关开 / provider
+ *   已配置），任一不满足 → commentary=null 不打 LLM；真调
+ *   generate 即双计数（callsToday 与 commentaryToday 各 +1，成败都计——
+ *   generate 内部消化异常）。锐评与语义评估共享 300 总桶、无独立子限额
+ *   （先到先得；commentaryToday 仅作观测计数）。
  *   推送失败重试轮 generate 会被再次调用，但 CommentGenerator 内部缓存（含
  *   失败负缓存）保证不再打 LLM；轮末与 pruneRetryMaps 同调用点、同一
  *   roundTopicKeys 键集与 observedSources 守卫调 prune 清理其缓存（F1）。
@@ -124,7 +125,7 @@
 import { applySourceFilters } from './filters'
 import { isExcluded, matchTopic } from './matcher'
 import { evaluateRules } from './rules'
-import { isSimilarToAny, normalizeTitle } from './similarity'
+import { findSimilarTo, normalizeTitle, type SimilarityMatch } from './similarity'
 import type { DispositionOutcome } from './dispositions'
 import { computeBackoffMs, type PollScheduler } from './poller'
 import type { FileSeenStore } from './dedup'
@@ -156,9 +157,6 @@ import {
 /** 命中记录内存环形容量（getRecentHits 给 UI 的上限） */
 export const HIT_RING_CAPACITY = 200
 
-/** AI 每日调用上限（D4：常量 300，v2 不进配置） */
-export const DAILY_AI_CALL_LIMIT = 300
-
 /**
  * 相似降噪"近期已推"窗口时长（R5-P2a，DEC-4）：48h，引擎侧常量不进配置。
  * 生命周期：推送成功入窗（推送失败/静音不入）；每轮轮末按时间 prune。
@@ -177,13 +175,6 @@ const SIMILARITY_REBUILD_DAYS = 3
  * 40 ≈ NodeSeek 单页 49 条去掉置顶后的全量新页，即"整页都是新帖"的信号。
  */
 export const PAGE2_TRIGGER_EFFECTIVE_NEW = 40
-
-/**
- * 锐评每日调用子限额（第三轮：常量 100，v2 不进配置）。与 300 总桶共用
- * callsToday 计数；超限当日静默降级（无锐评推送，不打 LLM）——100 上限保证
- * 语义评估在总桶里至少保留 200 容量，两用途无需调序。
- */
-export const DAILY_COMMENTARY_LIMIT = 100
 
 /**
  * 挂起推送的最长滞留（R6-W1q / DEC-11）：24h。超时条目按
@@ -425,7 +416,7 @@ export class MonitorEngine {
   /**
    * 已过置信度闸（R5-P2b：score >= semanticThreshold）且已判 hit、但推送失败
    * 中的语义帖缓存（D4 坑⑥，F2）：seen 键 -> AI 判定理由。
-   * 下轮该帖仍在首页时不重进 AI 批（不耗配额、不冒改变判定风险，也**不再过
+   * 下轮该帖仍在首页时不重进 AI 批（不多打调用、不冒改变判定风险，也**不再过
    * 阈值**——过闸是既成事实），直接按已判 hit 走 processHit 重试；推送成功/
    * 转静音清除；帖子滚出首页随轮末清理回收（pruneRetryMaps，F5）。与
    * pendingNotifyErrors 是两套机制：后者是全部命中共用的「失败原因去重 emit」
@@ -482,15 +473,13 @@ export class MonitorEngine {
   private aiCallsToday = 0
   /**
    * 今日锐评调用数（第三轮；与 aiCallsToday 同日键 aiCallsDay 一起翻转清零）。
-   * 上限 DAILY_COMMENTARY_LIMIT(100)，超限当日静默降级；每次真调 generate 时
-   * 与 aiCallsToday 同时 +1（共用总桶）。
+   * 纯观测计数：与 aiCallsToday 共用 300 总桶、无独立子限额（先到先得）；
+   * 每次真调 generate 时与 aiCallsToday 同时 +1。
    */
   private commentaryToday = 0
   private aiCallsDay = ''
   /** 最近一次评估错误消息（provider 已脱敏）；评估成功后清空 */
   private aiLastError: string | null = null
-  /** 当日配额耗尽是否已 log 过（防每轮刷屏；本地日翻转清零） */
-  private aiQuotaLogged = false
   private status: EngineStatus
 
   constructor(deps: EngineDeps) {
@@ -651,7 +640,7 @@ export class MonitorEngine {
 
   /**
    * 每轮从配置刷新 AI 派生态：configured = provider 三项（baseUrl/apiKey/model，
-   * trim 后）均非空；mode = cfg.ai.matchMode。配额日翻转也在此检查。
+   * trim 后）均非空；mode = cfg.ai.matchMode。计数日翻转也在此检查。
    */
   private updateAiConfig(cfg: AppConfig): void {
     const p = cfg.ai.provider
@@ -668,7 +657,6 @@ export class MonitorEngine {
       this.aiCallsDay = today
       this.aiCallsToday = 0
       this.commentaryToday = 0
-      this.aiQuotaLogged = false
     }
   }
 
@@ -676,8 +664,7 @@ export class MonitorEngine {
    * 派生 AiRuntimeStatus（getStatus / pollSource 共用同一口径）：
    * - 未配置 provider → degraded='unconfigured'，effectiveMode='literal'（不管
    *   cfg mode 是什么——语义档整体降级，不算失败）；
-   * - mode 含语义且当日配额耗尽 → degraded='quota-exhausted'，effectiveMode='literal'；
-   * - 其余 → effectiveMode=cfg mode，degraded='none'。
+   * - 其余 → effectiveMode=cfg mode，degraded='none'。无每日配额语义（不设上限）。
    * interests 为空不算 unconfigured（evaluator 会全量判 miss，不调 API）。
    */
   private deriveAiStatus(): AiRuntimeStatus {
@@ -685,16 +672,10 @@ export class MonitorEngine {
       configured: this.aiConfigured,
       callsToday: this.aiCallsToday,
       commentaryToday: this.commentaryToday,
-      dailyLimit: DAILY_AI_CALL_LIMIT,
-      // 锐评子上限随状态下发（F4）：渲染层单一事实源，不硬编码 100
-      commentaryLimit: DAILY_COMMENTARY_LIMIT,
       lastAiError: this.aiLastError
     }
     if (!this.aiConfigured) {
       return { ...base, effectiveMode: 'literal', degraded: 'unconfigured' }
-    }
-    if (this.aiMode !== 'literal' && this.aiCallsToday >= DAILY_AI_CALL_LIMIT) {
-      return { ...base, effectiveMode: 'literal', degraded: 'quota-exhausted' }
     }
     return { ...base, effectiveMode: this.aiMode, degraded: 'none' }
   }
@@ -902,7 +883,7 @@ export class MonitorEngine {
           continue
         }
       }
-      // literal 档（第 7 步；mode 含 literal 时生效；语义档未配置/配额耗尽也降到这里）
+      // literal 档（第 7 步；mode 含 literal 时生效；语义档未配置也降到这里）
       if (literalActive) {
         const { matched, matchedKeywords } = matchTopic(
           topic,
@@ -993,8 +974,7 @@ export class MonitorEngine {
    * - 无 verdict（未决）→ 不入 seen，下轮重评（帖子滚出首页即止，对齐 8.10）。
    * evaluate 整体抛错 → 该批全部未决 + 记 lastAiError + log warn，
    * **不动 consecutiveFailures**（AI 故障 ≠ 抓取故障）。每次真实调用计入
-   * callsToday（含失败的调用），达 DAILY_AI_CALL_LIMIT 后本轮剩余批放弃
-   * （未决），后续轮降级 literal-only。
+   * callsToday（含失败的调用；纯观测计数，无每日上限）。
    */
   private async evaluateSemantic(
     sourceId: string,
@@ -1014,21 +994,6 @@ export class MonitorEngine {
     for (let i = 0; i < topics.length; i += MAX_SEMANTIC_BATCH) {
       const batch = topics.slice(i, i + MAX_SEMANTIC_BATCH)
       this.rollAiDay()
-      if (this.aiCallsToday >= DAILY_AI_CALL_LIMIT) {
-        if (!this.aiQuotaLogged) {
-          this.aiQuotaLogged = true
-          this.deps.logger.warn(
-            `AI daily call limit reached (${DAILY_AI_CALL_LIMIT}), ` +
-              'semantic matching degraded to literal-only for the rest of the day'
-          )
-        }
-        // 剩余批（含当前批，未 evaluate）保持未决：下一轮按降级后的 literal-only
-        // 语义处理（R7-W1：这些帖子的处置是"语义未决"，下轮迁移为终态）
-        for (const topic of topics.slice(i)) {
-          this.noteDisposition(topic, 'semantic-pending', '当日 AI 配额耗尽，下轮降级处理')
-        }
-        break
-      }
       this.aiCallsToday++
       try {
         const verdicts = await evaluator.evaluate(batch, cfg.ai.interests)
@@ -1436,7 +1401,7 @@ export class MonitorEngine {
    * router 的 when.ruleId 路由用——两字段同源同生，label ≠ id 时路由只认 id）。
    * commentary：sendHit 之前生成（无论推送是否会被静音——HitRecord/内存环仍要
    * 展示）；恒 string|null，不留 undefined、不写空串（见 maybeGenerateCommentary）。
-   * 相似降噪闸在锐评生成**之前**（吞并的帖子不打 LLM、不耗配额）。
+   * 相似降噪闸在锐评生成**之前**（吞并的帖子不打 LLM、不白耗调用）。
    */
   private async processHit(
     topic: Topic,
@@ -1453,16 +1418,26 @@ export class MonitorEngine {
     // 调用深度（start() 的同步首轮语义，既有契约），基线轮也没有推送可等。
     await this.similarityWindowReady
     // 相似降噪（第 8 步）：与近窗内已推送帖相似 → 入 seen 不推送
-    if (cfg.similarity.enabled && this.isSimilarToRecentlyPushed(topic.title, cfg)) {
-      const swallowedKey = seenKeyFor(topic.sourceId, topic.id)
-      this.deps.seen.add(swallowedKey)
-      // 重试在途的键一并收口（相似帖已被更早的推送覆盖，重试无意义）
-      this.pendingNotifyErrors.delete(swallowedKey)
-      this.semanticVerdicts.delete(swallowedKey)
-      this.similarSwallowedCount++
-      this.deps.logger.info(`similar topic swallowed: ${topic.title}`)
-      this.noteDisposition(topic, 'similar-swallowed', '与 48h 内已推送的帖子相似')
-      return
+    if (cfg.similarity.enabled) {
+      const similar = this.findSimilarRecentlyPushed(topic.title, cfg)
+      if (similar !== null) {
+        const swallowedKey = seenKeyFor(topic.sourceId, topic.id)
+        this.deps.seen.add(swallowedKey)
+        // 重试在途的键一并收口（相似帖已被更早的推送覆盖，重试无意义）
+        this.pendingNotifyErrors.delete(swallowedKey)
+        this.semanticVerdicts.delete(swallowedKey)
+        this.similarSwallowedCount++
+        this.deps.logger.info(
+          `similar topic swallowed: ${topic.title} ` +
+            `(similar to recently pushed "${similar.title}", score ${similar.score.toFixed(2)})`
+        )
+        this.noteDisposition(
+          topic,
+          'similar-swallowed',
+          `与 48h 内已推送的「${similar.title}」相似（${similar.score.toFixed(2)} ≥ 阈值 ${cfg.similarity.threshold}）`
+        )
+        return
+      }
     }
     const commentary = await this.maybeGenerateCommentary(topic, cfg)
     let notifiedAt: string | null = null
@@ -1624,17 +1599,15 @@ export class MonitorEngine {
   }
 
   /**
-   * 命中帖锐评（第三轮）：四条件全部满足才真调 generate，否则 commentary=null
+   * 命中帖锐评（第三轮）：三条件全部满足才真调 generate，否则 commentary=null
    * 且不打 LLM：
    * - deps.commentaryGenerator 已注入（旧装配/测试不注入 = 恒 null，行为不变）；
    * - cfg.ai.commentary.enabled === true（恒存在恒布尔，防御式严格比较）；
-   * - provider 齐备（this.aiConfigured，每轮 updateAiConfig 从配置刷新）；
-   * - 总配额 callsToday < DAILY_AI_CALL_LIMIT（与语义评估共用桶）；
-   * - 子限额 commentaryToday < DAILY_COMMENTARY_LIMIT（超限当日静默降级：
-   *   无锐评推送、不 log——100 子限额保证语义评估在总桶至少剩 200，无需调序）。
-   * 真调用前后双计数（callsToday++ / commentaryToday++）：generate 内部消化一切
-   * 异常，调用即计数无论成败；推送失败重试轮 generate 会被再次调用并计数，但
-   * 其内部缓存保证不再打 LLM。generate 绝不抛（模块保证），无需 try/catch。
+   * - provider 齐备（this.aiConfigured，每轮 updateAiConfig 从配置刷新）。
+   * 无每日配额语义（不设上限）。真调用前后双计数（callsToday++ /
+   * commentaryToday++，均为纯观测计数）：generate 内部消化一切异常，调用即
+   * 计数无论成败；推送失败重试轮 generate 会被再次调用并计数，但其内部缓存
+   * 保证不再打 LLM。generate 绝不抛（模块保证），无需 try/catch。
    */
   private async maybeGenerateCommentary(topic: Topic, cfg: AppConfig): Promise<string | null> {
     const gen = this.deps.commentaryGenerator
@@ -1642,8 +1615,6 @@ export class MonitorEngine {
     if (cfg.ai.commentary.enabled !== true) return null
     if (!this.aiConfigured) return null
     this.rollAiDay()
-    if (this.aiCallsToday >= DAILY_AI_CALL_LIMIT) return null
-    if (this.commentaryToday >= DAILY_COMMENTARY_LIMIT) return null
     this.aiCallsToday++
     this.commentaryToday++
     return await gen.generate(topic)
@@ -1652,18 +1623,18 @@ export class MonitorEngine {
   // ---- 相似降噪窗口（R5-P2a 第 8/10/11 步） --------------------------------
 
   /**
-   * 标题是否与"近期已推"窗口里的任一条相似（DEC-4）。
-   * 窗口条目在入窗时已 normalizeTitle（isSimilarToAny 的契约：recentTitles 须传
-   * 已归一化串）；待判标题传原始串，函数内部自行归一。窗口为空恒 false。
+   * 标题与"近期已推"窗口的相似判定（DEC-4），带命中明细（观测面用）。
+   * 窗口条目在入窗时已 normalizeTitle（findSimilarTo 的契约：recentTitles 须传
+   * 已归一化串）；待判标题传原始串，函数内部自行归一。窗口为空恒 null。
    * 检查时跳过已超出 48h 的条目——轮末 prune 之外的时刻（如长睡眠恢复后的
    * 首轮）窗口里可能还留着过期条目，48h 契约以**判定时点**为准（过期放行）。
    */
-  private isSimilarToRecentlyPushed(title: string, cfg: AppConfig): boolean {
-    if (this.pushedTitles.length === 0) return false
+  private findSimilarRecentlyPushed(title: string, cfg: AppConfig): SimilarityMatch | null {
+    if (this.pushedTitles.length === 0) return null
     const cutoff = this.now() - SIMILARITY_WINDOW_MS
     const inWindow = this.pushedTitles.filter((e) => e.at >= cutoff)
-    if (inWindow.length === 0) return false
-    return isSimilarToAny(
+    if (inWindow.length === 0) return null
+    return findSimilarTo(
       title,
       inWindow.map((e) => e.title),
       cfg.similarity.threshold

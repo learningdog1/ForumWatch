@@ -180,7 +180,6 @@ describe('formatStatusReply', () => {
           effectiveMode: 'both',
           degraded: 'none',
           callsToday: 5,
-          dailyLimit: 300,
           lastAiError: null
         }
       })
@@ -202,7 +201,6 @@ describe('formatStatusReply', () => {
           effectiveMode: 'literal',
           degraded: 'unconfigured',
           callsToday: 0,
-          dailyLimit: 300,
           lastAiError: null
         }
       })

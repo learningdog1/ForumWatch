@@ -2,12 +2,15 @@
  * 配置迁移（D2：纯函数，零 electron / 零 fs / 零日志）。
  *
  * - `migrateConfigEnvelope`：把盘上信封（`{schemaVersion, config}`）沿迁移链
- *   （v1 → v2 → v3）迁到当前形状。
+ *   （v1 → v2 → v3 → v4）迁到当前形状。
  *   - v1 → v2 保留全部 v1 字段，补 `sources`（默认单项 nodeseek）与 `ai`
  *     （DEFAULT_APP_CONFIG.ai 深拷贝）；
  *   - v2 → v3 只动 `sources`：v2 盘上形状是 `{id, type:'nodeseek', enabled}`
  *     （type 恒 nodeseek），逐项映射为 NodeseekSourceConfig；其余段原样保留。
- *   - v3 原样透传（幂等；后续 sanitize 由 ConfigStore 做）。
+ *   - v3 → v4 只动 `sources` 里 rss 来源的 url：LowEndTalk 预设错误地址
+ *     `https://lowendtalk.com/feed`（恒 404）重写为
+ *     `https://lowendtalk.com/discussions/feed.rss`（见 v3ToV4）。
+ *   - v4 原样透传（幂等；后续 sanitize 由 ConfigStore 做）。
  *   - 链尾统一过 `normalizeLegacyChannels`（R6-W1 读兼容，见该函数注释）。
  * - **迁移只做纯函数变换，不做校验**：残缺 sources（非数组 / 空数组 / 缺 type /
  *   非对象项）原样透传，合法性由 store 的 merge DEFAULT + sanitize 兜底。
@@ -29,7 +32,7 @@ export interface ConfigEnvelope {
 }
 
 /** 当前契约版本（与 store.ts 的 CONFIG_SCHEMA_VERSION 对齐，写盘用那边的常量） */
-export const MIGRATOR_TARGET_VERSION = 3
+export const MIGRATOR_TARGET_VERSION = 4
 
 /** v1 信封里合法的 config 是「不含 sources/ai 的 AppConfig 子集」，按 Partial 读取 */
 type V1Config = Partial<Omit<AppConfig, 'sources' | 'ai'>>
@@ -57,6 +60,7 @@ export function migrateConfigEnvelope(raw: unknown): AppConfig {
   if (
     env.schemaVersion !== 1 &&
     env.schemaVersion !== 2 &&
+    env.schemaVersion !== 3 &&
     env.schemaVersion !== MIGRATOR_TARGET_VERSION
   ) {
     throw new Error(`unknown config schemaVersion: ${String(env.schemaVersion)}`)
@@ -65,14 +69,19 @@ export function migrateConfigEnvelope(raw: unknown): AppConfig {
     throw new Error('config envelope missing config object')
   }
 
-  // v3 → 原样透传（幂等；含缺字段的残缺 config：后续 merge DEFAULT + sanitize 兜底）
+  // v4 → 原样透传（幂等；含缺字段的残缺 config：后续 merge DEFAULT + sanitize 兜底）
   if (env.schemaVersion === MIGRATOR_TARGET_VERSION) {
     return normalizeLegacyChannels(structuredClone(env.config) as PreR6Config)
   }
 
-  // 迁移链：v1 先升 v2，再统一走 v2 → v3；链尾统一做 R6-W1 旧 telegram 读兼容
+  // v3 → 只做 v3→v4（不能再过 v2ToV3：那会把 v3 盘上的 rss/v2ex 来源强改为 nodeseek）
+  if (env.schemaVersion === 3) {
+    return normalizeLegacyChannels(v3ToV4(structuredClone(env.config) as PreR6Config))
+  }
+
+  // v1/v2 迁移链：v1 先升 v2，再统一走 v2 → v3 → v4；链尾统一做 R6-W1 旧 telegram 读兼容
   const v2 = env.schemaVersion === 1 ? v1ToV2(env.config) : (structuredClone(env.config) as PreR6Config)
-  return normalizeLegacyChannels(v2ToV3(v2))
+  return normalizeLegacyChannels(v3ToV4(v2ToV3(v2)))
 }
 
 /**
@@ -109,6 +118,31 @@ function v2ToV3(config: PreR6Config): PreR6Config {
   if (!Array.isArray(next.sources)) return next
   next.sources = next.sources.map((item) =>
     typeof item === 'object' && item !== null ? { ...item, type: 'nodeseek' } : item
+  )
+  return next
+}
+
+/**
+ * v3 → v4：只动 `sources` 里 rss 来源的 `url`——LowEndTalk 预设曾携带错误地址
+ * `https://lowendtalk.com/feed`（Vanilla 站点该路径不存在，恒 404），修正为全站
+ * feed `https://lowendtalk.com/discussions/feed.rss`。按 url 精确匹配重写（不限
+ * id：预设 id 'lowendtalk' 与自定义 slug 化 id 两种添加路径都会命中；用户手输
+ * 同一错误地址同样受益——它本来就是 404）。其余来源/字段一律不动；非数组
+ * sources 整体透传（sanitize 兜底）。幂等：已是新地址的盘再跑一遍无变化。
+ */
+const LOWENDTALK_BAD_FEED_URL = 'https://lowendtalk.com/feed'
+const LOWENDTALK_FEED_URL = 'https://lowendtalk.com/discussions/feed.rss'
+
+function v3ToV4(config: PreR6Config): PreR6Config {
+  const next = structuredClone(config) as PreR6Config & { sources: unknown }
+  if (!Array.isArray(next.sources)) return next
+  next.sources = next.sources.map((item) =>
+    typeof item === 'object' &&
+    item !== null &&
+    (item as { type?: unknown }).type === 'rss' &&
+    (item as { url?: unknown }).url === LOWENDTALK_BAD_FEED_URL
+      ? { ...item, url: LOWENDTALK_FEED_URL }
+      : item
   )
   return next
 }

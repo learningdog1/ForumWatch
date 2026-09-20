@@ -1,0 +1,974 @@
+/* 共享件层（R12 霁蓝平台 §R12.1/R12.3）：组头 / L2 实体行 / 卡片 / 空态·错误条 /
+   按钮族 / 输入族 / chip·pill / 页头 / 单选卡组 / 选中行规范类。
+   样式全部引用 theme.css 令牌，零硬编码色值；一切实底色块文字只走
+   var(--color-on-primary) / var(--on-danger)。
+   交互件四态齐备：hover（颜色/阴影，不移位）· active（translateY .5px 按压反馈）·
+   :focus-visible（全局环，输入类自有样式）· 禁用（opacity .45 机制保留）。
+   R12 语言要点：圆角随令牌升 16/12；卡头/字段/实体行内边距升档；wash 上的强调
+   文字统一 --primary-text（绿让位蓝）；跨域三裁决落此文件——①.radios-card 唯一
+   定义、②.row-selected 选中行规范类、③dirty 琥珀（在 shell/settings-core）。 */
+
+/* 组头 16px > 卡题 14px > 标签 13px > hint 12px 四级节奏不变；组头与释义两行成组 */
+.group-head {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--fg);
+  line-height: var(--lh-base);
+}
+.group-sub {
+  margin: 2px 0 0;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+
+/* ── L2 实体行（来源 / 通道 / 价格规则 / 路由四类列表统一外壳）──
+   R12：行距升档（min-height 52→56、左内距 12→20），列表框圆角随 --r-ctl=12 */
+
+.entity-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
+}
+.entity-row {
+  border-bottom: 1px solid var(--line);
+}
+.entity-row:last-child {
+  border-bottom: none;
+}
+/* 展开编辑区打开时让位给自身的虚线分隔（避免双线） */
+.entity-row:has(.ent-expand) {
+  border-bottom: none;
+}
+.ent-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  min-height: 56px;
+  padding: var(--space-sm) var(--space-lg) var(--space-sm) var(--space-2xl);
+}
+/* 停用的实体行压暗（启停开关的视觉反馈；禁用态压暗属状态语义，透明度豁免继承） */
+.ent-main.is-off {
+  opacity: 0.55;
+}
+.ent-name {
+  font-size: var(--fs-14);
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 条件摘要（mono 12px，超宽 truncate + title 全文由各卡提供） */
+.ent-sum {
+  flex: 1;
+  min-width: 60px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ent-ops {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-xs);
+  align-items: center;
+  flex: none;
+}
+/* 行内操作钮：44px 命中区、无边框幽灵样式（hover 才出底） */
+.ent-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-12);
+  gap: var(--space-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.ent-btn:hover:not(:disabled) {
+  background: var(--card-alt);
+  color: var(--fg);
+}
+.ent-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text-3) 14%, transparent);
+}
+.ent-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ent-btn.active {
+  color: var(--primary-text); /* R12：wash 上强调文字走 primary-text（旧 ok-text 作废） */
+  background: var(--primary-wash);
+}
+.ent-btn.danger:hover:not(:disabled) {
+  background: var(--err-chip);
+  color: var(--err-text); /* 点色档禁作小字：hover 文字走 err-text（继承 §A-10） */
+}
+.ent-btn.danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+}
+/* 开关的 44px 命中区：伪元素向外扩边（命中算到宿主 button，不改轨道观感） */
+.ent-ops .switch::before {
+  content: '';
+  position: absolute;
+  inset: -10px -4px;
+}
+
+/* ── 选中行规范类（R12.3 裁决 2：键盘/鼠标「选中行」全应用统一一种语言）──
+   wash 底 + 左侧 3px 主色条 + 内衬 1px ring 弱描边，全部 box-shadow 实现不改盒模。
+   HitRow 已挂（class="hit selected row-selected"）；dashboard 的 .hit.selected 与
+   events 的 roving 行请收敛为加此类并删域内重复定义（领域上下文可继续加非语言属性）。
+   R12.6 wash 文字收口（共享层纪律）：品牌 wash 底上最低文字档 = --text-2——暗档
+   text-3 在 wash 上 3.96~4.56 不达 4.5，故本类把 --text-3 就地 remap 到 --text-2
+   （行内 var(--text-3) 的摘要/时间戳自动升档，域文件零改动）。同理一切挂
+   --primary-wash 的共享件（.radios-card 选中、.quick/.input-row .btn.active、.chip、
+   .ent-btn.active）wash 上只准 fg / text-2 / --primary-text / tone 文字档，禁
+   text-3；wash 不叠铺 --raised 浮层（raised 面的选中态用 fg/primary-text 档）。 */
+.row-selected {
+  --text-3: var(--text-2); /* 局部 remap：子元素 var(--text-3) 落到达标档 */
+  background: var(--primary-wash);
+  box-shadow:
+    inset 3px 0 0 var(--color-primary),
+    inset 0 0 0 1px color-mix(in srgb, var(--ring) 35%, transparent);
+}
+
+/* 待删除态（L1 删除不弹确认）：四件套——行底 --err-chip 红弱底（保留：待删除是
+   删除语义，不属裁决 3 的 dirty 琥珀范畴）+ 删除线 + 压暗 + 琥珀徽标 */
+.entity-row.del {
+  background: var(--err-chip);
+  opacity: 0.55;
+}
+.entity-row.del .ent-name,
+.entity-row.del .src-badge,
+.entity-row.del .src-name {
+  text-decoration: line-through;
+}
+.badge-del {
+  flex: none;
+  margin-left: var(--space-md);
+  padding: 1px var(--space-md);
+  border-radius: var(--r-pill);
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  white-space: nowrap;
+}
+/* 展开编辑区（一次一行）：card-alt 井 + 虚线分隔 + 内阴影；内距升档 */
+.ent-expand {
+  background: var(--card-alt);
+  border-top: 1px dashed var(--line);
+  box-shadow: var(--inset-field);
+  padding: var(--space-lg) var(--space-2xl) var(--space-2xl);
+  animation: fade-in var(--t-glide) var(--ease-out);
+}
+.ent-expand .field:last-child {
+  border-bottom: 0;
+}
+.ent-expand-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--space-sm);
+}
+/* >8 条折叠脚行：上邻行的实线分隔让位给脚行自身的虚线（避免双线） */
+.entity-row:has(+ .ent-collapse) {
+  border-bottom: none;
+}
+.ent-collapse {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  min-height: 44px;
+  padding: 0 var(--space-lg);
+  border-top: 1px dashed var(--line);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.ent-collapse .ent-btn {
+  color: var(--text-2);
+}
+
+/* ── 卡片（R12：纯白大圆角卡 + 装饰描边 + 柔和双层阴影，bento 档）── */
+
+.card {
+  flex: none;
+  background: var(--card);
+  border: 1px solid var(--color-border); /* 装饰档（禁承载分隔语义的纪律继承） */
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-sm), var(--edge-top);
+}
+
+/* 卡头两级：极浅头带 + 功能分隔线；内距升档 20/16 */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-lg) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--card-alt) 60%, transparent);
+  border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0;
+}
+
+/* 卡题全局 fs-14/600/fg（"卡题 > 行内容 > 元信息"单向递减纪律继承） */
+.card-title {
+  font-size: var(--fs-14);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.card-title-aux {
+  font-size: var(--fs-12);
+  font-weight: 400;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.card-count {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* 卡头左组：题 + 计数 + aux 同簇（右侧留给角标等） */
+.card-head-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+/* 错误条叠卡顶（REDESIGN §6.3）：卡内 head 之下首行 */
+.card > .errorbar {
+  flex: none;
+  margin: var(--space-lg) var(--space-2xl) 0;
+}
+
+.card-grow {
+  flex: 1;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+}
+.card-grow .logview {
+  flex: 1;
+  max-height: none;
+}
+
+.empty {
+  padding: var(--space-3xl) var(--space-2xl);
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--fs-12);
+}
+
+/* ── 空态（D8 ⑤：插画 + 引导文案 + 可选操作；圆盘底给空洞容器感）── */
+
+.empty-state {
+  padding: var(--space-3xl) var(--space-2xl);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-lg);
+  text-align: center;
+}
+/* 插画色 --text-3 + card-alt 圆盘底（纯装饰豁免对比度；层级弱化不走 opacity） */
+.empty-illus {
+  color: var(--text-3);
+  background: var(--card-alt);
+  border-radius: 50%;
+  padding: 18px;
+}
+.empty-state-title {
+  font-size: var(--fs-14);
+  font-weight: 600;
+  color: var(--text-2);
+}
+.empty-state-hint {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  max-width: 400px;
+  line-height: var(--lh-base);
+}
+.empty-state-action {
+  margin-top: var(--space-md);
+}
+
+/* ── 操作按钮（次级卡底+功能描边；主按钮实底走令牌文字；同视图至多一个实底主按钮）── */
+
+.btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px; /* md 默认档；sm 28 / lg 40 见尺寸档 */
+  padding: 6px 14px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--input-border);
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std),
+    transform var(--t-fast) var(--ease-std),
+    box-shadow var(--t-fast) var(--ease-std);
+}
+.btn svg {
+  flex: none;
+}
+/* hover 只走颜色+阴影，不移位不放大（纪律继承；200ms 档随 --t-base） */
+.btn:hover:not(:disabled) {
+  background: var(--card-alt);
+  border-color: var(--text-3);
+  box-shadow: var(--shadow-sm);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+  box-shadow: none;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* 尺寸档：sm（行内/日志工具）/ md 默认 / lg（保存栏·确认用） */
+.btn.btn-sm {
+  min-height: 28px;
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+.btn.btn-lg {
+  min-height: 40px;
+  padding: 8px 18px;
+}
+
+/* busy 转圈：进度指示（豁免注记：busy 反馈非装饰循环；reduced-motion 全局兜底） */
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.btn.busy::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  margin-right: 6px;
+  flex: none;
+  animation: btn-spin 0.9s linear infinite;
+}
+
+/* 主按钮：底 --btn-primary-bg（浅 #1D4ED8 / 暗 #6BA8F5），文字一律 --color-on-primary
+   （浅=白 6.70 / 暗=深墨 7.06）——禁硬编码 white；hover 加深/提亮一档 + 阴影升 */
+.btn-primary {
+  background: var(--btn-primary-bg);
+  border-color: transparent;
+  color: var(--color-on-primary);
+  box-shadow: var(--shadow-sm);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--hover-primary-bg);
+  border-color: transparent;
+  color: var(--hover-primary-fg);
+  box-shadow: var(--shadow-md);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0.5px);
+  box-shadow: none;
+}
+
+/* 危险操作：err 55% 描边 + err-text 文字；hover 上 err-chip 弱底 */
+.btn-danger {
+  border-color: color-mix(in srgb, var(--err) 55%, transparent);
+  color: var(--err-text);
+  background: transparent;
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--err-chip);
+  border-color: color-mix(in srgb, var(--err) 75%, transparent);
+  color: var(--err-text);
+  box-shadow: none;
+}
+.btn-danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  padding: var(--space-lg) var(--space-2xl);
+}
+
+.feedback {
+  font-size: var(--fs-12);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.feedback.ok {
+  color: var(--ok-text);
+}
+.feedback.err {
+  color: var(--err-text);
+}
+.feedback.warn {
+  color: var(--warn-text);
+}
+.feedback.pending,
+.feedback.muted {
+  color: var(--text-3);
+}
+/* 状态卡 pill 行的操作反馈：右对齐；✓/✗ 由 SVG 图标承载（无 emoji） */
+.statuscard-head .feedback {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  text-align: right;
+}
+.statuscard-head .feedback svg {
+  flex: none;
+}
+/* 行内反馈的 [重试]（ia §5.4：错误必须带恢复路径） */
+.feedback-retry {
+  border: 0;
+  padding: var(--space-sm) var(--space-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--fs-12);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-std);
+}
+.feedback-retry:hover {
+  color: var(--fg);
+  text-decoration-style: solid;
+}
+
+.chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+  overflow: hidden;
+}
+/* 命中词 chip：全应用唯一品牌透明底档 + 其上强调文字 --primary-text
+   （R12：绿让位蓝，旧「wash 上用 ok-text」写法作废） */
+.chip {
+  flex: none;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  padding: 0 7px;
+  line-height: var(--lh-chip);
+  border-radius: var(--r-pill);
+  background: var(--primary-wash);
+  color: var(--primary-text);
+}
+/* 来源徽标（描边幽灵样式，与分类实底 chip 区分；描边 40% 档）。跨域共享类 */
+.src-badge {
+  flex: none;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  padding: 0 var(--space-md);
+  line-height: var(--lh-chip);
+  border-radius: var(--r-pill);
+  border: 1px solid color-mix(in srgb, var(--text-3) 40%, transparent);
+  color: var(--text-2);
+}
+
+/* ── 设置表单（字段行左标签 13/500 右控件；hint 12/text-3）──
+   R12：左列 148→168、行内距 12→20——表单带「大气」的主要落点 */
+
+.field {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: var(--space-sm) var(--space-xl);
+  padding: var(--space-xl) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+}
+.field:last-child {
+  border-bottom: 0;
+}
+
+.field-label {
+  font-size: var(--fs-13);
+  font-weight: 500;
+  padding-top: var(--space-sm);
+}
+
+.field-hint {
+  grid-column: 2;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+.field-hint.err {
+  color: var(--err-text);
+}
+.field-hint.warn {
+  color: var(--warn-text);
+}
+/* 内联语义子规则：hint 里既有的裸 .err/.warn span 落语义色 */
+.field-hint .err {
+  color: var(--err-text);
+}
+.field-hint .warn {
+  color: var(--warn-text);
+}
+
+/* 输入族：14px 正文 · r-ctl(12) · 内凹感 = 功能描边 + inset 阴影（值收 --inset-field） */
+.input {
+  width: 100%;
+  padding: 7px 12px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--input-border);
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-14);
+  box-shadow: var(--inset-field);
+  transition:
+    border-color var(--t-fast) var(--ease-std),
+    box-shadow var(--t-fast) var(--ease-std),
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.input::placeholder {
+  color: var(--text-3);
+}
+/* mono 输入（URL/JSON/时间）保持 12 档 */
+.input.mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+}
+/* input.num（价格规则数字输入）：仅并入 .num hook 的 mono 字体档 */
+.input.num {
+  font-family: var(--font-mono);
+}
+/* 输入自有 focus 语言：边框升 ring + 外环 2px（全局 :focus-visible 不叠加，见 base.css） */
+.input:focus,
+.tags:focus-within {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: var(--inset-field), 0 0 0 2px color-mix(in srgb, var(--ring) 45%, transparent);
+}
+.input.invalid {
+  border-color: var(--err);
+}
+/* 禁用态：底色 card-alt + 文字 text-3（不压 opacity；.input-disabled 类为既有卡侧契约） */
+.input:disabled,
+.input-disabled {
+  background: var(--card-alt);
+  color: var(--text-3);
+  border-color: color-mix(in srgb, var(--input-border) 55%, transparent);
+  box-shadow: none;
+  cursor: default;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+.input-row .input {
+  width: 110px;
+}
+/* 自适应宽度控件（下拉选项文案长短不一，如「任意来源」）：盖过上面的定宽 */
+.input-row .input.input-auto {
+  width: auto;
+}
+
+.input-time {
+  width: 96px;
+}
+/* 控件列内的纵向追加块：与上一块留一行距 */
+.mt-md {
+  margin-top: var(--space-md);
+}
+
+.quick {
+  display: inline-flex;
+  gap: var(--space-sm);
+}
+.quick .btn {
+  min-height: 28px; /* sm 档（快捷预设行紧凑，不吃 md 32） */
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+/* quick-active 与行 hover/选中/导航选中共用唯一 wash 档；文字 --primary-text */
+.quick .btn.active,
+.input-row .btn.active {
+  border-color: var(--color-primary);
+  color: var(--primary-text);
+  background: var(--primary-wash);
+}
+
+.radios {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.radio {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  cursor: pointer;
+}
+
+.radio input {
+  margin: 2px 0 0;
+  accent-color: var(--color-primary); /* 原生控件跟随品牌图形档 */
+}
+.radio-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.radio-title {
+  font-weight: 500;
+  line-height: var(--lh-base);
+}
+.radio-desc {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+
+/* ── 卡内单选卡组变体（R12.3 裁决 1：跨域共用 .radios.radios-card 的规范定义
+   收编于本文件一份——MatchModeCard / NotifyCard / ProxyCard 只挂类；
+   settings-monitor.css / settings-notify.css 里不得再有副本，领域工程师负责删除
+   各自工作树里可能残留的重复段）。
+   语言：嵌井承托 + 可点卡面 hover 提亮、选中 wash + 主描边 + 左 3px 竖条 +
+   选中题色 --primary-text + 焦点环从 input 移到整卡（大命中区）。 */
+.radios.radios-card {
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--card-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-ctl);
+  box-shadow: var(--inset-field);
+}
+.radios-card .radio {
+  position: relative;
+  padding: var(--space-md) var(--space-lg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--card);
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std);
+}
+.radios-card .radio:hover {
+  background: var(--card-alt);
+  border-color: var(--input-border);
+}
+.radios-card .radio:has(input:checked) {
+  --text-3: var(--text-2); /* R12.6 wash 收口：选中标题下的 desc（text-3）升达标档 */
+  border-color: var(--color-primary);
+  background: var(--primary-wash);
+}
+.radios-card .radio:has(input:checked)::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px 0 0 2px;
+  background: var(--color-primary);
+}
+.radios-card .radio:has(input:checked) .radio-title {
+  color: var(--primary-text);
+}
+.radios-card input:focus-visible {
+  outline: none;
+}
+.radios-card .radio:has(:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* 区块内行内提示（语义模式未配置 AI 等灰字提示） */
+.notice {
+  margin-bottom: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--r-ctl);
+  font-size: var(--fs-12);
+}
+.notice.muted-notice {
+  background: var(--mute-chip);
+  color: var(--text-2);
+}
+
+/* 开关：off 轨 mute-chip + 功能描边；on 轨 ok 绿（运行语义，不随品牌换相）；
+   圆点 var(--card)（两模式在 on/off 轨上均 ≥3:1，零硬编码）+ 细描边保可辨 */
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 23px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--input-border);
+  background: var(--mute-chip);
+  cursor: pointer;
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    border-color var(--t-base) var(--ease-std);
+  padding: 0;
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-3) 30%, transparent);
+  transition: left var(--t-base) var(--ease-std);
+}
+.switch[aria-checked='true'] {
+  background: var(--ok);
+  border-color: transparent;
+}
+.switch[aria-checked='true']::after {
+  left: 19px;
+}
+.switch:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+/* ── 标签输入（关键词 chip 档：mute-chip 底 + text-2；hover 出现 ✗）── */
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 36px;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--input-border);
+  background: var(--card);
+  box-shadow: var(--inset-field);
+  cursor: text;
+  transition:
+    border-color var(--t-fast) var(--ease-std),
+    box-shadow var(--t-fast) var(--ease-std);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 240px;
+  padding: 2px 4px 2px var(--space-md);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+}
+.tag .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag .x {
+  border: 0;
+  /* ✗ 默认隐于 chip（IconX 12px）：hover 出现即「出现」语义，非透明度弱化；
+     键盘聚焦常驻可见（无 hover 路径的等效反馈） */
+  padding: 2.5px 5px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: transparent;
+  font: inherit;
+  font-size: var(--fs-13);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.tag:hover .x,
+.tag .x:focus-visible {
+  color: var(--text-2);
+}
+.tag .x:hover {
+  background: var(--err-chip);
+  color: var(--err-text); /* 点色档禁作小字：hover 文字走 err-text（继承 §A-10） */
+}
+.tag .x:active {
+  background: color-mix(in srgb, var(--err) 16%, transparent);
+}
+.tag .x:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 长文本变体（兴趣描述）：标签可换行、不截断 */
+.tags-longtext .tag {
+  max-width: 100%;
+  align-items: flex-start;
+}
+.tags-longtext .tag .label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: var(--lh-base);
+  min-width: 0;
+}
+.tags-longtext .tag .x {
+  flex: none;
+}
+
+.tags input {
+  flex: 1;
+  min-width: 130px;
+  border: 0;
+  padding: 2px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  outline: none;
+}
+
+/* 重复词抖动（audit #14：200ms 一次性，reduced-motion 下全局规则转瞬移） */
+@keyframes tags-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-3px);
+  }
+  50% {
+    transform: translateX(3px);
+  }
+  75% {
+    transform: translateX(-2px);
+  }
+}
+.tags.shake {
+  animation: tags-shake 200ms var(--ease-std);
+}
+
+/* ── 共用组件：页头 / 错误条 ─────────────────────────────────────── */
+
+.pagehead {
+  flex: none;
+  display: flex;
+  /* flex-start：动作区落回页题带，由 .pagehead-actions 光学补偿 */
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-lg);
+}
+.pagehead-main {
+  min-width: 0;
+}
+/* 页题：全应用三处 700 display 位之一（R12 大气档）：26/700 + display 负字距 */
+.page-title {
+  margin: 0;
+  font-size: var(--fs-26);
+  font-weight: 700;
+  line-height: var(--lh-display);
+  letter-spacing: var(--ls-display);
+  color: var(--fg);
+}
+/* 副题：R12 由 13/text-3 升 14/text-2——「标题从容、正文舒适」的中间带 */
+.page-subtitle {
+  margin-top: var(--space-sm);
+  font-size: var(--fs-14);
+  color: var(--text-2);
+}
+.page-updated {
+  margin-top: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+/* stale 态：数据面超过阈值未更新，琥珀显式标注（不假装实时） */
+.page-updated.stale {
+  color: var(--warn-text);
+}
+.pagehead-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  /* 光学补偿：顶对齐后按钮带下移与副题行齐平 */
+  padding-top: var(--space-sm);
+}
+
+/* 统一错误条（错误是一等公民）：失败 ≠ 空，旧数据保留、错误条叠于卡内顶部。
+   err-chip 弱底 + err-text 文字 + 1px err 45% 描边 + r-ctl；内距升档 */
+.errorbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--r-ctl);
+  border: 1px solid color-mix(in srgb, var(--err) 45%, transparent);
+  background: var(--err-chip);
+  color: var(--err-text);
+  font-size: var(--fs-13);
+}
+.errorbar .msg {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.errorbar .btn {
+  min-height: 28px; /* sm 档 */
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+
+/* 错误条第二行：IPC 错误原文（12px 弱一档；dispositions.md §2.5） */
+.errorbar-detail {
+  display: block;
+  flex-basis: 100%;
+  font-size: var(--fs-12);
+  font-weight: 400;
+}

@@ -1,0 +1,209 @@
+/* ── settings-notify 域卡样式（通知 / 通道 / 路由 / 网络 / AI / 遥控 / 数据 / 关于）──
+   R12「霁蓝平台」版：卡基 / 按钮族 / 输入族 / 字段行 / 实体行外壳 / 错误条 /
+   .radios-card 来自 primitives.css，设置骨架与吸底栏来自 settings-core.css；
+   本文件只补本域缺口，内距一律走 spacing 令牌、随共享层升呼吸档。
+   零硬编码 hex：一切实底色块文字走 var(--color-on-primary) / var(--on-danger)。
+   （注：本文件在 global.css 里最后 @import，同名规则以本文件为准。） */
+
+/* .num 等宽 hook 已收编 base.css（全局唯一，收尾归属裁决），本域无副本；
+   .radios-card 规范定义唯 primitives.css 一份（R12.3 裁决 1），本域复核确认无副本 */
+
+/* ── 卡头 aux 状态点（AI 已配置/未配置、遥控 已启用/关闭：点 + 文字同现，
+   不只靠颜色——纪律 §4-7）── 10px 圆点配 --lh-chip 18（徽标档继承） */
+.aux-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: var(--space-md);
+  vertical-align: -1px;
+  background: var(--text-3);
+}
+.aux-dot.ok {
+  background: var(--ok);
+}
+.aux-dot.warn {
+  background: var(--warn);
+}
+
+/* ── 密钥 / Token 输入（脱敏呈现）───────────────────────────────
+   pw-wrap：password 掩码 + 行内眼睛显隐钮（检索 ux-guidelines · Forms /
+   Password Visibility：显隐切换必备、输入要有明确的可交互边界——边界与内凹
+   由 .input 基础件给出，这里只经营切换钮四态与避让）。 */
+.pw-wrap {
+  position: relative;
+}
+.pw-wrap .input {
+  /* 给眼睛钮让位：钮宽 ~30 + 右距 6 */
+  padding-right: calc(var(--space-3xl) + var(--space-md));
+}
+/* 掩码态是「被保护的值」：字距略放，圆点更像数据而非乱码 */
+.pw-wrap .input[type='password'] {
+  letter-spacing: 0.08em;
+}
+.pw-wrap .input[type='password']::placeholder {
+  letter-spacing: normal;
+}
+.pw-toggle {
+  position: absolute;
+  right: var(--space-sm);
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 3px var(--space-md);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.pw-toggle:hover {
+  background: var(--mute-chip);
+  color: var(--fg);
+}
+.pw-toggle:active {
+  background: color-mix(in srgb, var(--text-3) 18%, transparent);
+}
+/* 焦点态不再域内重写：全局 :focus-visible（base.css，2px --ring / offset 2）
+   直接覆盖本钮（旧 offset:1px 副本删除，四态回归 primitives/base 新语言） */
+
+/* 卡内单选组变体（推送模式 / 代理作用域，与 MatchModeCard 同语言）的
+   跨域定义已收进 primitives.css（§2.0 冲突裁决②），本域不再重述 */
+
+/* 紧排变体（RoutingCard 的多选小标签）：复选框与文案只留 4px（原行内 gap:4） */
+.radio.radio-tight {
+  gap: var(--space-sm);
+}
+
+/* ── 通道行（多渠道一致性，§3.4「tone 点 + 通道名 500 + 状态」）──
+   tone-* 类由行容器下发（--tone/--tone-bg/--tone-text 继承给点与状态字），
+   类型徽标定宽成列，五种通道类型的行左缘对齐成一条竖线。 */
+.ch-list .src-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 76px;
+}
+/* 状态字（就绪/已停用/未配齐）：R12 由「裸文字」升为 tone pill chip——点 + 弱底 +
+   描边 + 文字四重冗余（色不单用纪律的合规呈现），与 .src-badge 徽标同高成行内节奏。
+   对比度实算（--tone-text on --tone-bg，浅档）：ok 4.57 / warn 6.08 / err 5.45，≥4.5 */
+.ch-state {
+  flex: none;
+  padding: 0 var(--space-md);
+  border: 1px solid color-mix(in srgb, var(--tone, var(--text-3)) 40%, transparent);
+  border-radius: var(--r-pill);
+  background: var(--tone-bg, var(--mute-chip));
+  font-size: var(--fs-12);
+  font-weight: 600;
+  line-height: var(--lh-chip);
+  color: var(--tone-text, var(--text-2));
+  white-space: nowrap;
+}
+
+/* ── 路由行序号（§3.3「顺序=优先级的响度提示」：mono 16/600 + label 正字距；
+   R12 列宽 22→24 随实体行呼吸档）── */
+.rule-idx {
+  flex: none;
+  width: var(--space-2xl);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--text-3);
+}
+
+/* ── 操作反馈位（数据卡/测试按钮）：常驻一行、min-height 预留，
+   反馈出现/消失不推动布局（检索 ux-guidelines · Feedback / Loading Indicators：
+   「preserve layout focus」；错误必带原因文案已在各调用点给出）。
+   busy 转圈由按钮 .busy 承担（ux · Loading Buttons：禁用+转圈，机制原样）。 */
+.op-feedback {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-md);
+  min-height: calc(var(--lh-chip) + var(--space-sm));
+  margin-top: var(--space-md);
+  font-size: var(--fs-12);
+}
+.op-feedback svg {
+  flex: none;
+}
+
+/* ── 行内确认条（L3 最重不可逆操作：导入备份）──
+   检索 ux-guidelines · Interaction / Confirmation Dialogs：不可逆动作必须先确认。
+   分级语言与 .sb-confirm / .leavebar / .warn-strip 同族：琥珀承托 + 左 3px warn 条
+   （「待确认的中间态」属裁决 3 的琥珀系，红只留给事件/失败），执行按钮本身才用
+   实底 danger（.btn-danger-solid 的 --danger-solid-bg + --on-danger，定义在
+   settings-core.css）——琥珀≠红，两级不混。R12：内距/行距升呼吸档。 */
+.inline-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  padding: var(--space-lg) var(--space-xl);
+  border-radius: var(--r-ctl);
+  border-left: 3px solid var(--warn);
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  font-size: var(--fs-13);
+  animation: fade-in var(--t-glide) var(--ease-out);
+}
+.inline-confirm-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding-top: 2px;
+  color: var(--warn);
+}
+.inline-confirm-body {
+  flex: 1 1 240px;
+  min-width: 0;
+  line-height: var(--lh-base);
+}
+.inline-confirm-actions {
+  flex-basis: 100%;
+}
+
+/* ── 遥控指令 chip（mono 12 + 中性弱底，同 .tag 语言）：把指令从整句提示里
+   提成可扫读的等宽单元（排版微调，文案内容不变） ── */
+.cmd-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-md);
+  margin-top: var(--space-md);
+}
+.cmd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  padding: 0 var(--space-md);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* ── 关于卡：logo 走 R12「图标砖」语言（与侧栏 brand 磁贴同族：wash 承托 +
+   品牌图形档图标，§3.4「版本 mono、logo --color-primary」；
+   版本号等宽由 .num 工具类承担）── */
+.about-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-3xl); /* 32px 砖盒：与壳层 brand 36 磁贴同族小一档，不顶高卡头 */
+  height: var(--space-3xl);
+  border-radius: var(--r-ctl);
+  background: var(--primary-wash);
+  align-self: center; /* .card-head-group 是 baseline 对齐，图标盒随文字带居中 */
+  color: var(--color-primary);
+}

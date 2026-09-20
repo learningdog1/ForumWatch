@@ -10,20 +10,24 @@
  * - 「调用 AI」开启时真调一次语义评估，消耗一次 LLM 调用（不占用监控引擎的
  *   每日 300 计数器，但服务侧额度照扣）；失败在语义阶段按跳过展示原因。
  */
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import type { MatchTestResult } from '@shared/ipc'
 import type { SourceConfig } from '@shared/types'
 import { Field } from './Field'
-import { IconBolt } from './icons'
+import { IconBolt, IconCheck, IconDot, IconMinus, IconX } from './icons'
 
 type Msg = { kind: 'ok' | 'err' | 'warn' | 'pending' | 'muted'; text: string }
 
-/** 阶段结论 → 前缀符号与反馈色（对齐 .feedback 的 ok/err/muted 令牌） */
-const OUTCOME_VIEW: Record<MatchTestResult['stages'][number]['outcome'], { mark: string; cls: string }> = {
-  pass: { mark: '✓', cls: 'ok' },
-  block: { mark: '✗', cls: 'err' },
-  skip: { mark: '–', cls: 'muted' },
-  info: { mark: '·', cls: 'muted' }
+/** 阶段结论 → 行首符号（内联 SVG，§C-2 图标语言唯一）与本域阶段行色档
+ *  （.mt-mark 的 ok/err/muted；图例文案见「结果」Field 的 hint） */
+const OUTCOME_VIEW: Record<
+  MatchTestResult['stages'][number]['outcome'],
+  { mark: ReactNode; cls: string }
+> = {
+  pass: { mark: <IconCheck size={12} />, cls: 'ok' },
+  block: { mark: <IconX size={12} />, cls: 'err' },
+  skip: { mark: <IconMinus size={12} />, cls: 'muted' },
+  info: { mark: <IconDot size={12} />, cls: 'muted' }
 }
 
 function sourceOptionLabel(s: SourceConfig): string {
@@ -52,7 +56,7 @@ export function MatchTestCard(props: { sources: SourceConfig[]; dirty: boolean }
     if (dirty) {
       setMsg({
         kind: 'warn',
-        text: '设置有未保存的改动：测试使用的是已保存的配置，请先保存再测试'
+        text: '设置有未保存的改动：测试使用的是已保存的配置，请先保存再测试。'
       })
       return
     }
@@ -70,23 +74,25 @@ export function MatchTestCard(props: { sources: SourceConfig[]; dirty: boolean }
       setMsg(null)
     } catch {
       // handler 收敛过失败语义，这里只是防御（IPC 层异常）
-      setMsg({ kind: 'err', text: '测试失败：IPC 调用异常' })
+      setMsg({ kind: 'err', text: '测试失败：与主进程通信异常，请重试' })
     } finally {
       setRunning(false)
     }
   }
 
   return (
-    <section className="card">
+    <section className="card smon">
       <div className="card-head">
         <span className="card-title">匹配测试台</span>
         <span className="card-title-aux">只读诊断</span>
       </div>
       <Field
         label="帖子标题"
+        htmlFor="match-test-title"
         hint="粘贴一条真实帖子标题，按已保存的配置逐阶段跑判定管线，看它会命中在哪一步、被什么拦下。"
       >
         <input
+          id="match-test-title"
           className="input mono"
           type="text"
           spellCheck={false}
@@ -98,12 +104,13 @@ export function MatchTestCard(props: { sources: SourceConfig[]; dirty: boolean }
       </Field>
       <Field
         label="来源（可选）"
+        htmlFor="match-test-source"
         hint="选择来源后，该来源的分类 / 作者过滤参与判定；不选则跳过来源过滤阶段。"
       >
         <div className="input-row">
           <select
-            className="input"
-            style={{ width: 'auto', minWidth: 180 }}
+            id="match-test-source"
+            className="input input-auto-min"
             value={sourceId}
             onChange={(e) => setSourceId(e.target.value)}
             aria-label="测试来源"
@@ -119,10 +126,12 @@ export function MatchTestCard(props: { sources: SourceConfig[]; dirty: boolean }
       </Field>
       <Field
         label="分类 / 作者（可选）"
+        htmlFor="match-test-category"
         hint="帖子元数据，供来源过滤判定：分类匹配显示名或 slug（不区分大小写），作者黑名单一票否决。留空按无分类处理——来源配了分类白名单时会显示被滤掉。"
       >
         <div className="input-row">
           <input
+            id="match-test-category"
             className="input"
             type="text"
             spellCheck={false}
@@ -133,6 +142,7 @@ export function MatchTestCard(props: { sources: SourceConfig[]; dirty: boolean }
             aria-label="帖子分类"
           />
           <input
+            id="match-test-author"
             className="input"
             type="text"
             spellCheck={false}
@@ -157,46 +167,56 @@ export function MatchTestCard(props: { sources: SourceConfig[]; dirty: boolean }
             aria-label="调用 AI 语义评估"
             onClick={() => setUseAi((v) => !v)}
           />
-          <span className="feedback muted">{useAi ? '开启（消耗配额）' : '关闭'}</span>
+          <span className="feedback muted">{useAi ? '开启（调用 AI）' : '关闭'}</span>
         </div>
       </Field>
       <Field label="运行" hint="不写去重集、不推送、不产生命中记录，可反复测试。">
         <div className="input-row">
           <button
             type="button"
-            className="btn"
+            className={`btn${running ? ' busy' : ''}`}
             disabled={running}
             onClick={() => void run()}
             title="按已保存配置跑一遍判定管线"
           >
-            <IconBolt size={14} />
-            {running ? '评估中…' : '运行测试'}
+            {running ? null : <IconBolt size={14} />}
+            运行测试
           </button>
           {msg != null && <span className={`feedback ${msg.kind}`}>{msg.text}</span>}
+          {msg == null && result == null && (
+            <span className="feedback muted">尚未运行。粘贴一条真实帖子标题，按已保存配置跑一遍判定管线。</span>
+          )}
         </div>
       </Field>
+      {running && result == null && (
+        <div className="field">
+          <span className="field-label">结果</span>
+          <div className="mt-running" aria-hidden="true">
+            <div className="mt-skel" />
+            <div className="mt-skel" />
+            <div className="mt-skel" />
+          </div>
+        </div>
+      )}
       {result != null && (
-        <Field label="结果" hint="✓ 放行/命中 · ✗ 一票否决 · – 未评估（短路/未提供）· · 评估但无命中。">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-            <span className={`feedback ${result.wouldPush ? 'ok' : 'err'}`}>
-              {result.wouldPush ? '✓ 会推送（若为新帖且推送开关开启）' : '✗ 不会推送'}
-            </span>
-            <div className="card-scroll">
+        <Field label="结果" hint="行首符号图例：通过 = 放行/命中；否决 = 一票否决；未评估 = 短路或未提供；无命中 = 评估但无命中。">
+          <div className="stack-y">
+            <div className={`mt-verdict ${result.wouldPush ? 'ok' : 'err'}`}>
+              {result.wouldPush ? <IconCheck size={14} /> : <IconX size={14} />}
+              <span>
+                {result.wouldPush ? '会推送（若为新帖且推送开关开启）' : '不会推送'}
+              </span>
+            </div>
+            <div className="entity-list">
               {result.stages.map((s) => {
                 const view = OUTCOME_VIEW[s.outcome]
                 return (
-                  <div className="hit" key={s.stage}>
-                    <span
-                      className={`feedback ${view.cls}`}
-                      style={{ flex: 'none', width: 14 }}
-                      title={s.outcome}
-                    >
+                  <div className="mt-stage" key={s.stage}>
+                    <span className={`mt-mark ${view.cls}`} title={s.outcome}>
                       {view.mark}
                     </span>
-                    <span className="how-badge">{s.label}</span>
-                    <span className="ai-reason" title={s.detail}>
-                      {s.detail}
-                    </span>
+                    <span className="mt-stage-label">{s.label}</span>
+                    <span className="mt-detail">{s.detail}</span>
                   </div>
                 )
               })}

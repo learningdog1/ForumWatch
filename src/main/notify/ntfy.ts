@@ -84,7 +84,8 @@ export class NtfyNotifier implements Notifier {
             input.topic,
             input.matchedKeywords,
             input.matchedRule,
-            input.semanticReason
+            input.semanticReason,
+            input.commentary
           ),
           ...(input.topic.url !== '' ? { click: input.topic.url } : {}),
           tags: [...TAGS]

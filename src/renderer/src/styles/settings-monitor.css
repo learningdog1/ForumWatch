@@ -1,0 +1,229 @@
+/* 设置域 · 监控内容/智能匹配/匹配测试卡（SourceCard / RulesCard / KeywordsCard /
+   MatchModeCard / MatchTestCard / SimilarityCard / RunPaceCard）。
+   R11 §3.3 → R12 §R12.4：实体行/卡壳/.field 走 primitives 共享语言（左列 168、
+   行内距 16/24、圆角 16/12、柔和阴影均由共享层吃令牌），本文件只做卡内域级
+   精修——展开编辑井的锚定、滑杆行数值反馈、匹配测试台的结果视觉。
+   域根类 .smon（各卡 <section className="card smon">）：所有规则收在域内，
+   不外溢到 settings-notify 的卡。零硬编码色值，全走 theme.css 令牌。
+
+   R12「大气」在本域的落点（简报 §R12.1/§R12.4）：
+   - 表单列 680→760 由 settings-core 承担；域内删除 R11 的「展开井字段收紧一档」
+     覆盖——.field 左列/内距归共享层，域内不再重述，展开井直接吃 16/24 松档。
+   - 测试台行距/内距整体升一档（行 min-height 40→44、padding sm/md→md/lg、
+     结果纵距 md→lg），判定链读起来不再挤。
+   - 结论横幅从 R11「内凹井」改 R12「漂浮横幅」语言：去 inset-field，
+     上 shadow-md 柔和扩散 + edge-top 发丝光——结果区第一眼锚点要浮起不要沉。
+   - 新色对全部按 WCAG 实算（python，本 session）：wash 浅底 fg 14.41 / text-2
+     6.31 / text-3 4.78；wash 暗底 fg 9.17 / text-2 5.07；ok-text on 白 5.02、
+     on ok-chip 浅 4.57 / 暗 7.66；err-text on err-chip 浅 5.45 / 暗 5.79。
+     唯一踩线对是 text-3(暗) on wash=4.41<4.5，域内以「wash 区文字升档」修法
+     兜住（见 .ent-expand 锚定与 .mt-stage:hover::before 两条规则）。 */
+
+/* .num 等宽 hook 已收编 base.css（全局唯一），本域副本已删——本域仅留
+   .smon .input-row .feedback.num 的上下文尺寸档（min-width/右对齐），非 hook 副本 */
+
+/* ── 实体行域级精修（R12：展开行锚定 + 井内文字在 wash 上升档）──────── */
+
+/* 编辑中的行给出底色锚（配合展开井，行↔井视线不断）：唯一品牌 wash 档复用。
+   暗档 wash 上 text-3 实算 4.41 不足 4.5——mono 摘要在此语境升 text-2
+   （暗 5.07 / 浅 6.31），行内其余文字本就是 fg/text-2，达标 */
+.smon .entity-row:has(.ent-expand) > .ent-main {
+  background: var(--primary-wash);
+}
+.smon .entity-row:has(.ent-expand) > .ent-main .ent-sum {
+  color: var(--text-2);
+}
+
+/* 展开井内字段行的 R11 收紧覆盖已删：.field 的左列(168)与内距(16/24)归
+   primitives 共享层，域内不再覆盖（§R12.4「勿在域内重复覆盖」）。 */
+
+/* 卡内空态（来源为空 / 规则为空）：虚线井——「可添加」的空洞容器感。
+   内距随 R12 升一档 xl；虚线描边是容器装饰（同 EmptyState 圆盘语言，
+   纯装饰豁免对比度线），承载语义的是其上的 text-2 文案（浅 6.27 / 暗 5.55 实算）。
+   不用跨域的 .src-empty（定义在 dashboard.css，多页共用），本域自带 */
+.smon-empty {
+  padding: var(--space-xl);
+  border: 1px dashed color-mix(in srgb, var(--text-3) 45%, transparent);
+  border-radius: var(--r-ctl);
+  background: var(--card-alt);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  line-height: var(--lh-base);
+  text-align: center;
+}
+
+/* ── 开关行反馈：开 = 绿（与开关轨的 on 态同步，点/色不单用——
+   位置 + 轨色 + 文字色三重编码）。R12 品牌让位 azure 后绿仍专属 ok（运行/成功）
+   语义，非「品牌透明底上的文字」，故保留 ok-text：白底实算浅 5.02 / 暗 6.86；
+   关保持 muted，是「灰=无动作」的对比项 */
+.smon .switch[aria-checked='true'] ~ .feedback {
+  color: var(--ok-text);
+}
+
+/* 匹配模式单选卡组（.radios-card）跨域定义唯一收 primitives.css（R12.3 裁决 1，
+   本域 62-99 行区已复核：无残留副本，仅剩本注释）；四态（hover/选中/焦点环上卡）
+   由 primitives 承担，MatchModeCard 只挂类 */
+
+/* ── 滑杆行（置信度/相似阈值）：原 inline 样式归 token 类 ───────── */
+.input-range {
+  flex: 1 1 200px; /* R12 放宽：滑杆底宽 160→200，拖拽行程更从容 */
+  min-width: 200px;
+  accent-color: var(--color-primary);
+}
+/* 阈值读数：mono + 定宽右对齐——拖动时数字列不跳动（输入反馈稳定性） */
+.smon .input-row .feedback.num {
+  flex: none;
+  min-width: 4ch;
+  text-align: right;
+}
+
+/* 同上再设内容下限（来源名长的下拉，匹配测试台）：防窄到读不全，随放宽档升 200 */
+.input-row .input.input-auto-min {
+  width: auto;
+  min-width: 200px;
+}
+
+/* ── 纵向堆叠容器（测试台结果列）：块间距随「大气」升一档 md→lg ── */
+.stack-y {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+/* ── 匹配测试台：命中结果视觉（用户判断规则好坏的地方）───────────
+   本域自带阶段行语言（.mt-stage），不再借用 dashboard 的 .hit 行——
+   那些类的 owner 是 dashboard 域，借用会让本域观感受别域重构牵制。 */
+
+/* 结论横幅：tone 三档族（点/图标 + 文字 + 弱底）+ 左 3px 条 + 40% 同族描边
+   （描边配方为简报标准件，装饰档；语义由点+字+底三重承载）；14/600 一档响度。
+   R12 深度语言：去 R11 内凹 inset，改 shadow-md 柔和扩散 + edge-top——横幅在
+   控件列上「漂浮」，与卡头的浅头带、保存栏托盘同一套 elevation 语系；
+   内距/间隙随放宽升档 */
+.mt-verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: var(--space-lg) var(--space-xl);
+  border: 1px solid color-mix(in srgb, var(--tone, var(--text-3)) 40%, transparent);
+  border-left: 3px solid var(--tone, var(--text-3));
+  border-radius: var(--r-ctl);
+  background: var(--tone-bg, var(--mute-chip));
+  color: var(--tone-text, var(--text-2));
+  font-size: var(--fs-14);
+  font-weight: 600;
+  line-height: var(--lh-base);
+  box-shadow: var(--shadow-md), var(--edge-top);
+  animation: fade-in var(--t-base) var(--ease-out);
+}
+.mt-verdict svg {
+  flex: none;
+}
+.mt-verdict.ok {
+  --tone: var(--ok);
+  --tone-bg: var(--ok-chip);
+  --tone-text: var(--ok-text);
+}
+.mt-verdict.err {
+  --tone: var(--err);
+  --tone-bg: var(--err-chip);
+  --tone-text: var(--err-text);
+}
+
+/* 阶段行列表：外壳复用共享 .entity-list（描边 + r-ctl 井）；
+   行 = 序号 · 结论符号 · 阶段名 · 详情。R12 行距升档：min-height 44、
+   内距与列距各上一档（sm/md→md/lg） */
+.mt-stage {
+  counter-increment: mt-stage;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-md) var(--space-lg);
+  min-height: 44px;
+  padding: var(--space-md) var(--space-lg);
+  transition: background-color var(--t-fast) var(--ease-std);
+}
+.mt-stage + .mt-stage {
+  border-top: 1px solid var(--line);
+}
+/* 行 hover wash（唯一品牌透明底档）——只走颜色不移位 */
+.mt-stage:hover {
+  background: var(--primary-wash);
+}
+/* 暗档 wash 上 text-3 实算 4.41<4.5：hover 时序号升 text-2（暗 5.07 / 浅 6.31），
+   顺带即「hover 提亮一档」的颜色反馈，不加第二套语言 */
+.mt-stage:hover::before {
+  color: var(--text-2);
+}
+/* 管线序号（CSS counter，纯视觉、不进文案）：mono micro-label 正字距 */
+.mt-stage::before {
+  content: counter(mt-stage);
+  flex: none;
+  width: 18px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--text-3);
+  text-align: center;
+}
+/* 结论符号列：定宽对齐；色走文字档（浅底小字禁点档，§1.4 陷阱继承） */
+.mt-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+}
+.mt-mark.ok {
+  color: var(--ok-text);
+}
+.mt-mark.err {
+  color: var(--err-text);
+}
+.mt-mark.muted {
+  color: var(--text-3);
+}
+/* 阶段名徽标：定宽 chip——详情列各行左缘对齐，竖向扫读判定链；内距升一档 */
+.mt-stage-label {
+  flex: none;
+  min-width: 80px;
+  padding: 0 var(--space-md);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  text-align: center;
+  white-space: nowrap;
+}
+/* 判定详情：本卡的核心信息（为什么过/为什么拦）——属正文不属元信息，
+   R12 随「正文舒适」由 12 升 13 档，完整换行展示不截断 */
+.mt-detail {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: var(--fs-13);
+  color: var(--text-2);
+  line-height: var(--lh-base);
+  overflow-wrap: anywhere;
+}
+
+/* 评估中占位（仅首跑无旧结果时出现；busy 钮 + pending 文案之外补布局稳定）：
+   3 行一次性淡扫骨架，行高与升档后的 .mt-stage(44) 对齐防跳动
+   （reduced-motion 由全局规则直渲终态） */
+.mt-running {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.mt-skel {
+  height: 44px;
+  border-radius: var(--r-ctl);
+  background: linear-gradient(
+    100deg,
+    var(--card-alt) 32%,
+    color-mix(in srgb, var(--text-3) 12%, var(--card-alt)) 50%,
+    var(--card-alt) 68%
+  );
+  background-size: 200% 100%;
+  animation: skel-sweep 900ms var(--ease-out) 1;
+}

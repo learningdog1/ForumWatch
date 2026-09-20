@@ -1,0 +1,106 @@
+/* 基础层（R12 霁蓝平台）：reset / body 排版 / 全局焦点环 / 滚动条 / sr-only /
+   reduced-motion。令牌见 theme.css；组件零硬编码色值（一切实底色块文字走
+   --color-on-primary/--on-danger）。R12：亮轨取代墨轨——侧栏不再反色，
+   body/输入/浮层令牌统一自适应两套表面。 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-13);
+  line-height: var(--lh-base);
+  /* 排版纪律：全局等宽数字（时间戳/计数/倒计时对齐）；时间戳/日志另走 --font-mono */
+  font-feature-settings: 'tnum' 1;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* 输入类控件允许选中复制（日志/标题同理按元素放开） */
+input,
+textarea,
+.logview,
+.hit-title {
+  user-select: text;
+}
+
+/* 微交互：键盘焦点环常显（纪律继承：2px 环 offset 2px，浅 #1D4ED8 / 暗 #7FB2F8
+   ——即 var(--ring) 两模式实测 ≥6:1；输入类控件有自己的 focus 样式不叠加。
+   R12：亮轨不再需要反色焦点环，.sidebar 覆盖移除——rail-bar 与 ring 同相位） */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.input:focus-visible,
+.tags:focus-within {
+  outline: none;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-3) 65%, transparent);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 视觉隐藏的读屏活动区（重复词 aria-live 播报等；不占版面不抢焦点） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* 动效可关闭：一次性动画直接渲染终态、过渡转瞬移（验收 §8-A） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── 全局共享 hook（收尾归属裁决，R11）──────────────────────────
+   fade-in：跨文件一次性入场关键帧，共享层唯一定义（primitives .ent-expand、
+   dashboard、events、settings-core/monitor/notify 均在引）。原定义散在
+   dashboard.css——按「共享件归 base」迁入，内容逐字未动。 */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* .num：数字/计数/时间戳等宽 hook（简报 §1.5 / §4-5「mono 栈」纪律）。
+   约 38 处组件在引而全局定义散失（settings-monitor/notify 仅有域内副本），
+   收编为全局唯一后删除域内副本；上下文换色（如 .log-chip .num）留领域文件 */
+.num {
+  font-family: var(--font-mono);
+}

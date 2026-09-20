@@ -1,0 +1,193 @@
+/* ── 应用外壳（R12「霁蓝平台」§R12.2）：亮轨侧栏 + pill 导航 + 内容限宽居中 ──
+   侧栏翻亮：--rail-* 两模式与内容同向（浅=白面亮于窗底一档；暗=深灰蓝比内容
+   更深一档），「恒深墨轨」概念作废。轨内文字仍只走 rail 族色（两模式各自定义）。
+   导航选中语言 = wash pill 底 + 600 字 + 品牌色图标——左 3px 竖条语言专属数据行
+   （primitives .row-selected），两套语言分家。内容列以 --content-max 限宽居中，
+   宽窗不吃灰、窄窗保 24px 呼吸。 */
+
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  flex: none;
+  width: 216px; /* R12 大气档：184→216，nav 文案与图标砖留呼吸 */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-xl) var(--space-lg) var(--space-lg);
+  background: var(--rail-bg);
+  border-right: 1px solid var(--rail-line);
+}
+
+/* brand 区：图标砖 + 名称/副标。砖底用轨内 wash 档，图标走品牌图形色（≥3:1） */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: 2px var(--space-md) var(--space-xl);
+  margin-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--rail-line);
+}
+
+.brand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-ctl);
+  background: var(--rail-active-bg); /* pill 同款 wash 底 */
+  color: var(--rail-bar);
+  box-shadow: var(--shadow-sm);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: var(--lh-tight);
+  min-width: 0;
+}
+
+/* brand-name 16/600（700 只留给三处 display 位的纪律不变） */
+.brand-name {
+  font-weight: 600;
+  font-size: var(--fs-16);
+  letter-spacing: var(--ls-display);
+  color: var(--rail-fg);
+}
+
+.brand-sub {
+  font-size: var(--fs-12);
+  color: var(--rail-fg-2);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* 查看区 / 设置区的唯一分隔线 */
+.nav-sep {
+  margin: var(--space-md) var(--space-md);
+  border-top: 1px solid var(--rail-line);
+}
+
+/* 行高 44px 红线；R12 pill 语言：正文 14/500，hover 亮面，active wash 底 +
+   600 字 + 品牌色图标（不再有左竖条——那是数据行语言） */
+.nav-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  width: 100%;
+  min-height: var(--hit);
+  padding: 9px var(--space-lg);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--rail-fg-2);
+  font: inherit;
+  font-size: var(--fs-14);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.nav-btn svg {
+  flex: none;
+  transition: color var(--t-fast) var(--ease-std);
+}
+.nav-btn:hover {
+  background: var(--rail-hover);
+  color: var(--rail-fg);
+}
+.nav-btn:active {
+  background: var(--rail-press);
+}
+.nav-btn.active {
+  background: var(--rail-active-bg);
+  color: var(--rail-fg);
+  font-weight: 600;
+}
+.nav-btn.active svg {
+  color: var(--rail-bar);
+}
+
+/* dirty 圆点（裁决 3：未保存=中间态，两模式统一琥珀 --warn 档禁红） */
+.dirty-dot {
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-lg) var(--space-md) 2px;
+  border-top: 1px solid var(--rail-line);
+  color: var(--rail-fg-2);
+  font-size: var(--fs-12);
+  cursor: default;
+}
+.sidebar-foot-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 轨内 tone 点走 --rail-tone-*（R12 值=当模式点档，浅轨用浅档——「恒暗档」纪律
+   随墨轨一起作废；点+文字同现语义不动） */
+.sidebar .tone-running,
+.sidebar .tone-ok {
+  --tone: var(--rail-tone-ok);
+}
+.sidebar .tone-paused {
+  --tone: var(--rail-fg-2);
+}
+.sidebar .tone-backoff {
+  --tone: var(--rail-tone-warn);
+}
+.sidebar .tone-challenged {
+  --tone: var(--rail-tone-err);
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* keep-alive 宿主：五查看页常驻挂载、hidden 切换（筛选/滚动状态保持）。
+   [hidden] 显式压过任何 display，防 flex 布局盖掉 hidden 语义 */
+[hidden] {
+  display: none !important;
+}
+.page-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 内容限宽居中（§R12.2-3）：左右 padding = max(24, (容器宽-1200)/2)，
+   顶 24 / 底 48——页面标题带与页底都有从容呼吸 */
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2xl) max(var(--space-2xl), calc((100% - var(--content-max)) / 2))
+    var(--space-4xl);
+}

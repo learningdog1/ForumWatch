@@ -289,7 +289,10 @@ export class DesktopRuntime {
       provider: this.aiProvider,
       getFeedbackExamples: () => this.feedbackStore.recentForPrompt()
     })
-    const commentaryGenerator = new CommentGenerator({ provider: this.aiProvider })
+    const commentaryGenerator = new CommentGenerator({
+      provider: this.aiProvider,
+      logWarn: (msg) => this.logger.warn(msg)
+    })
     const hitsStore = new HitsStore(join(this.userDataDir, HITS_DIR_NAME))
     // R5-P2c：测试台 handler（ipc.ts match:test）复用这两个实例，升为只读字段
     this.semanticEvaluator = evaluator

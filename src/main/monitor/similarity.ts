@@ -78,8 +78,39 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
   return intersection / (a.size + b.size - intersection)
 }
 
+/** 相似判定的命中明细（findSimilarTo 的返回值）：窗口条目 + 相似度 */
+export interface SimilarityMatch {
+  /** 相似的窗口条目标题（调用方传入的形态——引擎/测试台均传归一化标题） */
+  title: string
+  /** Jaccard 相似度（0-1，>= threshold 才返回） */
+  score: number
+}
+
+/**
+ * isSimilarToAny 的带明细版（观测面用）：返回首个满足 `>= threshold` 的窗口条目
+ * （归一化标题 + 相似度），无相似返回 null。契约与 isSimilarToAny 完全一致
+ * （短标题守卫双向、遍历序 = 入参序、首个命中即返回），引擎/测试台据此向用户
+ * 展示"和哪条已推标题相似、相似度多少"。
+ */
+export function findSimilarTo(
+  title: string,
+  recentTitles: string[],
+  threshold: number
+): SimilarityMatch | null {
+  const normalized = normalizeTitle(title)
+  if (normalized.length < SHORT_TITLE_GUARD) return null
+  const target = trigrams(normalized)
+  for (const recent of recentTitles) {
+    if (recent.length < SHORT_TITLE_GUARD) continue
+    const score = jaccard(target, trigrams(recent))
+    if (score >= threshold) return { title: recent, score }
+  }
+  return null
+}
+
 /**
  * 判定 title 是否与"近期已推"窗口里的任一标题相似（相似 → 引擎放弃推送、入 seen）。
+ * 实现为 findSimilarTo 的布尔投影（单一判定口径，防双重归一漂移）。
  *
  * 契约（重要，防双重归一口径漂移）：
  * - `title` 传**原始标题**，函数内部自行 normalizeTitle；
@@ -97,12 +128,5 @@ export function isSimilarToAny(
   recentTitles: string[],
   threshold: number
 ): boolean {
-  const normalized = normalizeTitle(title)
-  if (normalized.length < SHORT_TITLE_GUARD) return false
-  const target = trigrams(normalized)
-  for (const recent of recentTitles) {
-    if (recent.length < SHORT_TITLE_GUARD) continue
-    if (jaccard(target, trigrams(recent)) >= threshold) return true
-  }
-  return false
+  return findSimilarTo(title, recentTitles, threshold) !== null
 }

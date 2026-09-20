@@ -1,0 +1,891 @@
+/* ── 监控台域（R12「霁蓝平台」§R12.4 dashboard 落位）─────────────────
+   页题 26 ↔ 元信息 12 ↔ KPI 32 三级响度差 = R12 核心对比；状态带是全屏视觉
+   锚（state-pill 16/600 tone 文字档 + 四格 32/700 mono 井格）。零硬编码色值；
+   一切实底色块文字走 --color-on-primary。
+   注意共享面：.metrics/.metric、.hit/.hit-*、.log-chip(s)、.live-pill、
+   .ex-actions 覆盖被 History / Dispositions / MatchTestCard /
+   ChannelsCard 复用——语义不动，只按 R12 换档。
+   （.src-badge、@keyframes fade-in、选中行语言 .row-selected 均已升共享层
+   primitives.css / base.css。） */
+
+/* R12 限宽裁决：旧页内 920px 上限废除。内容带宽度统一交给 shell `.page` 的
+   --content-max 1200px 居中限宽（padding-inline 算法），域内不再二次收口——
+   920 叠在 1200 之内会让宽窗吃灰，违背「大气」；KPI 四格 / 命中行 / 日志面
+   本就按吃宽设计，1200 带内自然呼吸。窄窗仍有 24px 保底。 */
+.page-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  width: 100%;
+}
+/* 监控台视口高三段布局（dashboard.md §1.3）：页头/状态带自然高，命中与日志
+   按 1.4 : 1 吃剩余高、各自内滚；高度不足时 C/D 落到 min-height，整页自然
+   回退滚动（<640px 场景由同一机制兜底，不设专门断点） */
+.page-dashboard .card-hits {
+  flex: 1.4;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+.page-dashboard .card-logs {
+  flex: 1;
+  min-height: 180px;
+}
+/* 命中列表内滚区（取代 .card-scroll 的 280px 嵌套滚动） */
+.hit-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ── 状态卡（Zone B）────────────────────────────────────────────── */
+
+.statuscard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  /* R12：与卡头/井格统一 24px 横向节奏 */
+  padding: var(--space-2xl) var(--space-2xl) var(--space-xs);
+}
+
+/* 语气色通过自定义属性下发：tone-* 定义 --tone(点/描边) / --tone-bg(弱底) /
+   --tone-text(文字档)。文字走 *-text 加深档——点色档浅底小字不达标
+   （TASTE-UPGRADE §A-1，与 .outcome/.livebadge 既有范式对齐）。
+   侧栏迷你状态的轨内 tone 覆盖见 shell.css（--rail-tone-* 亮轨档，更高特指度，
+   勿在此改动；R11「恒深墨轨暗档」概念已随 R12 翻亮作废）。 */
+.tone-running,
+.tone-ok {
+  --tone: var(--ok);
+  --tone-bg: var(--ok-chip);
+  --tone-text: var(--ok-text);
+}
+.tone-paused {
+  --tone: var(--text-2);
+  --tone-bg: var(--mute-chip);
+  --tone-text: var(--text-2);
+}
+.tone-backoff {
+  --tone: var(--warn);
+  --tone-bg: var(--warn-chip);
+  --tone-text: var(--warn-text);
+}
+.tone-challenged {
+  --tone: var(--err);
+  --tone-bg: var(--err-chip);
+  --tone-text: var(--err-text);
+}
+
+/* 当前状态徽标 = 状态带响度锚：16/600（R12.4 保档）+ tone 文字档/弱底 + 唯一 pill 档；
+   内距随 R12 大气档放宽 */
+.state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-2xl) var(--space-md) var(--space-xl);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  color: var(--tone-text, var(--text-2));
+  background: var(--tone-bg, var(--mute-chip));
+}
+
+/* 状态点 9→10px（§1.5 lh-chip 配套档）；外圈同族柔光（装饰豁免对比度） */
+.dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tone, var(--text-3));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone, var(--text-3)) 22%, transparent);
+}
+/* 无限循环动效红线（§4-8）：运行态不给呼吸动画，实时感由 32px 秒级跳动的
+   倒计时 KPI 与实底 live-pill 承载，点色相+文字承担状态。
+   running 态点大一档 + 柔光加重：静态的「活着」表达。 */
+.dot.live {
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone, var(--ok)) 26%, transparent);
+}
+
+/* 四格指标：R12 的 KPI display 位——数值 32/700 mono（R12.4 由 28 升 32；
+   全应用三处 700 之一），井格 = 缝隙/边框 --line、井底 --card-alt、圆角 --r-ctl。
+   .metrics 同时服务历史页 Z1 统计画像（同档）。 */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: var(--space-lg) var(--space-2xl) 0;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
+}
+@media (max-width: 720px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.metric {
+  background: var(--card-alt);
+  padding: var(--space-lg) var(--space-2xl);
+  min-width: 0;
+}
+/* 下次轮询倒计时格：品牌 wash 底把「下一秒」顶出来（实时感一眼可见；
+   fg 在浅 wash 底实算 14.47:1 / 暗 wash ≥9，R12 §品牌表已复测） */
+.metric.live {
+  background: var(--primary-wash);
+}
+.metric .k {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.metric .v {
+  margin-top: var(--space-xs);
+  /* KPI 大数字：32/700 mono display（R12.4 升档；
+     「页题 26 ↔ 元信息 12 ↔ KPI 32」三级响度差的核心一档） */
+  font-family: var(--font-mono);
+  font-size: var(--fs-32);
+  font-weight: 700;
+  line-height: var(--lh-display);
+  letter-spacing: var(--ls-display);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.metric.warn .v {
+  color: var(--warn-text);
+}
+.metric.err .v {
+  color: var(--err-text);
+}
+
+/* 状态卡内嵌：来源状态 + AI 运行态（两列，窄窗折一列；720px 档见 events.css
+   对 .substatus 的既有媒体查询）——与四格同井格语言（§2.3） */
+.substatus {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  margin: var(--space-lg) var(--space-2xl) 0;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
+}
+.subblock {
+  background: var(--card-alt);
+  padding: var(--space-lg) var(--space-xl);
+  min-width: 0;
+}
+.subblock-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--space-sm);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-3);
+}
+.subblock-title svg {
+  flex: none;
+}
+/* AI 子块图标走 ai 文字档（紫=AI 语义映射；图标即点档图形 ≥3:1） */
+.subblock-title.ai svg {
+  color: var(--ai-text);
+}
+/* 子块标题 aux：全局被拦等最差态的解释位（右侧对齐，不抢标题） */
+.subblock-aux {
+  margin-left: auto;
+  font-size: var(--fs-12);
+  font-weight: 400;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 来源行：健康点 · 名称 · 健康 · 退避倒计时 · 最近成功（时间 mono 右收） */
+.src-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-md);
+  padding: var(--space-xs) 0;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+.src-dot {
+  flex: none;
+  display: inline-flex;
+  color: var(--tone, var(--text-3));
+}
+.src-name {
+  font-weight: 500;
+  color: var(--fg);
+}
+/* 健康文案：点档（--tone）作 12px 文字浅底不达标（ok 点档 2.93:1），
+   走文字档 --tone-text（ok 4.46 / warn 6.31 / err 5.85），与 state-pill 同范式
+   （点色归点、文字色归文字；色不单由——行首 .src-dot 仍以 --tone 呈现） */
+.src-health {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--tone-text, var(--text-2));
+  font-weight: 600;
+}
+.src-last {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.src-empty {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* AI 块：生效模式徽标 · 今日调用 · 锐评子限额 · 降级提示 · 最近错误 */
+.ai-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+/* 两行计数（今日调用 / 锐评）堆叠时的行距 */
+.ai-row + .ai-row {
+  margin-top: var(--space-sm);
+}
+/* 模式徽标 = chip 三型之 outcome 档（弱底 + tone-text + 40% 描边，§2.4） */
+.ai-mode {
+  flex: none;
+  padding: 0 var(--space-md);
+  border-radius: var(--r-pill);
+  line-height: var(--lh-chip);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  font-weight: 500;
+  border: 1px solid color-mix(in srgb, var(--text-3) 40%, transparent);
+}
+.ai-mode.ai {
+  background: var(--ai-chip);
+  border-color: color-mix(in srgb, var(--ai) 40%, transparent);
+  color: var(--ai-text);
+}
+.ai-calls {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+/* 降级提示统一琥珀弱警示（未配置 / 配额耗尽都是"降级"信号） */
+.ai-degraded {
+  margin-top: var(--space-sm);
+  font-size: var(--fs-12);
+  color: var(--warn-text);
+}
+.ai-err {
+  margin-top: var(--space-sm);
+  font-size: var(--fs-12);
+  color: var(--err-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+/* 挂起行（并入状态卡，audit #6）：主句 + 常显短说明 + 详情展开。
+   R12 档：warn 弱底 + 左 3px --warn 条（琥珀=中间态语义，点+文字同现）；
+   外缘随状态卡 24px 节奏。 */
+.pending-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin: var(--space-lg) var(--space-2xl) 0;
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  box-shadow: inset 3px 0 0 var(--warn);
+  color: var(--warn-text);
+  font-size: var(--fs-13);
+  flex-wrap: wrap;
+}
+.pending-row svg {
+  flex: none;
+}
+.pending-main {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pending-note {
+  min-width: 0;
+  font-size: var(--fs-13);
+}
+.pending-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-left: auto;
+  border: 0;
+  padding: var(--space-sm) var(--space-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+  transition:
+    color var(--t-fast) var(--ease-std),
+    text-decoration-style var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（TASTE-UPGRADE §C-6）：语境继承色（琥珀）的加深档 = var(--fg)，
+   下划线转实线——与 .hit-title 同方向，禁 opacity 变淡 */
+.pending-toggle:hover {
+  color: var(--fg);
+  text-decoration-style: solid;
+}
+/* 展开箭头随 aria-expanded 旋转（glide 档；与 .stat-detail-toggle 同款） */
+.pending-toggle svg {
+  flex: none;
+  transition: transform var(--t-glide) var(--ease-out);
+}
+.pending-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+.pending-detail {
+  margin: var(--space-sm) var(--space-2xl) 0;
+  padding: 0 var(--space-lg) var(--space-md);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  line-height: var(--lh-read);
+  animation: fade-in var(--t-glide) var(--ease-out);
+}
+
+/* 操作条：状态卡底部整行右对齐（结构不动，只换档：分隔 --line、内距随 24px 节奏） */
+.subactions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  background: transparent;
+  padding: var(--space-lg) var(--space-2xl);
+  margin-top: var(--space-lg);
+  border-top: 1px solid var(--line);
+}
+
+/* 最近错误：err 弱底一行 + 左 3px err 条（与挂起行同「左条」告警语言） */
+.lasterr {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: var(--space-lg) var(--space-2xl) 0;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--r-ctl);
+  background: var(--err-chip);
+  box-shadow: inset 3px 0 0 var(--err);
+  color: var(--err-text);
+  font-size: var(--fs-12);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lasterr svg {
+  flex: none;
+}
+
+/* ── 最近命中（Zone C）──────────────────────────────────────────── */
+
+@keyframes hit-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* fade-in 已迁 base.css（共享层唯一定义，禁在领域文件重定义） */
+
+/* 命中行（§2.6 行语言 · R12.4 行距升一档）：分隔 --line；hover --primary-wash
+   （不移位，只换底色）；min-height 52→56、横向内距对齐 24px 节奏。
+   选中行语言不在本文件——统一走 primitives 的 .row-selected（R12.3 裁决 2，
+   HitRow 已随 selected 挂类）。入场 stagger 240ms ≤8 行（一次性动画，
+   reduced-motion 全局兜底）。 */
+.hit {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-md);
+  min-height: 56px;
+  padding: var(--space-md) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+  transition: background-color var(--t-fast) var(--ease-std);
+  animation: hit-in 240ms var(--ease-out) backwards;
+}
+.hit:hover {
+  background: var(--primary-wash);
+}
+.hit:nth-child(2) {
+  animation-delay: 28ms;
+}
+.hit:nth-child(3) {
+  animation-delay: 56ms;
+}
+.hit:nth-child(4) {
+  animation-delay: 84ms;
+}
+.hit:nth-child(5) {
+  animation-delay: 112ms;
+}
+.hit:nth-child(6) {
+  animation-delay: 140ms;
+}
+.hit:nth-child(7) {
+  animation-delay: 168ms;
+}
+.hit:nth-child(n + 8) {
+  animation-delay: 196ms;
+}
+.hit:last-child {
+  border-bottom: 0;
+}
+/* 行首结论符号列（匹配测试台的阶段行）：定宽对齐后面的阶段徽标；
+   §C-2 换内联 SVG 后以 flex 居中（不再依赖字符基线） */
+.hit-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  width: 14px;
+}
+/* 修遗留③（R12.3 裁决 2）：原 .hit.selected 的 wash 底 + 左 3px 主色条 + ring
+   内衬自定义语言已删除——选中行统一语言 .row-selected 定义在 primitives.css，
+   HitRow 在 selected 时挂「hit selected row-selected」，行为钩子（selected
+   prop / data-hit-index roving）不变。此处仅留 hover 语境（.hit:hover 上行）。 */
+
+/* 时间戳列：mono 12 · --text-3 · 右对齐（§2.6 数字列对齐口径） */
+.hit time {
+  flex: none;
+  width: 60px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  text-align: right;
+}
+/* 宽时间列（历史页跨日视图 'MM-DD HH:mm'） */
+.hit time.wide {
+  width: 96px;
+}
+
+/* .src-badge 已升 primitives.css（跨域共享类，收尾归属裁决） */
+
+.hit .cat {
+  flex: none;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  padding: 0 var(--space-md);
+  line-height: var(--lh-chip);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+}
+
+.hit-title {
+  flex: 1 1 220px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  /* 命中标题 14/500 正文级（§3.1）；点状下划线 + cursor + title 三重表可点，
+     标题不用品牌色常显（fg 常显、下划线示意可点），hover/焦点才转
+     --primary-text + 实线（R12 交接备忘：品牌透明底上的文字从旧 ok-text 改用
+     primary-text——浅 wash 上 6.02 / 暗 wash 上 ≥4.5，绿只留 ok 语义） */
+  font-size: var(--fs-14);
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  text-decoration: underline dotted var(--text-3);
+  text-underline-offset: 3px;
+  transition:
+    color var(--t-fast) var(--ease-std),
+    text-decoration-style var(--t-fast) var(--ease-std);
+}
+.hit-title:hover,
+.hit-title:focus-visible {
+  color: var(--primary-text); /* 行 hover 即品牌 wash 底——wash 上强调文字统一 primary-text */
+  text-decoration-style: solid;
+}
+
+/* 命中方式区：方式徽标 +（字面）命中词 chips /（语义）AI 理由 */
+.hit-how {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+}
+.how-badge {
+  flex: none;
+  font-size: var(--fs-12);
+  padding: 0 var(--space-md);
+  line-height: var(--lh-chip);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  border: 1px solid color-mix(in srgb, var(--text-3) 40%, transparent);
+}
+.hit-how.semantic .how-badge {
+  background: var(--ai-chip);
+  color: var(--ai-text);
+  border-color: color-mix(in srgb, var(--ai) 40%, transparent);
+}
+/* 规则徽标（R5-P2c）：ok 绿 chip 档——收敛 HitList/History 的两处内联复刻 */
+.hit-how.rule .how-badge {
+  background: var(--ok-chip);
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.ai-reason {
+  min-width: 0;
+  font-size: var(--fs-12);
+  font-style: italic;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 锐评行（HitRow）：SVG 气泡 + 斜体小字（替换 💬 emoji 前缀） */
+.commentary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: var(--fs-12);
+  font-style: italic;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.commentary svg {
+  flex: none;
+}
+
+.push {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: var(--fs-12);
+  white-space: nowrap;
+}
+.push svg {
+  flex: none;
+}
+.push.ok {
+  color: var(--ok-text);
+}
+.push.err {
+  color: var(--err-text);
+  cursor: help;
+}
+.push.muted {
+  color: var(--text-3);
+  cursor: help;
+}
+/* ✗ 推送失败深链按钮（阶段 2 接去向页搜索）：与 span 同观感，点状下划线示意可点；
+   hover 加深档（§C-6 同 pending-toggle/hit-title 方向） */
+button.push-fail {
+  border: 0;
+  padding: var(--space-sm) 0;
+  min-height: var(--hit);
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  transition: text-decoration-style var(--t-fast) var(--ease-std);
+}
+button.push-fail:hover {
+  text-decoration-style: solid;
+}
+
+/* 投票按钮（HitRow 共用）：44px 可点目标；hover wash（§3.1），三态高亮全走 token */
+.vote-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: none;
+  margin-left: var(--space-sm);
+}
+.vote-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--hit);
+  height: var(--hit);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.vote-btn:hover {
+  background: var(--primary-wash);
+  color: var(--fg);
+}
+.vote-btn:active {
+  background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+.vote-btn.up.on {
+  background: var(--ok-chip);
+  color: var(--ok-text);
+}
+.vote-btn.down.on {
+  background: var(--err-chip);
+  color: var(--err-text);
+}
+
+/* 「+N 条新命中」活列表角标（ia §5.1 + §2.7）：R11 升 primary 实底强提醒——
+   底 --btn-primary-bg、字 --color-on-primary（禁硬编码白）、hover 提亮一档、
+   active 按压反馈走阴影不走路移；role=status 语义不动。
+   稳定槽位（检索：badge 插入不得推挤卡头内容）：卡头定高见 .card-hits .card-head。 */
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+  min-height: var(--hit);
+  padding: 0 var(--space-xl);
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--btn-primary-bg);
+  color: var(--color-on-primary);
+  box-shadow: var(--shadow-sm);
+  font: inherit;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  animation: fade-in 160ms var(--ease-out);
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std),
+    box-shadow var(--t-fast) var(--ease-std);
+}
+.live-pill:hover {
+  background: var(--hover-primary-bg);
+  color: var(--hover-primary-fg);
+  box-shadow: var(--shadow-md);
+}
+.live-pill:active {
+  transform: translateY(0.5px);
+  box-shadow: none;
+}
+/* 角标内的 live 点：实底反色圆点（色对即按钮文字对，R12 --color-on-primary
+   实算浅 6.70 / 暗 7.06） */
+.live-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-on-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-on-primary) 35%, transparent);
+}
+
+/* ── 运行日志（Zone D）──────────────────────────────────────────── */
+
+/* 日志面 = card-alt 井（§3.1）：mono 12 行 + 内凹阴影，与卡面拉开一档；
+   R12 井外距随状态卡/命中 24px 节奏升一档 */
+.logview {
+  min-height: 140px;
+  margin: 0 var(--space-lg) var(--space-lg);
+  padding: var(--space-lg) var(--space-xl);
+  overflow-y: auto;
+  background: var(--card-alt);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  box-shadow: var(--inset-field);
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  line-height: var(--lh-read);
+}
+/* 卡头右缘给长 aux 留截断位（避免与实底角标撞行）；定高槽位防角标插入推挤内容
+   （检索 ux · Content Jumping：stable content-driven container）；
+   60→68 随 R12 卡头 12px 纵向内距 + live-pill 44 命中高（角标在场与否同高） */
+.card-hits > .card-head {
+  min-height: 68px;
+}
+.card-hits > .card-head .card-head-group {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.card-hits .card-title-aux {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 折行悬挂缩进：时间戳列对齐（时间宽 58px + 间距 8px） */
+  padding-left: 66px;
+  text-indent: -66px;
+}
+.log-line .t {
+  /* 时间戳实色：排障时间线不许透明度压字（text-3 在 card-alt 上 ≈4.97:1） */
+  color: var(--text-3);
+  margin-right: var(--space-md);
+}
+.log-line.info {
+  color: var(--text-2);
+}
+.log-line.warn {
+  color: var(--warn-text);
+}
+.log-line.error {
+  color: var(--err-text);
+  font-weight: 500;
+}
+
+.follow-paused {
+  font-size: var(--fs-12);
+  color: var(--warn-text);
+}
+
+/* ── 日志工具条（dashboard.md §3.4）：级别筛选 chips + 跟随 + 复制 ── */
+
+.log-toolbar {
+  flex-wrap: wrap;
+  gap: var(--space-md);
+}
+.log-toolbar .log-chips {
+  margin-left: auto;
+}
+.log-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+/* chips 为单选：aria-pressed + 计数 mono；选中态深底反转属「筛选控件」语言
+   （TASTE-UPGRADE §B-1，与导航 wash 族显式区隔），点+文字同现不靠色单用 */
+.log-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--hit);
+  padding: 0 var(--space-lg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--card);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+/* 级别 tone 点（§3.1「级别 chip 组走 tone 三档」）：warn/err 点档图形 ≥3:1，
+   与中文标签同现 = 色不单用 */
+.lvl-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.lvl-dot.warn {
+  background: var(--warn);
+}
+.lvl-dot.error {
+  background: var(--err);
+}
+.log-chip .num {
+  font-family: var(--font-mono);
+  color: var(--text-3);
+}
+/* 未选 chip 的 hover 中间态（TASTE-UPGRADE §C-7）：边框加深一档 + 卡内弱底，
+   状态闭环三态齐备（默认 / hover / 选中）；:not(.on) 不与选中深底反转混淆 */
+.log-chip:hover:not(.on) {
+  border-color: var(--input-border);
+  background: var(--card-alt);
+}
+/* 深底反转属「筛选控件」语言：选中态故意更强（实底反色）。tone 点需分表面：
+   浅色模式 .on 底为深 --fg #17222E，warn #B45309 / err #DC2626 点档实测
+   3.21 / 3.33（图形 ≥3，达标）；暗色模式 .on 底反为浅 --fg #E9EEF5，同值
+   提亮点档 #FBBF24/#F87171 仅 1.43 / 2.37（遗留②）——暗档下向 --bg #1E252F
+   压暗 50% 换深色点档，实算 warn 3.95 / err 5.59（图形 ≥3:1）。
+   语义仍由中文标签同现承载 */
+.log-chip.on {
+  background: var(--fg);
+  border-color: var(--fg);
+  color: var(--bg);
+}
+/* R12.7 固定浅色：本块随暗档一并停用（解除钉死时恢复原样） */
+@media (prefers-color-scheme: dark) and (max-width: 0px) {
+  .log-chip.on .lvl-dot.warn {
+    background: color-mix(in srgb, var(--warn) 50%, var(--bg));
+  }
+  .log-chip.on .lvl-dot.error {
+    background: color-mix(in srgb, var(--err) 50%, var(--bg));
+  }
+}
+.log-chip.on .num {
+  color: var(--bg); /* 选中深底上的计数：实色高对比，不压透明度 */
+}
+/* 跟随指示：实时感一眼可见——tone 点（跟随=ok 翠 / 暂停=warn 琥珀）+ 文字同现 */
+.log-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.follow-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.follow-dot.on {
+  background: var(--ok);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 22%, transparent);
+}
+.log-follow.follow-paused {
+  color: var(--warn-text);
+}
+/* 复制按钮反馈色档（LogView 工具条与 DispositionRow 展开态共用；§C-9：
+   反馈 = 图标原位互换 + 文字不变 + 色档，按钮宽度零跳动） */
+.log-copy.ok,
+.ex-actions .btn.ok {
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.log-copy.err,
+.ex-actions .btn.err {
+  color: var(--err-text);
+  border-color: color-mix(in srgb, var(--err) 55%, transparent);
+}

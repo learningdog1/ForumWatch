@@ -1,0 +1,1364 @@
+/* events 域（R12 霁蓝平台 §R12.4）：去向 / 历史命中 / 日报三页。
+   令牌见 theme.css；本文件零硬编码色值，一切实底色块文字只走
+   var(--color-on-primary) / var(--on-danger)。品牌换相 emerald→azure 后，
+   「品牌透明底（wash）上的强调文字」统一 var(--primary-text)（旧 ok-text 写法
+   清零）；700 字重在本域只授权一处：日报卡头日题 **22/700**（--fs-22，R12 由
+   20 升档，三 display 位之一）。--fs-15 引用为零（别名已删）。
+   R12 版式落点：三页不再自设 920px 限宽，吃满壳层 --content-max 1200 内容带；
+   列表行高/卡内边距按新呼吸档升一级；日报日题 22、阅读列 560→640；历史 Z1 四
+   指标 32 档（.metrics 定义在 dashboard.css 共享面，域内以页面上下文落档，见
+   §Z1 注）；roving 键盘选中行收敛为 primitives 共享规范类 .row-selected。
+   ui-ux-pro-max 落地（本域检索三题，继承）：
+   - ux「dense table row hover」→ 可点行必有 hover 反馈、数字千分位、行分隔节奏；
+   - style「data-dense dashboard / bento」→ 行 hover 高亮、sticky 头、数据加载态
+     显式；卡内边距走大圆角柔影档（16/20 起）；
+   - ux「loading feedback stale refresh」→ 加载反馈匹配等待时长（本地 IPC 首载
+     文字转圈、慢查询 >1s 才出「查询中…」、旧数据压暗不留白屏）+ 容器 aria-busy。 */
+
+/* ── 日报页（reports.md：日期栏 + 日报卡）────────────────────────── */
+
+.page-reports {
+  display: grid;
+  /* R12 呼吸档：日期栏 148→172（12 圆角行内距后日期文案不再挤） */
+  grid-template-columns: 172px minmax(0, 1fr);
+  /* 行轨两行：页头行自然高 + 内容行吃满剩余（页头契约 §B-2 补页头后加轨） */
+  grid-template-rows: auto 1fr;
+  gap: var(--space-xl);
+  align-items: stretch;
+  min-height: 100%;
+  width: 100%;
+  margin: 0 auto;
+}
+/* 页级页头横跨两列（§B-2）：日报页页题是「日报」，日期归卡头 */
+.page-reports .pagehead {
+  grid-column: 1 / -1;
+}
+
+/* Zone A · 日期栏：今天恒置顶 + 全部历史（展开后栏内自身滚动）+ 跳到日期。
+   R12：第三表面浮条（raised）+ 柔和双层阴影 + 顶缘发丝光（亮面近乎无感） */
+.report-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  background: var(--raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-sm), var(--edge-top);
+}
+.report-rail-title {
+  padding: var(--space-xs) var(--space-md) var(--space-sm);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-3);
+}
+/* 日期列表读失败（§2.6-2）：错误行替代「更早」区域的位置 */
+.report-rail > .errorbar {
+  margin: var(--space-xs) 0;
+}
+/* 展开更早后栏内滚动（独立导航列，非嵌套内容区——reports.md §4.1） */
+.report-rail-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+/* 行高 44px 红线：日期行是第三套导航，同样达标 */
+.report-date {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  min-height: var(--hit);
+  padding: 8px var(--space-md);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-13);
+  font-weight: 500; /* R12 副题也是内容：日期行 12/400 → 13/500（与主 nav 同档） */
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.report-date .label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: var(--r-pill);
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    color var(--t-base) var(--ease-std);
+}
+.report-date .sub {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.report-date:hover {
+  background: var(--primary-wash);
+  color: var(--fg);
+}
+.report-date:active {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+/* 选中态（§3.2，R12 保留该语言）：实底 --btn-primary-bg 圆片 + 字
+   --color-on-primary（azure 底实测 6.70/7.06），今日/选中一眼可辨；行底同时
+   给一档 wash 定位 */
+.report-date.active {
+  background: var(--primary-wash);
+  color: var(--color-foreground);
+  font-weight: 600;
+}
+.report-date.active .label {
+  background: var(--btn-primary-bg);
+  color: var(--color-on-primary);
+  padding: 2px var(--space-lg);
+}
+.report-date.active:hover {
+  color: var(--color-foreground);
+}
+/* 「跳到日期」选中了无日报日：临时插入行，描边区分（reports.md §4.1） */
+.report-date.noreport {
+  border: 1px dashed var(--line);
+}
+.report-rail-sep {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md) var(--space-xs);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.report-rail-more {
+  flex: none;
+  margin: var(--space-sm) var(--space-xs) 0;
+}
+.report-rail-jump {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-xs) 0;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.report-rail-jump svg {
+  flex: none;
+}
+.report-rail-jump .input {
+  min-width: 0;
+  flex: 1;
+  padding: 2px var(--space-sm);
+}
+
+/* Zone B1 · 卡头：两级标题（日题 display 档 + 元信息行）+ 操作组；
+   页面身份（h1「日报」）上提 PageHeader，日期只是「这张卡的标题」（§B-2） */
+.report-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+}
+.report-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  /* R12 内距升档：与 primitives 卡头同 12/24 呼吸 */
+  padding: var(--space-lg) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+  /* 卡头两级（§2.3）：极浅头带让卡头/卡身拉开 */
+  background: color-mix(in srgb, var(--card-alt) 60%, transparent);
+  border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0;
+}
+.report-head-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.report-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+/* 卡头日题：全应用三处 700 display 位之一（R12.4「日报日题 22/700」，由 20 升档） */
+.report-title {
+  margin: 0;
+  font-size: var(--fs-22);
+  font-weight: 700;
+  line-height: var(--lh-display);
+  letter-spacing: var(--ls-display);
+  color: var(--fg);
+}
+.report-busy {
+  flex: none;
+  color: var(--text-3);
+}
+.report-busy svg {
+  display: block;
+  animation: btn-spin 0.9s linear infinite;
+}
+.report-summary {
+  flex: none;
+  padding: 0 var(--space-md);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  white-space: nowrap;
+}
+.report-summary.muted {
+  color: var(--text-3);
+}
+.report-meta {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+/* 「可能不完整」元信息：点击滚到文末截断提示行（§5.4 完整性） */
+button.report-meta {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（§C-6）：弱化档的加深档 = fg，下划线转实线 */
+button.report-meta:hover {
+  color: var(--fg);
+  text-decoration-style: solid;
+}
+.report-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+/* 重新生成行内确认条（全应用唯一确认场景，§2.5；替换卡头元信息行显示） */
+.report-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  font-size: var(--fs-13);
+  animation: fade-in var(--t-base) var(--ease-out);
+}
+.report-confirm .esc-hint {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* 文档版活列表角标（§3.2）：一次性淡入，点击/回顶并入；glide 档；
+   常态 ok 弱底徽条（新版=成功信号），hover 收进品牌 wash 语言 */
+.report-newver {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-md) var(--space-2xl) 0;
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: var(--r-ctl);
+  background: var(--ok-chip);
+  color: var(--ok-text);
+  font: inherit;
+  font-size: var(--fs-13);
+  cursor: pointer;
+  animation: fade-in var(--t-glide) var(--ease-out);
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+/* R12：wash 底上强调文字走 --primary-text（旧 ok-text 写法作废；暗域见文末护栏） */
+.report-newver:hover {
+  background: var(--primary-wash);
+  border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+  color: var(--primary-text);
+}
+.report-newver:active {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+
+/* 生成反馈（行内三态，§2.3） */
+.report-feedback {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-2xl) 0;
+}
+.report-feedback svg {
+  flex: none;
+}
+.report-feedback .btn {
+  min-height: 28px; /* sm 档（行内反馈恢复路径） */
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+
+/* Zone B3 · 正文阅读区：滚动容器（横向留白在容器，纵向留白在 .doc——
+   让分组 chips 粘顶不透内容，reports.md §3.4-2） */
+.report-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-3xl);
+  outline: none;
+}
+.report-body > .empty {
+  padding: var(--space-3xl) 0;
+}
+
+/* 日报正文（ReportDoc 渲染）：全应用唯一「松」区（R12.4）——
+   doc 列 560→640px 更从容 · 正文 14px · 行高 1.7（检索 ux：body line-height 1.5–1.75） */
+.doc {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--space-2xl) 0 var(--space-3xl);
+  font-size: var(--fs-14);
+  line-height: var(--lh-read);
+}
+/* 小节题：字阶目标值 16（§1.5 落定），组前距拉松成「章节感」 */
+.doc-h2 {
+  margin: var(--space-3xl) 0 var(--space-md);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--fg);
+  line-height: var(--lh-tight);
+  scroll-margin-top: var(--hit); /* 分组 chip 定位时让出粘性条 */
+}
+.doc-h2:first-of-type {
+  margin-top: var(--space-xl);
+}
+.doc-h3 {
+  margin: var(--space-xl) 0 var(--space-sm);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-2);
+  line-height: var(--lh-tight);
+}
+.doc-p {
+  margin: 0 0 var(--space-lg);
+  font-size: var(--fs-14);
+  color: var(--text-2);
+  line-height: var(--lh-read);
+  text-wrap: pretty;
+}
+.doc-list {
+  margin: 0 0 var(--space-lg);
+  padding-left: var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.doc-list li {
+  font-size: var(--fs-14);
+  color: var(--text-2);
+  line-height: var(--lh-read);
+  overflow-wrap: anywhere;
+}
+/* 列表符号：品牌图形档（R12 绿让位蓝——旧 ok-text 系品牌绿残留） */
+.doc-list li::marker {
+  color: var(--color-primary);
+}
+.doc strong {
+  font-weight: 600;
+  color: var(--fg);
+}
+/* 行内代码：mono + 弱底（chip-bg 口径）+ 功能分隔描边 */
+.doc-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  background: var(--card-alt);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+/* 链接：品牌文字档 --primary-text（R12 azure，旧 ok-text 品牌绿链作废：卡底实算
+   浅 6.70 / 暗 5.57）+ 点状下划线；域名白名单在主进程裁决，被拒时正下方提示 */
+.doc-link-wrap {
+  position: relative;
+  display: inline-block;
+}
+.doc-link {
+  color: var(--primary-text);
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（§C-6 同方向）：蓝链加深至 fg + 下划线转实线 */
+.doc-link:hover {
+  color: var(--color-foreground);
+  text-decoration-style: solid;
+}
+.doc-link-hint {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 2;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  color: var(--err-text);
+}
+/* 尾注弱化（§5.3-2）：fs-12 灰 + 上边框分隔；「—— 」前缀由伪元素补回 */
+.doc-note {
+  margin-top: var(--space-2xl);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+.doc-note::before {
+  content: '—— ';
+}
+/* 模板行结构化（§3.2：同 wash 语言）：时间 mono+tnum / 分类 wash chip / 标题 / 方式灰 */
+.tpl-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+.tpl-time {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  flex: none;
+}
+.tpl-cat {
+  display: inline-block;
+  padding: 0 var(--space-lg);
+  border-radius: var(--r-pill);
+  background: var(--primary-wash);
+  color: var(--primary-text); /* R12：wash 上强调文字——旧「ok-text on 品牌绿底」写法作废 */
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  white-space: nowrap;
+  flex: none;
+}
+.tpl-title {
+  min-width: 0;
+  color: var(--fg);
+}
+.tpl-how,
+.tpl-remark {
+  color: var(--text-3);
+  font-size: var(--fs-12);
+}
+/* 分组导航 chips（块数 > 24 时，§3.4-2）：粘性一行、横向滚动 */
+.doc-chips {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: var(--space-sm);
+  overflow-x: auto;
+  padding: var(--space-sm) 0;
+  margin-bottom: var(--space-md);
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.doc-chip {
+  flex: none;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px var(--space-md);
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.doc-chip:hover {
+  background: var(--primary-wash);
+  color: var(--primary-text); /* R12：wash 底上强调文字（暗域护栏见文末） */
+}
+.doc-chip:active {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+/* 截断提示（§3.4-3）：warn 语义但非错误——中性灰 + 虚线框，附「查看该日命中明细」深链 */
+.doc-trunc {
+  margin-top: var(--space-2xl);
+  padding: var(--space-md);
+  border: 1px dashed color-mix(in srgb, var(--warn) 55%, transparent);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  font-size: var(--fs-12);
+  line-height: var(--lh-read);
+}
+.doc-trunc .disp-link {
+  min-height: 0;
+  font-size: var(--fs-12);
+  margin-left: var(--space-xs);
+  color: inherit;
+}
+/* 大数据量：屏外块跳过布局与绘制（千行模板日报滚动与百行无异，§3.4-1） */
+.cv-block {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 32px;
+}
+.cv-block-list {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 400px;
+}
+
+/* 窄窗：来源/AI 内嵌块与日报布局折行 */
+@media (max-width: 720px) {
+  .substatus {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .chart-row,
+  .rank-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .page-reports {
+    grid-template-columns: minmax(0, 1fr);
+    /* 单列堆叠后显式行轨失效，日期栏/卡片各归自然行 */
+    grid-template-rows: none;
+  }
+  .report-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .report-rail-title,
+  .report-rail-sep {
+    width: 100%;
+    border-top: 0;
+    margin: 0;
+    padding: 0 var(--space-md); /* 旧别名 --space-2 清零（同值 --space-md） */
+  }
+  .report-rail-list {
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  .report-rail-jump {
+    width: 100%;
+  }
+  .report-date {
+    width: auto;
+  }
+}
+
+/* 实时徽标：live 绿 / paused 琥珀；配「数据截至」时间，无动画。
+   tone chip 三档结构（§2.4）：弱底 + 文字 + 点，描边 tone 40% */
+.livebadge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0 var(--space-md);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.livebadge .livebadge-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.livebadge.live {
+  color: var(--ok-text);
+  background: var(--ok-chip);
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.livebadge.paused {
+  color: var(--warn-text);
+  background: var(--warn-chip);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.livebadge .asof {
+  font-weight: 400;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 落盘数据面徽标（历史日）：中性灰，不假装实时 */
+.livebadge.disk {
+  color: var(--text-2);
+  background: var(--mute-chip);
+  border: 1px solid color-mix(in srgb, var(--text-3) 30%, transparent);
+}
+
+/* ── 去向页（dispositions.md 五区骨架）──────────────────────────── */
+
+/* 页头 + 单列表卡全高（卡头 / 筛选条 / 状态条 / 滚动列表 / 分段加载条同卡；
+   工具条并入后与历史页解剖一致，§B-6 两列表页同构）。
+   R12：不再自设 920 限宽，吃满壳层 --content-max 1200 内容带 */
+.page-dispositions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  width: 100%;
+  margin: 0 auto;
+}
+.card-disp-list {
+  flex: 1;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+/* Zone D：唯一滚动区（行为按 ia §5.1 活列表规则） */
+.disp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 筛选工具条（§3.2「小控件带」语言：筛选条整体压成极浅内嵌带，chips 嵌于其上；
+   R12 控件间距走呼吸档 --space-lg） */
+.tb-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+}
+.tb-count {
+  margin-left: auto;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+/* 搜索框（带前置搜索图标；/ 键聚焦） */
+.search-box {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+.search-box svg {
+  position: absolute;
+  left: var(--space-lg);
+  color: var(--text-3);
+  pointer-events: none;
+}
+.search-box .input {
+  padding-left: 36px; /* 图标 12px @left 12 + 呼吸（--r-ctl 升 12 后 34 会压角） */
+  min-width: 0;
+  width: 100%;
+}
+/* 工具条内的定宽控件（来源下拉 / 日期；搜索框吃剩余宽） */
+.disp-source {
+  flex: none;
+  width: 132px;
+}
+.disp-date {
+  flex: none;
+  width: 164px; /* R12 呼吸档：日期输入 148→164（与 .field 左列 148→168 同思路） */
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+}
+/* 首载文字型加载态（12px muted + 旋转图标；本地 IPC 快返回，不做骨架——
+   检索 ux「loading feedback 匹配等待时长」：近即时操作不配骨架重装置） */
+.disp-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+}
+.disp-loading svg {
+  animation: btn-spin 0.9s linear infinite;
+}
+
+/* Zone C · 状态条（错误 / 并入 / 口径提示互斥栈叠；空态不占位）——
+   工具条并入列表卡后随迁卡内（筛选条与列表区之间），补卡内水平边距 */
+.disp-strip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-2xl) 0;
+}
+/* 口径提示条（选「今天」的落盘面）：warn 弱底 + 左 3px warn 条（§3.3 警示语言），
+   非错误 */
+.notebar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  border-left: 3px solid var(--warn);
+  color: var(--warn-text);
+  font-size: var(--fs-13);
+}
+.notebar .btn {
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+
+/* 跨午夜 sticky 日期分隔（实时环恒为「今天」开头，跨零点后出现；
+   检索 style「sticky headers」：粘顶带不透明底 + 发丝分隔） */
+.day-sep {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: var(--space-sm) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* 判定行（R12.3 裁决 2 行语言）：行分隔 --line；hover 唯一 wash 档；
+   R12 呼吸档——行高 44→56（与 HitRow 同尺寸）、左右内距对齐卡头 24、列间 gap
+   升 --space-lg；一次性入场走 glide 档 */
+.disp-row {
+  border-bottom: 1px solid var(--line);
+  animation: hit-in var(--t-glide) var(--ease-out);
+}
+.disp-row:last-child {
+  border-bottom: 0;
+}
+.disp-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  width: 100%;
+  min-height: 56px; /* R12 行呼吸：44 红线地板 → 56，与 HitRow 基准行同尺寸 */
+  padding: var(--space-md) var(--space-2xl);
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color var(--t-base) var(--ease-std);
+}
+.disp-row-main:hover {
+  background: var(--primary-wash);
+}
+.disp-row-main:active {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+/* 级联修复（非重复定义语言）：events 在 primitives 之后加载，上面同特指度的
+   background: transparent 会吞掉共享类 .row-selected 的 wash 底——(0,2,0) 重述
+   背景一项让规范类成立；左 3px 条 + 内衬环两笔（box-shadow）无冲突，直接继承
+   primitives。选中+按压仍归 wash（与 R11 .focused 置后行为一致）。 */
+.disp-row-main.row-selected {
+  background: var(--primary-wash);
+}
+/* 键盘选中行（roving）：原 .disp-row-main.focused 自定义语言（wash 底 + 左 3px
+   条 + 内衬 2px 环）已删除，收敛为共享规范类 .row-selected（primitives 定义，
+   DispositionRow 选中时挂类）；键盘焦点行为逻辑（roving tabindex /
+   data-disp-index / .focus()）不变 */
+.d-time {
+  flex: none;
+  width: 62px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.d-title {
+  flex: 1;
+  min-width: 120px;
+  font-size: var(--fs-14);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.d-detail {
+  flex: none;
+  max-width: 30%;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* outcome 徽标（§2.4 chip 档）：tone 弱底 + tone 文字 + tone 40% 描边 +
+   像素行高；不只靠颜色（文字承载语义），nowrap 右锚 */
+.outcome {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-md);
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.outcome.ok {
+  background: var(--ok-chip);
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.outcome.err {
+  background: var(--err-chip);
+  color: var(--err-text);
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+}
+.outcome.warn {
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.outcome.muted {
+  background: var(--mute-chip);
+  color: var(--text-2);
+  border-color: color-mix(in srgb, var(--text-3) 25%, transparent);
+}
+
+/* 展开态（§3.2）：内嵌 card-alt 井 + 装饰边 + 内阴影（与实体行展开区同语言），
+   左右缩进 24px；完整原因 + 同帖轨迹（mono + tone 点）+ 动作出口 */
+.disp-expand {
+  margin: var(--space-sm) var(--space-2xl) var(--space-lg);
+  padding: var(--space-xl);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-ctl);
+  background: var(--card-alt);
+  box-shadow: var(--inset-field);
+  animation: fade-in var(--t-glide) var(--ease-out);
+}
+.ex-row {
+  display: flex;
+  gap: var(--space-md);
+  font-size: var(--fs-13);
+  line-height: var(--lh-read);
+}
+.ex-row + .ex-row {
+  margin-top: var(--space-md);
+}
+.ex-k {
+  flex: none;
+  width: 44px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+.ex-v {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ex-detail {
+  display: block;
+}
+.ex-why {
+  display: block;
+  color: var(--text-2);
+}
+/* 轨迹（同帖多去向，正序；点击跳对应行——因果链反向可追）。
+   §3.2：时间走 mono + tone 点区分去向性质（点+文字同现，色不单用） */
+.ex-track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.track-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--hit);
+  padding: 0 var(--space-md);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--card);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  transition:
+    border-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std),
+    background-color var(--t-fast) var(--ease-std);
+}
+.track-item::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--track-tone, var(--text-3));
+}
+.track-item.ok {
+  --track-tone: var(--ok);
+}
+.track-item.err {
+  --track-tone: var(--err);
+}
+.track-item.warn {
+  --track-tone: var(--warn);
+}
+.track-item.muted {
+  --track-tone: var(--text-3);
+}
+.track-item:hover {
+  border-color: var(--input-border);
+  background: var(--primary-wash);
+  color: var(--fg);
+}
+.track-item:active {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+.track-sep {
+  color: var(--text-3);
+}
+.track-note {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.ex-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+}
+/* 「去调整」深链出口（设置锚点；设置页 dirty 时由全局 leavebar 拦截）；
+   R12：品牌文字档 --primary-text（旧 ok-text 品牌绿作废；卡/井/chip 底实算均 ≥4.5） */
+.disp-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit);
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-13);
+  color: var(--primary-text);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（§C-6）：蓝链的加深档 = var(--color-foreground)，下划线转实线
+   ——与 .hit-title 同方向 */
+.disp-link:hover {
+  color: var(--color-foreground);
+  text-decoration-style: solid;
+}
+.disp-link:active {
+  color: var(--text-2);
+}
+/* 轨迹跳转落点：一次性高亮（1.6s 后还原） */
+@keyframes disp-flash {
+  0% {
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.disp-row.flash {
+  animation: disp-flash 1.6s ease-out 1;
+}
+
+/* Zone E · 分段加载条（历史日全量数据面；不做触底自动加载） */
+.load-more-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: var(--space-md) var(--space-2xl);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.load-more-bar .btn {
+  margin-left: auto;
+}
+
+/* ── 历史命中页（history.md 三区骨架）──────────────────────────── */
+
+/* Z0+Z1+Z2 纵向栈：统计卡自然高，命中卡 card-grow 吃满剩余高（唯一滚动在
+   列表区）；高度不足由 card-grow 的 min-height 兜底自然回退整页滚动。
+   R12：不再自设 920 限宽，吃满壳层 --content-max 1200 内容带 */
+.page-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Z1 统计折叠开关（卡头右侧文字链；等效间距补偿可点目标）；
+   R12：品牌文字档 --primary-text（旧 ok-text 品牌绿作废；卡头浅带上实算 ≥4.5） */
+.stat-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  border: 0;
+  padding: var(--space-sm) var(--space-xs);
+  background: none;
+  color: var(--primary-text);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+  transition: color var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（§C-6）：蓝链的加深档 = var(--color-foreground)，下划线转实线 */
+.stat-detail-toggle:hover {
+  color: var(--color-foreground);
+  text-decoration-style: solid;
+}
+.stat-detail-toggle svg {
+  flex: none;
+  transition: transform var(--t-base) var(--ease-std);
+}
+.stat-detail-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+/* Z1 四指标 display 升档（R12.4：与监控台 KPI 同 32 档）。
+   .metrics/.metric 定义在 dashboard.css（共享面，dashboard 工程师所有）——此处
+   仅做「历史页上下文」落档：若共享面同步升 32，两处同值不冲突；升档带来源边界
+   （margin/padding 走卡头 24 内距同一列）。 */
+.page-history .metrics {
+  margin: var(--space-lg) var(--space-2xl) 0;
+}
+.page-history .metric {
+  padding: var(--space-lg) var(--space-2xl);
+}
+.page-history .metric .v {
+  /* 32/700 mono 三项写全：对共享面（dashboard.css，非本域所有）漂移免疫 */
+  font-family: var(--font-mono);
+  font-size: var(--fs-32);
+  font-weight: 700;
+}
+
+/* 趋势行：sparkbar × 方式占比 两列（R12：列距/左右内距随卡带升 24 档） */
+.chart-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-xl);
+  padding: var(--space-lg) var(--space-2xl) 0;
+}
+.chart-block {
+  min-width: 0;
+}
+.chart-block .cb-title {
+  margin-bottom: var(--space-sm);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* 14 柱 sparkbar（纯 CSS 柱，决策数据非装饰图）：44px 可点口径落在整柱
+   容器（--hit），柱高由 --h 数据变量下发（线性映射，非 token）。
+   R12.4：柱 --color-primary（白/卡底图形 ≥3 实算），hover/focus 柱加深到
+   --primary-text（旧「hover 柱 --ok-text」= 品牌绿残留，蓝让位后作废；
+   换色加深不靠 opacity 弱化图形） */
+.sparkbar {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-sm);
+  height: var(--hit);
+}
+.spark-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+}
+.spark-bar {
+  display: block;
+  height: var(--h, 2px);
+  min-height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--color-primary);
+  opacity: 0.8;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    opacity var(--t-fast) var(--ease-std);
+}
+.spark-col:hover .spark-bar,
+.spark-col:focus-visible .spark-bar {
+  background: var(--primary-text); /* R12：品牌加深档（卡底上实算 ≥5） */
+  opacity: 1;
+}
+.spark-bar.zero {
+  opacity: 0.25; /* 零命中日的空槽示意（图形弱化，非语义文字，豁免合法） */
+}
+.spark-col:hover .spark-bar.zero,
+.spark-col:focus-visible .spark-bar.zero {
+  opacity: 0.45;
+}
+.spark-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--space-xs);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* 方式占比：堆叠比例条（宽度 = 占比，--w 数据变量下发）+ 三行图例 */
+.stackbar {
+  display: flex;
+  height: 14px;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  margin: var(--space-sm) 0 var(--space-md);
+  background: var(--mute-chip);
+}
+.stack-seg {
+  display: block;
+  width: var(--w, 0%);
+  height: 100%;
+}
+.stack-seg.literal,
+.lg-dot.literal {
+  background: var(--text-3);
+}
+.stack-seg.semantic,
+.lg-dot.semantic {
+  background: var(--ai);
+}
+.stack-seg.rule,
+.lg-dot.rule {
+  background: var(--color-primary);
+}
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+.lg-dot {
+  display: inline-block;
+  width: var(--space-md);
+  height: var(--space-md);
+  border-radius: 2px;
+  margin-right: 6px;
+}
+
+/* 展开区：来源分布 Top5 × 关键词榜（折叠时整块不渲染）；
+   card-alt 内嵌井与判定行展开区同语言（R12：井缘与卡带对齐 24、井内 20） */
+.stats-detail {
+  margin: var(--space-lg) var(--space-2xl) var(--space-2xl);
+  padding: var(--space-xl);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-ctl);
+  background: var(--card-alt);
+}
+.rank-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-lg);
+}
+.rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  font-size: var(--fs-13);
+}
+.rank-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  min-height: 36px; /* R12 行呼吸 28→36（榜单行非命中行，44 红线不适用） */
+}
+.rk-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rk-bar {
+  flex: none;
+  width: var(--w, 0px);
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--color-primary);
+  opacity: 0.7;
+}
+.rk-val {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: var(--fs-12);
+}
+.rank-more {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-xs) 0;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* 零命中概要行（折叠时常显——修剪关键词的行动入口不因折叠而隐藏） */
+.zero-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  margin: var(--space-lg) var(--space-2xl) var(--space-2xl);
+  padding: var(--space-sm) 0;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+.zero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--text-3) 25%, transparent);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  line-height: var(--lh-chip);
+  white-space: nowrap;
+}
+.zero-row .disp-link {
+  margin-left: auto;
+}
+
+/* Z2 筛选工具条（两行 tb-row：日期 chips/来源/方式 + 搜索/重置）；
+   §3.2「小控件带」：极浅内嵌带与列表区拉开；R12 行距/内距随卡带升档 */
+.filter-bar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-lg) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--card-alt) 55%, transparent);
+}
+/* 列表错误条（筛在选行与列表之间）：补位卡边距（非 card 直接子级场景） */
+.card-grow > .errorbar {
+  flex: none;
+  margin: var(--space-md) var(--space-2xl) 0;
+}
+
+/* 查询中指示（>1s 才出现，卡头 aux 尾；检索 ux：加载反馈匹配等待时长）
+   + 非首载旧数据压暗（禁整屏替换；压暗是 stale 数据语义，透明度豁免继承） */
+.busy-ind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.busy-ind svg {
+  flex: none;
+  animation: btn-spin 0.9s linear infinite;
+}
+.list-dim {
+  opacity: 0.55;
+  transition: opacity var(--t-base) var(--ease-std);
+}
+
+/* 分页栏（Pager 共用组件）：前后翻 / 页码跳转 / 三档页大小 / 总数千分位 */
+.pager {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md) var(--space-lg);
+  flex-wrap: wrap;
+  padding: var(--space-lg) var(--space-2xl);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-13);
+}
+.pager .btn {
+  min-height: 28px; /* sm 档（分页是行外辅助控件带） */
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+.pager-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  white-space: nowrap;
+}
+.page-input {
+  width: 72px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-13);
+}
+.pager-size {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-left: auto;
+  white-space: nowrap;
+}
+.pager-select {
+  flex: none;
+  width: auto;
+}
+.pager-total {
+  white-space: nowrap;
+}
+
+/* 空态双动作（默认窗口空：扩大窗口 + 去配置关键词） */
+.empty-state-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+/* ── 暗域复测护栏（纪律 §4-2：color-mix 派生色对落地必复测）──────────
+   实算：--primary-text #6BA8F5 on --primary-wash（暗档 = 14% 主色透明底，落卡
+   #262E3A 上复合得 #303F54）≈ **4.35**，低于 4.5 文字线（theme 注记「≥4.5」为
+   乐观值）。本域三处「wash 底 + 强调文字」在暗模式把文字向 --fg 提亮一档
+   （60% 主文字 + 40% 前景 → #9DC4F5，实测 5.93），浅模式不动（6.02/6.30 达标）。
+   同源问题（本护栏修不了，concerns 上报地基层）：primitives 的 .chip /
+   .ent-btn.active / .quick .btn.active / .radios-card 选中题同样落在 wash 上，
+   暗档 12px 小字受同一 4.35 数学约束（.row-selected 行内文字为 --fg，达标）。
+   可选收敛：--primary-text 暗档整体提亮一档（浅档不动），一域一解。 */
+/* R12.7 固定浅色：本块随暗档一并停用（解除钉死时恢复 `and (max-width: 0px)` 前的原样） */
+@media (prefers-color-scheme: dark) and (max-width: 0px) {
+  .tpl-cat,
+  .doc-chip:hover,
+  .report-newver:hover {
+    color: color-mix(in srgb, var(--primary-text) 60%, var(--fg));
+  }
+}

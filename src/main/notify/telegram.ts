@@ -57,6 +57,13 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/** 「🎯 语义命中」行 AI 理由的长度上限（字符）：LLM 理由偶发长段，防刷屏（与处置流水 detail 上限同值） */
+const HIT_REASON_MAX_CHARS = 120
+
+function clipHitReason(s: string): string {
+  return s.length <= HIT_REASON_MAX_CHARS ? s : `${s.slice(0, HIT_REASON_MAX_CHARS - 1)}…`
+}
+
 /**
  * 命中推送文案（HTML）；标题/分类/作者/关键词/锐评均为用户（或 LLM）内容，一律过 escapeHtml。
  *
@@ -67,22 +74,37 @@ export function escapeHtml(s: string): string {
  *   'rule'——规则命中恒有 label，rules.ts 的 RuleMatch.label 已归一为 label ?? id）
  *   时「🎯 命中」行改为 `🎯 命中规则: {matchedRule}`（转义后）；null / undefined /
  *   空串（= literal/semantic 命中）时保持 `🎯 命中: {keywords}` 原样。
+ * @param semanticReason 语义命中的 AI 判定理由（可选）：matchedKeywords 为空且理由
+ *   非空时「🎯 命中」行改为 `🎯 语义命中: {semanticReason}`（截 HIT_REASON_MAX_CHARS
+ *   后转义；与 bark/ntfy 的 `· 语义命中: {理由}` 同口径）——语义推送不再出现空白的
+ *   「🎯 命中: 」行。理由缺失（AI 未给）时仅显示 `🎯 语义命中`。
+ *
+ * 摘要行（topic.excerpt，RSS/V2EX 来源提供）：非空字符串时在标题行之后插
+ * `📄 {excerpt}`（转义后）。动机：链接预览卡片由 Telegram 服务端抓取目标页生成，
+ * 抓取失败（站点拦 Telegram 爬虫）时消息只剩三行显得异常短小——摘要让消息正文
+ * 自含内容，不再依赖预览的成败。excerpt 为空/缺失（nodeseek 列表页无摘要、旧
+ * 记录）时整行省略，消息与无摘要时代逐字节一致。
  */
 export function formatHitMessage(
   topic: Topic,
   matchedKeywords: string[],
   commentary?: string | null,
-  matchedRule?: string | null
+  matchedRule?: string | null,
+  semanticReason?: string | null
 ): string {
   const hitLine =
     typeof matchedRule === 'string' && matchedRule.length > 0
       ? `🎯 命中规则: ${escapeHtml(matchedRule)}`
-      : `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`
-  const lines = [
-    `🔔 <b>${escapeHtml(topic.title)}</b>`,
-    `📁 ${escapeHtml(topic.category)} · 👤 ${escapeHtml(topic.author)}`,
-    hitLine
-  ]
+      : matchedKeywords.length > 0
+        ? `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`
+        : typeof semanticReason === 'string' && semanticReason.length > 0
+          ? `🎯 语义命中: ${escapeHtml(clipHitReason(semanticReason))}`
+          : `🎯 语义命中`
+  const lines = [`🔔 <b>${escapeHtml(topic.title)}</b>`]
+  if (typeof topic.excerpt === 'string' && topic.excerpt.length > 0) {
+    lines.push(`📄 ${escapeHtml(topic.excerpt)}`)
+  }
+  lines.push(`📁 ${escapeHtml(topic.category)} · 👤 ${escapeHtml(topic.author)}`, hitLine)
   if (typeof commentary === 'string' && commentary.length > 0) {
     lines.push(`💬 锐评: ${escapeHtml(commentary)}`)
   }
@@ -144,7 +166,8 @@ export class TelegramNotifier implements Notifier {
             input.topic,
             input.matchedKeywords,
             input.commentary,
-            input.matchedRule
+            input.matchedRule,
+            input.semanticReason
           ),
           'HTML'
         )

@@ -1,120 +1,286 @@
 /**
- * 设计令牌（CSS 变量）：浅色为基础，prefers-color-scheme: dark 整组覆盖。
- * 配合 index.html 的 color-scheme: light dark，原生控件（单选、滚动条）自动跟随系统。
- * 零外部资源：不引字体、不引图标（图标一律内联 SVG / 纯 CSS）。
+ * 设计令牌（CSS 变量）：浅色为基础。R12.7 起应用固定浅色交付：暗色覆盖块以
+ * 「永不匹配」条件停用（解除钉死：恢复本文件与 dashboard/events 三处
+ * `@media (prefers-color-scheme: dark)` 原样 + :root 的 color-scheme）。
+ * color-scheme 由本文件声明（R12 起不再依赖 index.html），原生控件（单选、
+ * 滚动条）自动跟随系统。零外部资源：不引字体、不引图标（图标一律内联 SVG / 纯 CSS）。
  *
- * D8 令牌纪律：
- * - 字号只用 --fs-12/13/15/20/28 五档（12 辅助 / 13 正文 / 15 强调 / 20 页题 / 28 大数字）。
- * - 间距只用 --space-1..6（4px 栅格：4/8/12/16/20/24）。
- * - 圆角只用 --radius-s/m/l（6/10/14）。
- * - 阴影双层：key（紧贴投影）+ ambient（环境漫射）。
+ * ── R12「霁蓝平台（Clear-Blue Deck）」token 体系（终值裁决见
+ *    design/r11/DESIGN-BRIEF.md 文末「R12 修订：明亮大气方向」章节；下表数字为
+ *    本 session python 按 WCAG 相对亮度公式实算，文字 ≥4.5:1、图形/UI ≥3:1）──
+ * - 用户裁决：R11「配色不好看、整体太黑」→ 明亮为绝对主调；「两模式恒深墨轨」
+ *   裁决（R11 §1.2/§2.5）整条废除，--rail-* 名称保留、语义翻「亮轨」：浅色侧栏为
+ *   亮于窗口底一档的白面，暗色侧栏为比内容底更深一档的深灰蓝（非纯黑墨）。
+ * - 品牌换相：emerald → azure。--color-primary 图形档浅 #2563EB / 暗 #6BA8F5；
+ *   实底按钮浅 #1D4ED8（白字 6.70）/ 暗 #6BA8F5（深墨字 #0B1B2E 7.06）——
+ *   实底色块文字仍只走 --color-on-primary / --on-danger，禁硬编码 white。
+ *   绿只留 ok（运行/成功）语义，不再染品牌；新增 --primary-text 承接
+ *   「品牌透明底（wash）上的强调文字」（旧各处用 ok-text 的写法作废）。
+ * - 基础面：窗口底雾白 #F6F8FC（暗 #1E252F 深灰蓝），卡纯白 #FFFFFF
+ *   （暗 #262E3A），嵌井 #EEF2F8（暗 #2F3947），浮层 raised #FFFFFF（暗 #333F50）。
+ *   分隔线明显转浅（#E3E9F1）：层次让位于留白 + 柔和阴影。
+ * - 大气化数值：圆角卡 14→16 / 控件 10→12；阴影改「低透明度大扩散」双层
+ *   （bento-box-grid / dimensional-layering 检索档）；字阶加 --fs-22/26/32 三档，
+ *   页题 26/700、日报日题 22/700、KPI 32/700——标题从容；正文/副题舒适档放宽，
+ *   副题 13/text-3 → 14/text-2 由 primitives 落地；新增 --space-4xl 48 与
+ *   --content-max 1200px（内容限宽居中）。
+ * - 三条跨域裁决（简报 R12.3）：①.radios-card 唯一定义收 primitives；
+ *   ②键盘/鼠标选中行统一 .row-selected 语言（wash 底 + 左 3px 主色条 + 内衬
+ *   ring）；③「有未保存修改」两模式统一琥珀 --warn 档禁红（待删除行底仍
+ *   --err-chip，属删除语义不属 dirty 语义）。
+ * - --fs-15 别名删除（代码引用已清零）；文件末尾「旧名别名层」继续兜历史名。
+ * - R12.6 勘误（领域复核后共享层对比度修复，终值以本条 + 表内注释为准）：
+ *   ①暗 --primary-text #6BA8F5→#8FBEF9（旧值在 card-alt 上的 wash 底仅 3.75）；
+ *   ②暗 --err-text 从点档分离 #F87171→#FCA5A5（旧值 card-alt 4.22；点档 --err 不动）；
+ *   ③暗 --primary-wash 14%→12% 并立 wash 文字收口规则（wash 底最低档 text-2、
+ *   禁 text-3；primitives .row-selected / radios-card 选中已局部 remap --text-3）；
+ *   ④浅 --ok 点档（含 --rail-tone-ok）#16A34A→#128A3E（旧值 card-alt 2.93<3）；
+ *   ⑤连带暗 --raised #333F50→#303A49（旧值上 text-3 4.40<4.5；新值 4.74 全链改善）。
+ *
+ * 排版纪律（继承，三条不变）：
+ * - 字重只用 400/500/600/700 四档——650 禁用；700 只授权三处 display 位
+ *   （页题 26 / 日报日题 22 / KPI 32）。
+ * - 透明度禁压语义文字：层级弱化走 text-2/text-3 色阶（禁用态/待删除态豁免）。
+ * - 行高选档：标题与数字紧（--lh-display / --lh-tight）/ 界面文字中（--lh-base）/
+ *   成段阅读松（--lh-read）。
  */
+
 :root {
+  /* R12.7：固定浅色——原生控件（滚动条/表单/选中高亮）不随系统暗色翻转 */
+  color-scheme: light;
+
+  /* —— 基础面（R12 §R12.1）—— */
+  --color-primary: #2563EB; /* 图形档：点/描边/选择条/图标强调/accent-color（on 白 5.17，UI≥3） */
+  --color-on-primary: #FFFFFF; /* 实底 primary 文字（浅=白 on #1D4ED8 6.70）——禁硬编码 white */
+  --color-background: #F6F8FC; /* 窗口底（雾白冷调） */
+  --color-foreground: #17222E; /* 主文字（on card 16.10 / on bg 15.14） */
+  --color-card: #FFFFFF; /* 卡面 */
+  --color-muted: #EEF2F8; /* 卡内嵌井（日志底/展开行底/KPI 井）——经 --card-alt 引用 */
+  --color-muted-foreground: #4A5A6E; /* 次要文字（on card 7.05 / on bg 6.63）——经 --text-2 引用 */
+  --color-border: #D9E1EC; /* 仅卡外缘装饰描边；禁承载分隔/输入语义 */
+
+  --bg: var(--color-background);
+  --fg: var(--color-foreground);
+  --card: var(--color-card);
+  --card-alt: var(--color-muted);
+  --raised: #FFFFFF; /* 浮层/弹层/吸底栏面（配 lg/xl 阴影） */
+  --text-2: var(--color-muted-foreground);
+  --text-3: #5D6C83; /* 辅助元信息（on card 5.33 / on card-alt 4.75 / on bg ~5.0） */
+  --line: #E3E9F1; /* 行/卡/组功能分隔线（R12 转浅：线条让位留白与阴影） */
+  --input-border: #7B8CA1; /* 输入框功能边界（on card 3.44，UI≥3） */
+  --ring: #1D4ED8; /* 焦点环（on card 6.70） */
+  --scroll-thumb: #C9D4E2;
+
+  /* —— 亮轨侧栏（R11「墨轨」废除；名称保留、语义翻亮，§R12.1 亮轨表）—— */
+  /* 轨内一切文字用 rail 族色（两模式都浅/都深同向，不再跨模式恒定） */
+  --rail-bg: #FBFCFE; /* 侧栏底：亮于窗口底一档的白面 */
+  --rail-fg: #17222E; /* 轨内主文字（15.68:1） */
+  --rail-fg-2: #54637A; /* 轨内次要（5.94:1） */
+  --rail-bar: #2563EB; /* 轨内品牌强调（选中图标；5.03:1） */
+  --rail-active-bg: color-mix(in srgb, #2563EB 10%, transparent); /* nav pill 选中底 */
+  --rail-hover: #EDF1F7; /* 轨内 hover 底（收进变量，组件层零字面量） */
+  --rail-press: #E1E8F2; /* 轨内 active 按压底 */
+  --rail-line: #E7ECF4; /* 轨内分隔线 / 侧栏右缘 */
+  /* 轨内 tone 点=当模式 tone 点档（浅轨用浅档，不再是恒暗档） */
+  --rail-tone-ok: #128A3E; /* R12.6：浅 ok 点加深档（on rail-bg 4.32 / card-alt 3.95 ≥3） */
+  --rail-tone-err: #DC2626;
+  --rail-tone-warn: #B45309;
+  --rail-tone-ai: #7C3AED;
+
+  /* —— 品牌与主按钮（azure）—— */
+  --primary-text: #1D4ED8; /* wash 底上的强调文字/图标（on 浅 wash 6.02）——代替旧「wash 上用 ok-text」 */
+  --btn-primary-bg: #1D4ED8; /* 主按钮底（浅=深蔚蓝） */
+  --hover-primary-bg: #1E40AF; /* 主按钮 hover 更深一档（白字 8.72） */
+  --hover-primary-fg: #FFFFFF;
+  --hover-danger-bg: #B91C1C; /* danger 描边/浅底/实底 hover 加深档 */
+  --danger-solid-bg: #DC2626; /* 实底 danger 专用底（两模式同值；白字 4.83） */
+  --on-danger: #FFFFFF; /* 实底 danger 文字（两模式同值 4.83） */
+  /* 全应用唯一品牌透明底档（§A-8 纪律继承）：行 hover/选中/quick-active/卡选中共用 */
+  --primary-wash: color-mix(in srgb, #2563EB 8%, transparent);
+
+  /* —— 语义 tone 族：点 / 文字 / 弱底 三档（结构继承；绿=运行、红=事件、琥珀=中间态、紫=AI）—— */
+  /* 浅底小字禁用点档（R10 陷阱继承）；文字对各自 chip ≥4.57 实算 */
+  --ok: #128A3E; /* 状态点/描边/实底图形（R12.6：#16A34A 在 card-alt 仅 2.93<3，加深一档：白 4.44 / card-alt 3.95 / chip 4.04 / 浅 wash 3.99~3.57 全 ≥3） */
+  --ok-text: #15803D;
+  --ok-chip: #DCFCE7;
+  --err: #DC2626;
+  --err-text: #B42318;
+  --err-chip: #FEE4E2;
+  --warn: #B45309;
+  --warn-text: #92400E;
+  --warn-chip: #FDECC8;
+  --ai: #7C3AED;
+  --ai-text: #6D28D9;
+  --ai-chip: #EDE9FE;
+  --mute-chip: #E9EEF5; /* 中性弱底（文字用 --text-2，6.05:1） */
+
+  /* —— 字体（零网络字体红线不变；检索命中的 Inter/Fira 只取手法不取字体）—— */
   --font-ui:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   --font-mono:
-    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
-    'Liberation Mono', monospace;
+    ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', Consolas,
+    monospace;
 
-  /* 字号阶（12/13/15/20/28） */
-  --fs-12: 12px;
-  --fs-13: 13px;
-  --fs-15: 15px;
-  --fs-20: 20px;
-  --fs-28: 28px;
+  /* —— 字号阶（R12：标题从容——新增 22/26/32 三档）—— */
+  --fs-12: 12px; /* 辅助元信息（禁正文） */
+  --fs-13: 13px; /* 次级正文 · 按钮 */
+  --fs-14: 14px; /* 正文（命中标题 · 输入值 · 页头副题） */
+  --fs-16: 16px; /* 组头 · state-pill · 强调 */
+  --fs-20: 20px; /* 分区小节题 */
+  --fs-22: 22px; /* 日报日题（display 位，R12 由 20 升 22） */
+  --fs-24: 24px; /* 保留档（大区块题，暂无授权 display 位） */
+  --fs-26: 26px; /* 页题（display 位，R12 由 24 升 26） */
+  --fs-28: 28px; /* 保留档 */
+  --fs-32: 32px; /* KPI 大数字（display 位，R12 由 28 升 32） */
 
-  /* 间距阶（4px 栅格） */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
+  /* —— 行高 + 字距 —— */
+  --lh-display: 1.2; /* 22/26/32 大标题（1.15→1.2，从容） */
+  --lh-tight: 1.3;
+  --lh-base: 1.5;
+  --lh-read: 1.7;
+  --lh-chip: 18px; /* 徽标像素行高（绑 fs-12） */
+  --ls-display: -0.015em; /* 仅 ≥20px 标题与数字 */
+  --ls-label: 0.05em; /* 仅拉丁/数字 12px micro-label（中文正文禁加） */
 
-  /* 圆角阶（6/10/14） */
-  --radius-s: 6px;
-  --radius-m: 10px;
-  --radius-l: 14px;
+  /* —— 间距阶（R12：顶部加 48 档承载「大气」；其余继承）—— */
+  --space-xs: 2px;
+  --space-sm: 4px;
+  --space-md: 8px;
+  --space-lg: 12px;
+  --space-xl: 16px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+  --space-4xl: 48px;
 
-  /* 动效时长（120-180ms） */
-  --t-fast: 120ms;
-  --t-base: 160ms;
+  /* —— 内容限宽（.page / .page-settings 的居中留白算式引用）—— */
+  --content-max: 1200px;
 
-  /* 表面 */
-  --bg: #ececf0;          /* 窗口底 */
-  --card: #ffffff;        /* 卡片 */
-  --card-alt: #f6f6f8;    /* 卡片内嵌区（日志底） */
-  --input-bg: #ffffff;
-  --chip-bg: #e9e9ee;
+  /* —— 圆角三档 + 阴影四档（R12：圆角放大、阴影低透明度大扩散）—— */
+  --r-card: 16px; /* 卡/浮层（14→16，bento 档） */
+  --r-ctl: 12px; /* 按钮/输入/实体行/nav pill（10→12） */
+  --r-pill: 999px; /* chip/pill/badge/live-pill */
+  --shadow-sm:
+    0 1px 2px rgba(22, 34, 52, 0.05), 0 1px 3px rgba(22, 34, 52, 0.06);
+  --shadow-md:
+    0 2px 6px rgba(22, 34, 52, 0.05), 0 8px 24px rgba(22, 34, 52, 0.08);
+  --shadow-lg:
+    0 4px 12px rgba(22, 34, 52, 0.06), 0 16px 40px rgba(22, 34, 52, 0.12);
+  --shadow-xl:
+    0 8px 20px rgba(22, 34, 52, 0.08), 0 28px 64px rgba(22, 34, 52, 0.16);
+  --edge-top: inset 0 1px 0 rgba(255, 255, 255, 0.85); /* 顶缘发丝光（亮面近乎无感，token 保留因 events 在引） */
+  --inset-field: inset 0 1px 2px rgba(22, 34, 52, 0.05); /* 输入内凹 */
 
-  /* 文字 */
-  --text: #1d1d1f;
-  --text-2: #5f5f66;
-  --text-3: #8e8e96;
+  /* —— 动效（R12：Swiss 检索档 hover 200ms）—— */
+  --t-fast: 120ms; /* 颜色/描边 */
+  --t-base: 200ms; /* 背景/小位移（180→200） */
+  --t-glide: 280ms; /* 展开/折叠/页面级 */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* 入场/展开 */
+  --ease-std: cubic-bezier(0.4, 0, 0.2, 1); /* 属性过渡 */
 
-  /* 线与投影（key + ambient 双层） */
-  --border: #d9d9df;
-  --border-strong: #c5c5cd;
-  --shadow:
-    0 1px 2px rgba(24, 26, 32, 0.07),
-    0 6px 18px -8px rgba(24, 26, 32, 0.12);
+  /* 可点区域红线值（验收 §8-A：可点目标 ≥44px 或等效间距补偿） */
+  --hit: 44px;
 
-  /* 语义色 */
-  --accent: #2f6fd6;
-  --accent-hover: #2861bd;
-  --on-accent: #ffffff;
-  /* 主按钮（深蓝底白字，深浅两套同构） */
-  --btn-primary-bg: #2f6fd6;
-  --btn-primary-hover: #2861bd;
-  --ok: #1f8a44;
-  --ok-bg: rgba(31, 138, 68, 0.12);
-  --warn: #a85a00;
-  --warn-bg: rgba(168, 90, 0, 0.12);
-  --err: #c73a34;
-  --err-bg: rgba(199, 58, 52, 0.1);
-  --ai: #7c5cd6;
-  --ai-bg: rgba(124, 92, 214, 0.12);
-
-  /* 侧栏：窗口底混入少量 accent 色相（拉离纯灰，D8 ③） */
-  --bg-sidebar: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  /* 侧栏（旧名保留）：R12 起指向亮轨 */
+  --bg-sidebar: var(--rail-bg);
 }
 
-@media (prefers-color-scheme: dark) {
+/* R12.7 固定浅色：条件恒假停用（(max-width:0) 无窗口可命中）；解除钉死时恢复为
+   `@media (prefers-color-scheme: dark)`。块内暗档终值全部保留,勿删。 */
+@media (prefers-color-scheme: dark) and (max-width: 0px) {
   :root {
-    /* dark 拉开明度差：窗口更深、卡片更亮（原先三档挤在一起偏闷） */
-    --bg: #1b1b20;
-    --card: #2b2b32;
-    --card-alt: #232329;
-    --input-bg: #202026;
-    --chip-bg: #3b3b43;
+    /* dark：柔和深灰蓝系（非纯黑墨）——窗口底 #1E252F，三级表面逐档提亮；
+       层次 = 表面提亮 + 发丝高光 + 边框，阴影只作浮层兜底 */
+    --color-primary: #6BA8F5; /* 图形 on card 5.57 / on bg 6.28 */
+    --color-on-primary: #0B1B2E; /* 暗档实底主按钮文字=深墨（on #6BA8F5 7.06）——纯白禁用 */
+    --color-background: #1E252F;
+    --color-foreground: #E9EEF5; /* on bg 13.24 / on card 11.74 */
+    --color-card: #262E3A;
+    --color-muted: #2F3947;
+    --color-muted-foreground: #A7B4C4; /* on card 6.50 */
+    --color-border: #435168; /* 装饰档，不做输入边界 */
 
-    /* 辅助文字提亮一档（looker：dark 下帮助文案/标签灰对比不足） */
-    --text: #f0f0f2;
-    --text-2: #b3b3bb;
-    --text-3: #94949e;
+    /* R12.6：raised 加深一档 #333F50→#303A49——旧值上 text-3 仅 4.40<4.5；
+       新值 text-3 4.74 / text-2 5.46 / fg 9.86 / primary-text 5.97 / err-text 6.06 全过 */
+    --raised: #303A49;
+    --text-3: #99A8BA; /* on card 5.65 / on card-alt 4.82 / on raised 4.74；暗 wash 底禁用（R12.6 收口规则） */
+    --line: #38455A;
+    --input-border: #8FA0B5; /* UI 边界 ≥3（on card 5.13） */
+    --ring: #7FB2F8; /* on card 6.27 */
+    --scroll-thumb: #3A465A;
 
-    --border: #3b3b42;
-    --border-strong: #4b4b54;
-    --shadow:
-      0 1px 2px rgba(0, 0, 0, 0.4),
-      0 8px 22px -8px rgba(0, 0, 0, 0.55);
+    --rail-bg: #1A212C; /* 深灰蓝侧栏（比内容底更深一档；非纯黑） */
+    --rail-fg: #E9EEF5;
+    --rail-fg-2: #93A2B6;
+    --rail-bar: #6BA8F5;
+    --rail-active-bg: color-mix(in srgb, #6BA8F5 16%, transparent);
+    --rail-hover: rgba(255, 255, 255, 0.05);
+    --rail-press: rgba(255, 255, 255, 0.09);
+    --rail-line: rgba(255, 255, 255, 0.08);
+    --rail-tone-ok: #3ECF8E;
+    --rail-tone-err: #F87171;
+    --rail-tone-warn: #FBBF24;
+    --rail-tone-ai: #B79CF7;
 
-    --accent: #5a9bf7;
-    --accent-hover: #6fa9ff;
-    --on-accent: #0e1218;
-    /* 主按钮深浅同构：同为深蓝底白字 */
-    --btn-primary-bg: #2f6fd6;
-    --btn-primary-hover: #255eb0;
-    --ok: #41c173;
-    --ok-bg: rgba(65, 193, 115, 0.16);
-    --warn: #eda13f;
-    --warn-bg: rgba(237, 161, 63, 0.15);
-    --err: #ff6f61;
-    --err-bg: rgba(255, 111, 97, 0.14);
-    --ai: #a58bf0;
-    --ai-bg: rgba(165, 139, 240, 0.16);
+    --primary-text: #8FBEF9; /* R12.6 提亮一档（旧 #6BA8F5 on 暗 wash/alt 仅 3.75）：wash/card 5.74、wash/alt 4.98、raised 5.97 全 ≥4.5 */
+    --btn-primary-bg: #6BA8F5;
+    --hover-primary-bg: #8FBEF9; /* hover 提亮一档，深墨字对比更高 */
+    --hover-primary-fg: #0B1B2E;
+    /* danger 实底两模式同值：--danger-solid-bg / --on-danger / --hover-danger-bg 不覆盖 */
 
-    --bg-sidebar: color-mix(in srgb, var(--accent) 7%, #141419);
+    /* R12.6：暗档 wash 14%→12%（14% 底上连 text-2 在 card-alt 处都只剩 4.37）；
+       收口规则见 primitives——wash 底最低文字档 --text-2（t2/alt 4.56、t2/card 5.25 过），
+       text-3 在 wash 上 3.96~4.56 判废；fg 8.23~9.48、primary-text 4.98~5.74 */
+    --primary-wash: color-mix(in srgb, #6BA8F5 12%, transparent);
+
+    --ok: #3ECF8E;
+    --ok-text: #3ECF8E; /* 暗档文字=提亮点档（on card 6.86） */
+    --ok-chip: #0E2A22;
+    --err: #F87171;
+    --err-text: #FCA5A5; /* R12.6：文字档从点档 #F87171 分离并提亮（旧值 card-alt 4.22 / wash 3.86 均 <4.5）——card 7.21 / card-alt 6.16 / raised 6.06 / err-chip 8.44 / 暗 wash 5.82~5.06 全过；点档 --err #F87171 不动（UI≥3 域） */
+    --err-chip: #3A161B;
+    --warn: #FBBF24;
+    --warn-text: #FBBF24; /* on card 8.20 / on chip 8.75 */
+    --warn-chip: #33270F;
+    --ai: #B79CF7;
+    --ai-text: #B79CF7; /* on card 5.94 / on chip 6.99 */
+    --ai-chip: #241B3F;
+    --mute-chip: #2A3341; /* 文字 --text-2（on mute chip 实算 ≥6） */
+
+    --shadow-sm: 0 1px 2px rgba(6, 10, 18, 0.4);
+    --shadow-md: 0 6px 20px rgba(6, 10, 18, 0.45);
+    --shadow-lg: 0 12px 32px rgba(6, 10, 18, 0.5);
+    --shadow-xl: 0 24px 56px rgba(6, 10, 18, 0.55);
+    --edge-top: inset 0 1px 0 rgba(255, 255, 255, 0.05); /* 暗色顶缘发丝光 */
+    --inset-field: inset 0 1px 2px rgba(6, 10, 18, 0.35);
   }
+}
+
+/* ── 旧名别名层（迁移期兼容；各域迁移完成后逐步删除）─────────────
+ * 历史 token 名 → 新 token。旧 *-bg 弱底一律指向对应 *-chip。
+ * R12 变更：--fs-15 别名已删（代码引用清零；再引用即悬空，领域文件禁再引）；
+ * --accent/--accent-hover 等指向 azure 新档；--btn-primary-bg 为正式令牌。 */
+:root {
+  --text: var(--fg);
+  --accent: var(--color-primary);
+  --accent-hover: var(--hover-primary-bg);
+  --on-accent: var(--color-on-primary);
+  --btn-primary-hover: var(--hover-primary-bg);
+  --border: var(--line);
+  --border-strong: var(--input-border);
+  --input-bg: var(--card);
+  --chip-bg: var(--mute-chip);
+  --ok-bg: var(--ok-chip);
+  --err-bg: var(--err-chip);
+  --warn-bg: var(--warn-chip);
+  --ai-bg: var(--ai-chip);
+  --shadow: var(--shadow-sm);
+  --space-1: var(--space-sm);
+  --space-2: var(--space-md);
+  --space-3: var(--space-lg);
+  --space-4: var(--space-xl);
+  --space-6: var(--space-2xl);
+  --radius-s: var(--r-ctl);
+  --radius-m: var(--r-card);
+  --radius-l: var(--r-card);
 }

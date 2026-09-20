@@ -155,6 +155,86 @@ describe('migrateConfigEnvelope', () => {
     expect((v2.sources as { enabled: boolean }[])[0]!.enabled).toBe(true)
   })
 
+  it('v3 → v4：rss 来源 url 恰为 LowEndTalk 预设坏地址 → 重写为 /discussions/feed.rss；其余来源/字段不动', () => {
+    const out = migrateConfigEnvelope({
+      schemaVersion: 3,
+      config: {
+        includeKeywords: ['vps'],
+        sources: [
+          { id: 'nodeseek', type: 'nodeseek', enabled: true },
+          // 预设 id 的坏地址（一键添加路径）
+          {
+            id: 'lowendtalk',
+            type: 'rss',
+            enabled: true,
+            url: 'https://lowendtalk.com/feed',
+            label: 'LowEndTalk'
+          },
+          // 自定义 slug id 的坏地址（手输/自定义路径）同样命中
+          {
+            id: 'lowendtalk-com',
+            type: 'rss',
+            enabled: false,
+            url: 'https://lowendtalk.com/feed'
+          },
+          // 相似但不精确匹配：不重写
+          { id: 'other', type: 'rss', enabled: true, url: 'https://lowendtalk.com/feeds' },
+          // 非 rss 类型即使 url 相同也不动（防御：v3 盘上 nodeseek 无 url 概念）
+          { id: 'x', type: 'v2ex', enabled: true, url: 'https://lowendtalk.com/feed' }
+        ]
+      }
+    })
+    expect(out.sources).toEqual([
+      { id: 'nodeseek', type: 'nodeseek', enabled: true },
+      {
+        id: 'lowendtalk',
+        type: 'rss',
+        enabled: true,
+        url: 'https://lowendtalk.com/discussions/feed.rss',
+        label: 'LowEndTalk'
+      },
+      {
+        id: 'lowendtalk-com',
+        type: 'rss',
+        enabled: false,
+        url: 'https://lowendtalk.com/discussions/feed.rss'
+      },
+      { id: 'other', type: 'rss', enabled: true, url: 'https://lowendtalk.com/feeds' },
+      { id: 'x', type: 'v2ex', enabled: true, url: 'https://lowendtalk.com/feed' }
+    ])
+    expect(out.includeKeywords).toEqual(['vps'])
+  })
+
+  it('v3 → v4 幂等：已是新地址的盘再迁一遍无变化（v4 透传也不动它）', () => {
+    const good = {
+      includeKeywords: ['vps'] as string[],
+      sources: [
+        {
+          id: 'lowendtalk',
+          type: 'rss' as const,
+          enabled: true,
+          url: 'https://lowendtalk.com/discussions/feed.rss',
+          label: 'LowEndTalk'
+        }
+      ]
+    }
+    const fromV3 = migrateConfigEnvelope({ schemaVersion: 3, config: structuredClone(good) })
+    const fromV4 = migrateConfigEnvelope({ schemaVersion: 4, config: structuredClone(good) })
+    expect((fromV3.sources[0] as { url?: string }).url).toBe('https://lowendtalk.com/discussions/feed.rss')
+    expect((fromV4.sources[0] as { url?: string }).url).toBe('https://lowendtalk.com/discussions/feed.rss')
+  })
+
+  it('v3 → v4 深拷贝：重写出参不污染入参', () => {
+    const v3 = {
+      sources: [
+        { id: 'lowendtalk', type: 'rss', enabled: true, url: 'https://lowendtalk.com/feed' }
+      ]
+    }
+    const out = migrateConfigEnvelope({ schemaVersion: 3, config: v3 })
+    expect((out.sources[0] as { url?: string }).url).toBe('https://lowendtalk.com/discussions/feed.rss')
+    expect(v3.sources[0].url).toBe('https://lowendtalk.com/feed')
+  })
+
   it('v3 → 原样透传（幂等）：不丢字段、不套默认值', () => {
     const v3 = {
       ...structuredClone(DEFAULT_APP_CONFIG),
@@ -206,7 +286,7 @@ describe('migrateConfigEnvelope', () => {
       { schemaVersion: 1 }, // 缺 config
       { schemaVersion: 1, config: null },
       { schemaVersion: 1, config: 'not-object' },
-      { schemaVersion: 4, config: {} }, // 未知版本（合法版本是 1|2|3）
+      { schemaVersion: 5, config: {} }, // 未知版本（合法版本是 1|2|3|4）
       { schemaVersion: 0, config: {} },
       { schemaVersion: '3', config: {} }, // 版本非数字
       { config: { includeKeywords: [] } } // 缺 schemaVersion

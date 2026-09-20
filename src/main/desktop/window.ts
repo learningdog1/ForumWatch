@@ -30,6 +30,9 @@ export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 980,
     height: 700,
+    // R10 桌面断点：最小可用窗口 960px（dsn §2；窄于此列表区与子导航不可用）
+    minWidth: 960,
+    minHeight: 560,
     title: 'ForumWatch',
     webPreferences: {
       // electron-vite 的 preload 产物是 CJS：sandbox 默认开启时沙箱 preload 白名单

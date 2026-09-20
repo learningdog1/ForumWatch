@@ -98,6 +98,25 @@ interface FeedItemFields {
   category: string
   categorySlug: string
   dateRaw: string
+  /** 摘要原文（RSS description / Atom summary·content，可能是 HTML 片段） */
+  excerptRaw: string
+}
+
+/** Topic.excerpt 的长度上限（字符）：推送摘要行只需一眼可读，防整篇正文刷屏 */
+export const EXCERPT_MAX_CHARS = 160
+
+/**
+ * 摘要原文 → 纯文本摘要（共享给 v2ex adapter）：cheerio 解析片段取 text
+ * （剥 HTML 标签 + 解码 HTML 实体，`&amp;` → `&`；纯文本原文无损通过）→
+ * 压缩空白（HTML 换行/缩进折叠成一个空格）→ 超长截断（EXCERPT_MAX_CHARS，
+ * 尾巴加 …）。空/纯空白输入返回空串（调用方按空省略 excerpt 键）。
+ */
+export function toExcerpt(raw: string): string {
+  if (raw.trim() === '') return ''
+  const plain = cheerio.load(raw).root().text().replace(/\s+/g, ' ').trim()
+  if (plain === '') return ''
+  if (plain.length <= EXCERPT_MAX_CHARS) return plain
+  return `${plain.slice(0, EXCERPT_MAX_CHARS - 1)}…`
 }
 
 /**
@@ -161,7 +180,9 @@ function collectRssItemFields($: cheerio.CheerioAPI, entry: Cheerio<Element>): F
     category,
     // RSS 无 slug 概念：categorySlug 同 category
     categorySlug: category,
-    dateRaw: fieldText(kids, 'pubdate', 'updated', 'published')
+    dateRaw: fieldText(kids, 'pubdate', 'updated', 'published'),
+    // RSS 2.0 正文摘要在 description（Discourse/Vanilla 均为首帖 HTML 片段）
+    excerptRaw: fieldText(kids, 'description')
   }
 }
 
@@ -194,7 +215,9 @@ function collectAtomEntryFields($: cheerio.CheerioAPI, entry: Cheerio<Element>):
     category: categoryText || term,
     // Atom 有 @term 用 term
     categorySlug: term || categoryText,
-    dateRaw: fieldText(kids, 'updated', 'published', 'pubdate')
+    dateRaw: fieldText(kids, 'updated', 'published', 'pubdate'),
+    // Atom 摘要优先 summary（按规范就是短摘要），缺则 content 全文（截断交给 toExcerpt）
+    excerptRaw: fieldText(kids, 'summary', 'content')
   }
 }
 
@@ -204,6 +227,9 @@ function mapToTopic(fields: FeedItemFields, feedUrl: string): Topic | null {
   const identity = numericId ?? (fields.guid || fields.link || '')
   if (!identity) return null
 
+  // 摘要按空省略键（Topic.excerpt 可选：无 description/summary 的 feed 不写，
+  // 消费方按 undefined 容忍——见 shared/types Topic 契约）
+  const excerpt = toExcerpt(fields.excerptRaw)
   return {
     id: identity,
     // adapter 不感知来源归属：engine 处理时按来源盖章（D2/D3，与 html adapter 同款）
@@ -215,7 +241,8 @@ function mapToTopic(fields: FeedItemFields, feedUrl: string): Topic | null {
     categorySlug: fields.categorySlug,
     // RSS/Atom 无置顶语义，恒 false（html adapter 才有置顶标记）
     pinned: false,
-    lastActiveAt: toIsoOrNull(fields.dateRaw)
+    lastActiveAt: toIsoOrNull(fields.dateRaw),
+    ...(excerpt !== '' ? { excerpt } : {})
   }
 }
 

@@ -150,6 +150,60 @@ describe('formatHitMessage', () => {
     expect(formatHitMessage(topic, ['冰箱'], '锐评', '')).toBe(baseline)
     expect(baseline).toContain('🎯 命中: 冰箱')
   })
+
+  it('摘要行：topic.excerpt 非空时 📄 行插在标题之后、分类作者行之前，内容过 escapeHtml', () => {
+    const withExcerpt: Topic = {
+      ...topic,
+      excerpt: '9 成新海尔冰箱 & <附> 冰柜，自提优先'
+    }
+    const msg = formatHitMessage(withExcerpt, ['冰箱'])
+    const expected = [
+      `🔔 <b>${escapeHtml(topic.title)}</b>`,
+      `📄 9 成新海尔冰箱 &amp; &lt;附&gt; 冰柜，自提优先`,
+      `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
+      `🎯 命中: 冰箱`,
+      `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
+    ].join('\n')
+    expect(msg).toBe(expected)
+    expect(msg).not.toContain('<附>')
+  })
+
+  it('语义命中：关键词为空 + 理由非空 → 「🎯 语义命中: {理由}」（转义 + 截 120），不再出现空白的「🎯 命中: 」', () => {
+    const msg = formatHitMessage(topic, [], null, null, 'PT站庆开放注册并免站7天，属于免费可薅的活动 <值得> & 推荐冲')
+    const expected = [
+      `🔔 <b>${escapeHtml(topic.title)}</b>`,
+      `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
+      `🎯 语义命中: PT站庆开放注册并免站7天，属于免费可薅的活动 &lt;值得&gt; &amp; 推荐冲`,
+      `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
+    ].join('\n')
+    expect(msg).toBe(expected)
+    expect(msg).not.toContain('🎯 命中: ')
+    expect(msg).not.toContain('<值得>')
+
+    // 超长理由截断到 120 字符（含尾省略号）
+    const long = formatHitMessage(topic, [], null, null, '长'.repeat(300))
+    const line = long.split('\n').find((l) => l.startsWith('🎯 语义命中'))!
+    expect(line).toBe(`🎯 语义命中: ${'长'.repeat(119)}…`)
+  })
+
+  it('语义命中但 AI 未给理由（null/空串）→ 仅显示「🎯 语义命中」无冒号尾巴', () => {
+    const msg = formatHitMessage(topic, [], null, null, null)
+    expect(msg).toContain('🎯 语义命中\n')
+    expect(formatHitMessage(topic, [], null, null, '')).toBe(msg)
+  })
+
+  it('回归：literal 命中（关键词非空）不受 semanticReason 影响，不出现语义命中行', () => {
+    const baseline = formatHitMessage(topic, ['冰箱'])
+    expect(formatHitMessage(topic, ['冰箱'], null, null, '某理由')).toBe(baseline)
+    expect(baseline).toContain('🎯 命中: 冰箱')
+  })
+
+  it('回归：excerpt 缺失 / undefined / 空串（nodeseek 无摘要、旧记录）→ 无 📄 行，与无摘要时代逐字节一致', () => {
+    const baseline = formatHitMessage(topic, ['冰箱'])
+    expect(baseline).not.toContain('📄')
+    expect(formatHitMessage({ ...topic, excerpt: undefined }, ['冰箱'])).toBe(baseline)
+    expect(formatHitMessage({ ...topic, excerpt: '' }, ['冰箱'])).toBe(baseline)
+  })
 })
 
 describe('TelegramNotifier', () => {

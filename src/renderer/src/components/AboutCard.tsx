@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react'
 import type { UpdateCheckStatus } from '@shared/ipc'
 import { Field } from './Field'
+import { IconCheck, IconRadar } from './icons'
 import { formatClock } from '../lib/time'
 
 export function AboutCard() {
@@ -46,7 +47,7 @@ export function AboutCard() {
     if (!r.ok) setOpenErr(true)
   }
 
-  /** 状态行文案（checking 时按钮自带「检查中…」，这里只描最近结果） */
+  /** 状态行文案（checking 时按钮转圈 .busy、文字不换；这里只描最近结果） */
   const statusText = (): { kind: 'ok' | 'warn' | 'err' | 'muted'; text: string } | null => {
     if (status === null) return null
     const at = status.checkedAt !== null ? ` · ${formatClock(status.checkedAt)}` : ''
@@ -56,7 +57,7 @@ export function AboutCard() {
       case 'available':
         return { kind: 'warn', text: `有新版本：v${status.current} → ${status.latest ?? '?'}${at}` }
       case 'up-to-date':
-        return { kind: 'ok', text: `✓ 已是最新版本（v${status.latest ?? status.current}）${at}` }
+        return { kind: 'ok', text: `已是最新版本（v${status.latest ?? status.current}）${at}` }
       case 'error':
         return { kind: 'err', text: `检查失败：${status.error ?? '未知错误'}${at}` }
     }
@@ -65,10 +66,17 @@ export function AboutCard() {
   const st = statusText()
 
   return (
-    <section className="card">
+    <section className="card snot">
       <div className="card-head">
-        <span className="card-title">关于</span>
-        <span className="card-title-aux">ForumWatch</span>
+        <span className="card-head-group">
+          {/* 品牌 logo 走 R12 图标砖（wash 承托 + --color-primary 图形档，§3.4 关于卡）；
+              版本号等宽由 .num 承担 */}
+          <span className="about-logo">
+            <IconRadar size={18} />
+          </span>
+          <span className="card-title">关于</span>
+        </span>
+        <span className="card-title-aux num">v{status?.current ?? '…'}</span>
       </div>
       <Field
         label="当前版本"
@@ -81,8 +89,13 @@ export function AboutCard() {
         hint="应用启动 15 秒后自动检查一次，此后每 24 小时向 GitHub Releases 检查；也可随时手动检查。检查失败不影响监控。"
       >
         <div className="input-row">
-          <button type="button" className="btn" disabled={checking} onClick={() => void check()}>
-            {checking ? '检查中…' : '检查更新'}
+          <button
+            type="button"
+            className={`btn${checking ? ' busy' : ''}`}
+            disabled={checking}
+            onClick={() => void check()}
+          >
+            检查更新
           </button>
           {status?.state === 'available' && status.downloadUrl !== undefined && (
             <button
@@ -93,7 +106,15 @@ export function AboutCard() {
               打开下载页（{status.latest}）
             </button>
           )}
-          {st !== null && <span className={`feedback ${st.kind}`}>{st.text}</span>}
+        </div>
+        {/* 检查结果反馈位常驻：三态（有新版/已最新/失败）+ 检查时刻 */}
+        <div className="op-feedback">
+          {st !== null && (
+            <span className={`feedback ${st.kind}`}>
+              {st.kind === 'ok' && <IconCheck size={12} />}
+              {st.text}
+            </span>
+          )}
         </div>
         {openErr && (
           <div className="notice muted-notice">

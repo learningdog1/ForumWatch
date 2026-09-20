@@ -16,6 +16,7 @@
 
 import type { SourceAdapter } from '../types'
 import { assertNotChallenged } from './challenge'
+import { toExcerpt } from './rss'
 import type { FetchLike } from '../../net/http-types'
 import type { Topic } from '../../../shared/types'
 
@@ -33,11 +34,13 @@ const REQUEST_HEADERS: Record<string, string> = {
   Accept: 'application/json'
 }
 
-/** API 单帖原始形态（仅声明消费的字段；content 等 Topic 契约没有的字段不取） */
+/** API 单帖原始形态（仅声明消费的字段） */
 interface V2exTopicItem {
   id?: number
   title?: string
   url?: string
+  /** 帖子正文（Markdown 纯文本；Topic.excerpt 的数据源，截断见 toExcerpt） */
+  content?: string
   /** unix 秒 */
   created?: number
   /** unix 秒（最后回复时间，优先作 lastActiveAt） */
@@ -58,6 +61,8 @@ function mapTopic(item: unknown): Topic | null {
   if (typeof item !== 'object' || item === null) return null
   const raw = item as V2exTopicItem
   if (typeof raw.id !== 'number' || !Number.isFinite(raw.id)) return null
+  // 摘要按空省略键（Topic.excerpt 可选；toExcerpt 共享 rss adapter 的清洗口径）
+  const excerpt = toExcerpt(raw.content ?? '')
   return {
     id: String(raw.id),
     // adapter 不感知来源归属：engine 处理时按来源盖章（D2/D3）
@@ -69,7 +74,8 @@ function mapTopic(item: unknown): Topic | null {
     categorySlug: raw.node?.name ?? '',
     pinned: false, // latest 端点无置顶语义
     // 优先最后回复时间（last_touched），缺则退发帖时间（created），都缺则 null
-    lastActiveAt: unixSecondsToIso(raw.last_touched) ?? unixSecondsToIso(raw.created)
+    lastActiveAt: unixSecondsToIso(raw.last_touched) ?? unixSecondsToIso(raw.created),
+    ...(excerpt !== '' ? { excerpt } : {})
   }
 }
 

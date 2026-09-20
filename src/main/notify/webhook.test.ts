@@ -130,6 +130,17 @@ describe('WebhookNotifier', () => {
     expect(h.sleeps).toEqual([]) // 首条不等待
   })
 
+  it('sendHit 带 excerpt（RSS/V2EX 来源）：topic 载荷带上 excerpt；空/缺失时省键', async () => {
+    const withExcerpt: Topic = { ...topic, excerpt: '正文摘要，截 160 字符内' }
+    const h1 = makeHarness(() => okRes)
+    await h1.notifier.sendHit({ topic: withExcerpt, matchedKeywords: ['x'] })
+    expect(bodyOf(h1).topic).toMatchObject({ excerpt: '正文摘要，截 160 字符内' })
+
+    const h2 = makeHarness(() => okRes)
+    await h2.notifier.sendHit({ topic: { ...topic, excerpt: '' }, matchedKeywords: ['x'] })
+    expect('excerpt' in (bodyOf(h2).topic as Record<string, unknown>)).toBe(false)
+  })
+
   it('secret 未配置（缺省/空串）→ 不发 X-ForumWatch-Secret 头', async () => {
     const h1 = makeHarness(() => okRes, { url: 'https://hooks.example.com/hook' })
     await h1.notifier.sendHit({ topic, matchedKeywords: ['x'] })

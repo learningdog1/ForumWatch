@@ -1,5 +1,7 @@
 /**
  * 「价格规则」卡片（R5-P2c）：结构化价格规则的增删改与启停。
+ * 阶段 5b 改为 L2 实体行模式（EntityList 外壳 + 待删除态 + >8 条折叠），
+ * 并成为四类实体列表「编辑直写 draft」的范本（settings.md §5.3）。
  *
  * - 规则语义（空态与 hint 一句话讲清）：从帖子标题提取周期 / 价格 / 流量
  *   （如「年付 ¥99」「500G 流量」），一条规则声明的条件之间 AND，全部满足即
@@ -7,10 +9,13 @@
  * - 编辑模型：表单完全受控于 props（draft 的一段），每次改动即回写 draft，
  *   与本页其余卡片一致走「保存设置」链路；数值输入留空 = 不限（字段不落键，
  *   对齐主进程 sanitize）。
+ * - L1 删除不弹确认（§3.5）：已保存过的行转「待删除」态（删除线 + 琥珀徽标 +
+ *   撤销删除）；未保存过的新行直接从 draft 移除。
  * - id 由前端生成（rule / rule-2 / …，全列表去重），sanitize 会再 slug 化兜底。
  */
 import { useState } from 'react'
 import type { PriceCurrency, PriceCycle, PriceRuleConfig } from '@shared/types'
+import { EntityList, useEscCollapse, type PendingDeleteSlot } from './EntityList'
 import { Field } from './Field'
 import { KeywordTagInput } from './KeywordTagInput'
 import { IconX } from './icons'
@@ -68,12 +73,18 @@ function parseNumber(text: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-export function RulesCard(props: {
-  rules: PriceRuleConfig[]
-  onChange: (rules: PriceRuleConfig[]) => void
-}) {
-  const { rules, onChange } = props
+export function RulesCard(
+  props: {
+    rules: PriceRuleConfig[]
+    onChange: (rules: PriceRuleConfig[]) => void
+  } & PendingDeleteSlot
+) {
+  const { rules, onChange, pendingDelete, onMarkDelete, onUndoDelete } = props
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  useEscCollapse(expandedId != null, () => setExpandedId(null))
+
+  /** 生效列表（剔除待删除行）：上限计数与 aux 按保存后的口径算 */
+  const liveRules = rules.filter((r) => !pendingDelete.has(r.id))
 
   function updateRule(id: string, patch: Partial<PriceRuleConfig>): void {
     onChange(rules.map((r) => (r.id === id ? { ...r, ...patch } : r)))
@@ -85,16 +96,11 @@ export function RulesCard(props: {
     setExpandedId(id)
   }
 
-  function removeRule(id: string): void {
-    onChange(rules.filter((r) => r.id !== id))
-    if (expandedId === id) setExpandedId(null)
-  }
-
   return (
-    <section className="card">
+    <section className="card smon">
       <div className="card-head">
         <span className="card-title">价格规则</span>
-        <span className="card-title-aux">确定性命中 · 优先于关键词</span>
+        <span className="card-title-aux">确定性命中 · 优先于关键词 · {liveRules.length}/20</span>
       </div>
       <Field
         label="规则列表"
@@ -106,63 +112,84 @@ export function RulesCard(props: {
           </span>
         }
       >
-        <div className="card-scroll">
-          {rules.length === 0 ? (
-            <div className="src-empty">
-              暂无价格规则。例如：周期=年付 + 价格上限 ¥100 + 流量下限 500G——
-              标题里同时提到「年付」「¥99」「500G」的帖子即命中。
-            </div>
-          ) : (
-            rules.map((r) => {
+        {rules.length === 0 ? (
+          <div className="smon-empty">
+            暂无价格规则。例如：周期=年付 + 价格上限 ¥100 + 流量下限 500G——
+            标题里同时提到「年付」「¥99」「500G」的帖子即命中。
+          </div>
+        ) : (
+          <EntityList
+            items={rules}
+            rowKey={(r) => r.id}
+            rowClass={(r) => (pendingDelete.has(r.id) ? ' del' : '')}
+            render={(r) => {
               const summary = ruleSummary(r)
-              const expanded = expandedId === r.id
+              const del = pendingDelete.has(r.id)
+              const expanded = expandedId === r.id && !del
+              const name = r.label ?? r.id
               return (
-                <div key={r.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <div className="hit" style={{ opacity: r.enabled ? undefined : 0.55 }}>
-                    <span className="src-name" title={r.label ?? r.id}>
-                      {r.label ?? r.id}
+                <>
+                  <div className={`ent-main${r.enabled ? '' : ' is-off'}`}>
+                    <span className="ent-name" title={name}>
+                      {name}
                     </span>
-                    <span className="ai-reason" title={summary}>
+                    <span className="ent-sum" title={summary}>
                       {summary}
                     </span>
-                    <span className="src-last switch-row">
-                      <button
-                        type="button"
-                        className={`btn${expanded ? ' active' : ''}`}
-                        title={expanded ? '收起编辑表单' : '展开编辑表单'}
-                        aria-expanded={expanded}
-                        onClick={() => setExpandedId(expanded ? null : r.id)}
-                      >
-                        {expanded ? '收起' : '编辑'}
-                      </button>
-                      <button
-                        type="button"
-                        role="switch"
-                        className="switch"
-                        aria-checked={r.enabled}
-                        aria-label={`${r.enabled ? '停用' : '启用'}规则 ${r.label ?? r.id}`}
-                        title={r.enabled ? '点击停用该规则' : '点击启用该规则'}
-                        onClick={() => updateRule(r.id, { enabled: !r.enabled })}
-                      />
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        title={`删除规则「${r.label ?? r.id}」（保存后生效）`}
-                        aria-label={`删除规则 ${r.label ?? r.id}`}
-                        onClick={() => removeRule(r.id)}
-                      >
-                        <IconX size={14} />
-                        删除
-                      </button>
+                    {del && <span className="badge-del">待删除</span>}
+                    <span className="ent-ops">
+                      {!del ? (
+                        <>
+                          <button
+                            type="button"
+                            className={`ent-btn${expanded ? ' active' : ''}`}
+                            title={expanded ? '收起编辑表单' : '展开编辑表单'}
+                            aria-expanded={expanded}
+                            onClick={() => setExpandedId(expanded ? null : r.id)}
+                          >
+                            {expanded ? '收起' : '编辑'}
+                          </button>
+                          <button
+                            type="button"
+                            role="switch"
+                            className="switch"
+                            aria-checked={r.enabled}
+                            aria-label={`${r.enabled ? '停用' : '启用'}规则 ${name}`}
+                            title={r.enabled ? '点击停用该规则' : '点击启用该规则'}
+                            onClick={() => updateRule(r.id, { enabled: !r.enabled })}
+                          />
+                          <button
+                            type="button"
+                            className="ent-btn danger"
+                            title={`标记删除「${name}」（保存后生效；放弃修改可还原）`}
+                            aria-label={`删除规则 ${name}`}
+                            onClick={() => onMarkDelete(r.id)}
+                          >
+                            <IconX size={14} />
+                            删除
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ent-btn"
+                          title={`撤销删除「${name}」`}
+                          onClick={() => onUndoDelete(r.id)}
+                        >
+                          撤销删除
+                        </button>
+                      )}
                     </span>
                   </div>
                   {expanded && (
-                    <div style={{ padding: 'var(--space-2) var(--space-3) var(--space-3)' }}>
+                    <div className="ent-expand">
                       <Field
                         label="规则名称"
+                        htmlFor={`rule-${r.id}-label`}
                         hint="展示用（命中记录与推送里显示）；留空时用规则 id。"
                       >
                         <input
+                          id={`rule-${r.id}-label`}
                           className="input"
                           type="text"
                           spellCheck={false}
@@ -172,9 +199,14 @@ export function RulesCard(props: {
                           onChange={(e) => updateRule(r.id, { label: e.target.value })}
                         />
                       </Field>
-                      <Field label="周期" hint="标题须提到对应周期（年付/月付等写法）；不限则只看其余条件。">
+                      <Field
+                        label="周期"
+                        htmlFor={`rule-${r.id}-cycle`}
+                        hint="标题须提到对应周期（年付/月付等写法）；不限则只看其余条件。"
+                      >
                         <div className="input-row">
                           <select
+                            id={`rule-${r.id}-cycle`}
                             className="input"
                             value={r.cycle}
                             onChange={(e) =>
@@ -192,10 +224,12 @@ export function RulesCard(props: {
                       </Field>
                       <Field
                         label="价格上限"
+                        htmlFor={`rule-${r.id}-max-price`}
                         hint="标题提取出的价格须 ≤ 此值；留空 = 不限。识别 ¥/$/元/刀 等写法；裸数字（如「年付88」的 88）提取不到。"
                       >
                         <div className="input-row">
                           <input
+                            id={`rule-${r.id}-max-price`}
                             className="input num"
                             type="number"
                             min={0}
@@ -222,10 +256,12 @@ export function RulesCard(props: {
                       </Field>
                       <Field
                         label="流量下限（GB）"
+                        htmlFor={`rule-${r.id}-min-traffic`}
                         hint="标题提取出的流量（T / M 自动换算 GB）须 ≥ 此值；留空 = 不限。「不限流量」视为无约束。"
                       >
                         <div className="input-row">
                           <input
+                            id={`rule-${r.id}-min-traffic`}
                             className="input num"
                             type="number"
                             min={0}
@@ -250,24 +286,29 @@ export function RulesCard(props: {
                           onChange={(v) => updateRule(r.id, { keywords: v })}
                         />
                       </Field>
+                      <div className="ent-expand-foot">
+                        <button type="button" className="btn" onClick={() => setExpandedId(null)}>
+                          收起
+                        </button>
+                      </div>
                     </div>
                   )}
-                </div>
+                </>
               )
-            })
-          )}
-        </div>
-        <div className="input-row" style={{ marginTop: 'var(--space-2)' }}>
+            }}
+          />
+        )}
+        <div className="input-row mt-md">
           <button
             type="button"
             className="btn"
-            disabled={rules.length >= 20}
-            title={rules.length >= 20 ? '已达上限 20 条' : '添加一条价格规则并展开编辑'}
+            disabled={liveRules.length >= 20}
+            title={liveRules.length >= 20 ? '已达上限 20 条' : '添加一条价格规则并展开编辑'}
             onClick={addRule}
           >
             添加规则
           </button>
-          <span className="feedback muted">{rules.length}/20 条</span>
+          <span className="feedback muted">{liveRules.length}/20 条</span>
         </div>
       </Field>
     </section>

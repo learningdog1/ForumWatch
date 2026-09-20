@@ -429,8 +429,12 @@ async function main(): Promise<number | null> {
     getFeedbackExamples: () => feedbackStore.recentForPrompt()
   })
   // 锐评生成器与 evaluator 共用同一 provider 实例；provider 未配置时由
-  // engine 的闸拦下（装配层无需判断，与 evaluator 同款无条件注入风格）
-  const commentaryGenerator = new CommentGenerator({ provider: aiProvider })
+  // engine 的闸拦下（装配层无需判断，与 evaluator 同款无条件注入风格）；
+  // 失败/空响应经 logWarn 留痕（对齐 desktop runtime 装配）
+  const commentaryGenerator = new CommentGenerator({
+    provider: aiProvider,
+    logWarn: (msg) => logger.warn(msg)
+  })
   const hitsStore = new HitsStore(join(dir, HITS_DIR_NAME))
   const reportService = new DailyReportService({
     provider: aiProvider,

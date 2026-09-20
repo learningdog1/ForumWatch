@@ -116,6 +116,75 @@ describe('parseFeed：RSS 2.0', () => {
   })
 })
 
+describe('parseFeed：摘要提取（description / summary → Topic.excerpt）', () => {
+  it('RSS description（CDATA 包 HTML 片段）→ 剥标签 + 压缩空白 + 截断 160', () => {
+    const longBody = '字'.repeat(300)
+    const xml = `<?xml version="1.0"?><rss version="2.0"><channel>
+      <item>
+        <title>带正文摘要的帖子</title>
+        <link>https://linux.do/t/topic/100</link>
+        <description><![CDATA[<p>想配一台 <b>ALL-IN-ONE</b> 软路由，<br/>预算 500 内。</p><p>${longBody}</p>]]></description>
+      </item>
+    </channel></rss>`
+    const [topic] = parseFeed(xml, FEED_URL)
+    const excerpt = topic!.excerpt!
+    // CDATA 内容是纯文本（XML 不解析其中的标签），剥标签由 toExcerpt 的 HTML
+    // 解析完成；</p><p> 边界拼接无空格（"内。字"）
+    expect(excerpt.startsWith('想配一台 ALL-IN-ONE 软路由，预算 500 内。字')).toBe(true)
+    expect(excerpt.length).toBe(160)
+    expect(excerpt.endsWith('…')).toBe(true)
+    expect(excerpt).not.toContain('<')
+  })
+
+  it('RSS description 实体转义形态（&lt;p&gt;…）→ 同样剥净并解码实体', () => {
+    const xml = rssItemXml({
+      title: '转义正文',
+      link: 'https://linux.do/t/topic/101',
+      // XML 解码一层（&amp;amp; → &amp;），toExcerpt 的 HTML 解析再解码一层（→ &）
+      description: '&lt;p&gt;9 成新 &amp;amp; 带发票&lt;/p&gt;'
+    })
+    const [topic] = parseFeed(xml, FEED_URL)
+    expect(topic!.excerpt).toBe('9 成新 & 带发票')
+  })
+
+  it('无 description / 纯空白 description → 不写 excerpt 键（undefined 容忍约定）', () => {
+    const bare = parseFeed(rssItemXml({ title: '无摘要', link: 'https://linux.do/t/topic/102' }), FEED_URL)
+    expect('excerpt' in bare[0]!).toBe(false)
+    const blank = parseFeed(
+      rssItemXml({ title: '空摘要', link: 'https://linux.do/t/topic/103', description: '   ' }),
+      FEED_URL
+    )
+    expect('excerpt' in blank[0]!).toBe(false)
+  })
+
+  it('Atom：summary 优先于 content；两者皆缺不写键', () => {
+    const xml = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>summary 优先</title>
+        <link href="https://forum.example/t/200"/>
+        <id>tag:forum.example,2026:Post/200</id>
+        <summary>短摘要 &amp; 关键信息</summary>
+        <content>这是更长的全文 content，不应被采用</content>
+      </entry>
+      <entry>
+        <title>只有 content</title>
+        <link href="https://forum.example/t/201"/>
+        <id>tag:forum.example,2026:Post/201</id>
+        <content>content 退路正文</content>
+      </entry>
+      <entry>
+        <title>两者皆缺</title>
+        <link href="https://forum.example/t/202"/>
+        <id>tag:forum.example,2026:Post/202</id>
+      </entry>
+    </feed>`
+    const topics = parseFeed(xml, FEED_URL)
+    expect(topics[0]!.excerpt).toBe('短摘要 & 关键信息')
+    expect(topics[1]!.excerpt).toBe('content 退路正文')
+    expect('excerpt' in topics[2]!).toBe(false)
+  })
+})
+
 describe('parseFeed：Atom', () => {
   it('rel=alternate 优先于 rel=self；author/name 与 category@term 映射', () => {
     const topics = parseFeed(ATOM_FEED, 'https://forum.example/feed.atom')

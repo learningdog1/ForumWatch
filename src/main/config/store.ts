@@ -13,7 +13,7 @@
  * - 纯 JSON + `schemaVersion`，原子写（同目录 tmp + `renameSync`）。
  * - 损坏容错：读不出 / 非法 JSON / 迁移函数拒认 → 备份成 `{file}.corrupt-{ts}`
  *   后返回默认配置的深拷贝，绝不抛（ADR 3）。
- * - 盘上格式：`{ "schemaVersion": 3, "config": AppConfig }`（缩进 2 空格）。
+ * - 盘上格式：`{ "schemaVersion": 4, "config": AppConfig }`（缩进 2 空格）。
  *   load 路径：JSON.parse → `migrateConfigEnvelope`（v1/v2 → v3 链式，见
  *   migrations.ts）→ 合并 DEFAULT → decryptSecretFields → sanitize。
  *
@@ -54,7 +54,7 @@ export const MIN_POLL_INTERVAL_SEC = 15
 /** pollIntervalSec 非法（非数字 / NaN / Infinity）时的回退值 */
 export const FALLBACK_POLL_INTERVAL_SEC = 60
 
-const CONFIG_SCHEMA_VERSION = 3
+const CONFIG_SCHEMA_VERSION = 4
 // 与 http.ts 的 resolveDispatcherSpec 支持面保持一致（socks5h = 远端 DNS 解析）
 const PROXY_URL_PREFIXES = ['http://', 'https://', 'socks5://', 'socks5h://'] as const
 const PROXY_SCOPES: readonly ProxyScope[] = ['all', 'telegram-only']

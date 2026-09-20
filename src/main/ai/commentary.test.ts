@@ -1,11 +1,12 @@
 /**
  * CommentGenerator 单测：provider.chat 全 mock，零网络。
- * 覆盖：成功返回与请求形状（8s 超时 / 120 tokens / 无 jsonMode / system 契约 /
+ * 覆盖：成功返回与请求形状（25s 超时 / 512 tokens / 无 jsonMode / system 契约 /
  * user 三字段 JSON）/ 后处理（trim、去配对引号、80 字截断（含代理对安全，F2）、
- * 空串归 null）/ chat 抛错 → null 且不抛 / 成功缓存与失败负缓存（二次调用不打
- * LLM）/ 同 key 并发去重（一次 chat）/ prune 保留集语义（成功缓存与负缓存都吃
- * prune；observedSources 守卫：未观测 source 的键保留，F1）/ clear（含在途
- * 回填打断）。
+ * 空串归 null）/ chat 抛错 → null 且不抛 / 成功缓存与失败负缓存（TTL 内二次
+ * 调用不打 LLM、TTL 过期放行重试自愈）/ logWarn 可观测钩子（失败与空响应各
+ * 留痕；缺省注入静默）/ 同 key 并发去重（一次 chat）/ prune 保留集语义（成功
+ * 缓存与负缓存都吃 prune；observedSources 守卫：未观测 source 的键保留，F1）/
+ * clear（含在途回填打断）。
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { Topic } from '../../shared/types'
@@ -46,7 +47,7 @@ function makeHarness(reply: (callIndex: number) => string): Harness {
 }
 
 describe('CommentGenerator.generate', () => {
-  it('成功：返回后处理后的评论文本；请求形状 = 8s 超时 / 120 tokens / 无 jsonMode / system 锐评契约 / user 三字段 JSON', async () => {
+  it('成功：返回后处理后的评论文本；请求形状 = 25s 超时 / 2000 tokens（与评估批同预算）/ 无 jsonMode / system 锐评契约 / user 三字段 JSON', async () => {
     const h = makeHarness(() => '  一句锐评  ')
     const out = await h.generator.generate(topic('1'))
     expect(out).toBe('一句锐评')
@@ -59,8 +60,8 @@ describe('CommentGenerator.generate', () => {
       timeoutMs?: number
       maxTokens?: number
     }
-    expect(req.timeoutMs).toBe(8000)
-    expect(req.maxTokens).toBe(120)
+    expect(req.timeoutMs).toBe(25000)
+    expect(req.maxTokens).toBe(2000)
     expect(req.jsonMode).toBeUndefined() // 纯文本回复，不带 response_format
     expect(req.system).toContain('中文锐评')
     expect(req.system).toContain('60 字以内')
@@ -124,7 +125,7 @@ describe('CommentGenerator.generate', () => {
 
   it('chat 抛 AiProviderError（timeout）→ 返回 null，不向上抛', async () => {
     const chat = vi.fn(() =>
-      Promise.reject(new AiProviderError('AI provider request timed out after 8000ms', 'timeout'))
+      Promise.reject(new AiProviderError('AI provider request timed out after 25000ms', 'timeout'))
     )
     const generator = new CommentGenerator({ provider: { chat } })
     await expect(generator.generate(topic('1'))).resolves.toBeNull()
@@ -158,6 +159,63 @@ describe('CommentGenerator.generate', () => {
     expect(await h.generator.generate(topic('1'))).toBeNull()
     expect(await h.generator.generate(topic('1'))).toBeNull()
     expect(h.chat).toHaveBeenCalledTimes(1)
+  })
+
+  it('失败负缓存 TTL（10 分钟）：窗口内不打 LLM，到点放行重试——供应商恢复后自愈', async () => {
+    let t = 1_000_000
+    let fail = true
+    const chat = vi.fn(() =>
+      fail ? Promise.reject(new Error('network down')) : Promise.resolve('复活锐评')
+    )
+    const generator = new CommentGenerator({ provider: { chat }, now: () => t })
+    expect(await generator.generate(topic('1'))).toBeNull() // 失败 → 负缓存落位
+    expect(await generator.generate(topic('1'))).toBeNull() // TTL 内：不打 LLM
+    expect(chat).toHaveBeenCalledTimes(1)
+    t += 10 * 60 * 1000 // TTL 到点（含）
+    fail = false
+    await expect(generator.generate(topic('1'))).resolves.toBe('复活锐评') // 放行重打
+    expect(chat).toHaveBeenCalledTimes(2)
+    // 成功落位后：负缓存语义不再参与，同 key 命中成功缓存
+    await expect(generator.generate(topic('1'))).resolves.toBe('复活锐评')
+    expect(chat).toHaveBeenCalledTimes(2)
+  })
+
+  it('失败负缓存 TTL 差一秒未到：仍命中负缓存不打 LLM', async () => {
+    let t = 1_000_000
+    const chat = vi.fn(() => Promise.reject(new Error('network down')))
+    const generator = new CommentGenerator({ provider: { chat }, now: () => t })
+    expect(await generator.generate(topic('1'))).toBeNull()
+    t += 10 * 60 * 1000 - 1
+    expect(await generator.generate(topic('1'))).toBeNull()
+    expect(chat).toHaveBeenCalledTimes(1)
+  })
+
+  it('logWarn 钩子：失败留痕（含异常消息与帖标题）；缺省注入时静默不炸', async () => {
+    const warns: string[] = []
+    const chat = vi.fn(() =>
+      Promise.reject(new AiProviderError('AI provider request timed out after 25000ms', 'timeout'))
+    )
+    const generator = new CommentGenerator({ provider: { chat }, logWarn: (m) => warns.push(m) })
+    await expect(generator.generate(topic('1'))).resolves.toBeNull()
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('commentary failed')
+    expect(warns[0]).toContain('timed out after 25000ms')
+    expect(warns[0]).toContain('title-1')
+    // 旧装配不注入 logWarn：静默降级，不抛
+    const silent = new CommentGenerator({ provider: { chat } })
+    await expect(silent.generate(topic('1'))).resolves.toBeNull()
+  })
+
+  it('logWarn 钩子：空响应归 null 时留痕（推理吃光 max_tokens 的可观测口）', async () => {
+    const warns: string[] = []
+    const generator = new CommentGenerator({
+      provider: { chat: () => Promise.resolve('   ') },
+      logWarn: (m) => warns.push(m)
+    })
+    await expect(generator.generate(topic('1'))).resolves.toBeNull()
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('commentary empty after normalize')
+    expect(warns[0]).toContain('max_tokens')
   })
 
   it('并发去重：同 key 两个并发 generate 只触发一次 chat，两者拿到同一结果；落定后缓存生效', async () => {

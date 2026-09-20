@@ -125,6 +125,12 @@ describe('NtfyNotifier', () => {
     expect(bodyOf(h).message).toBe('[交易] 张三<b> · 命中规则: 白菜月付')
   })
 
+  it('sendHit 带锐评：message 为摘要行 + 第二行 💬 锐评（与 bark/telegram 同款行）', async () => {
+    const h = makeHarness(() => okRes)
+    await h.notifier.sendHit({ topic, matchedKeywords: ['x'], commentary: '一句 ntfy 锐评' })
+    expect(bodyOf(h).message).toBe('[交易] 张三<b> · 命中: x\n💬 锐评: 一句 ntfy 锐评')
+  })
+
   it('topic.url 为空串时 body 不带 click 字段', async () => {
     const h = makeHarness(() => okRes)
     await h.notifier.sendHit({ topic: { ...topic, url: '' }, matchedKeywords: ['x'] })

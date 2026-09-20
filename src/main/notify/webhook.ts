@@ -66,7 +66,9 @@ function topicPayload(t: HitMessageInput['topic']): Record<string, unknown> {
     author: t.author,
     category: t.category,
     categorySlug: t.categorySlug,
-    sourceId: t.sourceId
+    sourceId: t.sourceId,
+    // 摘要（可选，RSS/V2EX 来源提供）：undefined 时 JSON.stringify 自然省键
+    ...(t.excerpt !== undefined && t.excerpt !== '' ? { excerpt: t.excerpt } : {})
   }
 }
 

@@ -1,12 +1,16 @@
 /**
- * 「来源」卡片（R4-W4，从 Settings 拆出的新卡片）：
- * - 来源列表：类型徽标（NodeSeek/V2EX/RSS）+ 名称（rss 显示 label 或 host）+
- *   url + 「过滤」展开（R5-P2c：分类白/黑名单 + 作者黑名单，写回该 source 的
- *   filters 字段）+ 启停开关 + 删除按钮。默认 nodeseek 来源不可删除（至少保留
- *   一个来源，列表删空 sanitize 会回默认——UI 侧直接禁删更清晰）。
+ * 「来源」卡片（R4-W4，从 Settings 拆出；阶段 5b 改为 L2 实体行模式）：
+ * - 来源列表（EntityList 外壳）：类型徽标（NodeSeek/V2EX/RSS）+ 名称（rss
+ *   显示 label 或 host）+ url 摘要 + 「过滤」展开（R5-P2c：分类白/黑名单 +
+ *   作者黑名单，写回该 source 的 filters 字段）+ 启停开关 + 删除。默认
+ *   nodeseek 来源不可删除（至少保留一个来源，列表删空 sanitize 会回默认——
+ *   UI 侧直接禁删更清晰；下限按剔除待删除行后的生效列表算）。
+ * - L1 删除不弹确认（settings.md §3.5）：已保存过的行转「待删除」态
+ *   （删除线 + 琥珀徽标 + 撤销删除），保存栏汇总「含 M 项待删除」；
+ *   未保存过的新行直接从 draft 移除（尚无「保存后删除」语义）。
  * - 添加：三个预设（V2EX / Linux.do / LowEndTalk，见 lib/presets.ts；已添加的
- *   按 id 匹配置灰）+ 自定义 RSS（url 前端校验 http(s) 红字反馈；id 从 host
- *   slug 化生成、冲突加 -2/-3 后缀）。
+ *   按 id 匹配置灰——含待删除行，id 仍被占用）+ 自定义 RSS（url 前端校验
+ *   http(s) 红字反馈；id 从 host slug 化生成、冲突加 -2/-3 后缀）。
  * - 状态收在组件内；修改经 onChange 回写 Settings 的 draft config sources 字段，
  *   走既有「保存设置」链路（无新 IPC）。三列表全空时 filters 不落键（undefined，
  *   对齐主进程 sanitize 的落键规则，避免保存后出现假 dirty）。
@@ -15,6 +19,7 @@
  */
 import { useState } from 'react'
 import type { RssSourceConfig, SourceConfig, SourceFilters } from '@shared/types'
+import { EntityList, useEscCollapse, type PendingDeleteSlot } from './EntityList'
 import { Field } from './Field'
 import { KeywordTagInput } from './KeywordTagInput'
 import { IconBroadcast, IconX } from './icons'
@@ -45,20 +50,26 @@ function displayUrl(s: SourceConfig): string {
   return s.type === 'rss' ? s.url : FIXED_TYPE_URL[s.type]
 }
 
-export function SourceCard(props: {
-  sources: SourceConfig[]
-  onChange: (sources: SourceConfig[]) => void
-}) {
-  const { sources, onChange } = props
+export function SourceCard(
+  props: {
+    sources: SourceConfig[]
+    onChange: (sources: SourceConfig[]) => void
+  } & PendingDeleteSlot
+) {
+  const { sources, onChange, pendingDelete, onMarkDelete, onUndoDelete } = props
   // 自定义 RSS 表单状态收在组件内：只有点「添加来源」成功才落进 sources（draft）
   const [customUrl, setCustomUrl] = useState('')
   const [customLabel, setCustomLabel] = useState('')
   const [addError, setAddError] = useState<string | null>(null)
   // 当前展开「过滤」面板的来源 id（一次只展开一个，收拢列表高度）
   const [expandedFilters, setExpandedFilters] = useState<string | null>(null)
+  useEscCollapse(expandedFilters != null, () => setExpandedFilters(null))
 
   const urlTrim = customUrl.trim()
   const urlBad = urlTrim !== '' && httpUrlHost(urlTrim) === null
+
+  /** 生效列表（剔除待删除行）：删空下限与 aux 计数都按保存后的口径算 */
+  const liveSources = sources.filter((s) => !pendingDelete.has(s.id))
 
   function toggle(id: string): void {
     onChange(sources.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)))
@@ -67,18 +78,13 @@ export function SourceCard(props: {
   /** 默认 nodeseek 来源不可删；其余至少保留一个来源（删空 sanitize 会回默认） */
   function canRemove(s: SourceConfig): boolean {
     if (s.type === 'nodeseek' && s.id === 'nodeseek') return false
-    return sources.length > 1
+    return liveSources.length > 1
   }
 
   function removeTitle(s: SourceConfig): string {
     return canRemove(s)
-      ? `删除来源「${displayName(s) ?? typeBadge(s)}」（保存后生效）`
+      ? `标记删除「${displayName(s) ?? typeBadge(s)}」（保存后生效；放弃修改可还原）`
       : '至少保留一个来源：列表删空会被重置回默认'
-  }
-
-  function remove(id: string): void {
-    onChange(sources.filter((s) => s.id !== id))
-    if (expandedFilters === id) setExpandedFilters(null)
   }
 
   /** 过滤条目计数（按钮角标用） */
@@ -134,10 +140,12 @@ export function SourceCard(props: {
   }
 
   return (
-    <section className="card">
+    <section className="card smon">
       <div className="card-head">
         <span className="card-title">来源</span>
-        <span className="card-title-aux">多论坛监控</span>
+        <span className="card-title-aux">
+          {liveSources.length} 个 · {liveSources.filter((s) => s.enabled).length} 启用
+        </span>
       </div>
       <Field
         label="已配置来源"
@@ -148,69 +156,88 @@ export function SourceCard(props: {
           </span>
         }
       >
-        <div className="card-scroll">
-          {sources.length === 0 ? (
-            <div className="src-empty">暂无来源（保存时会被重置回默认 NodeSeek）</div>
-          ) : (
-            sources.map((s) => {
+        {sources.length === 0 ? (
+          <div className="smon-empty">
+            暂无来源。保存时会重置回默认 NodeSeek——可从下方预设一键添加。
+          </div>
+        ) : (
+          <EntityList
+            items={sources}
+            rowKey={(s) => s.id}
+            rowClass={(s) => (pendingDelete.has(s.id) ? ' del' : '')}
+            render={(s) => {
               const name = displayName(s)
               const url = displayUrl(s)
+              const del = pendingDelete.has(s.id)
               const filters = s.filters
-              const filtersOpen = expandedFilters === s.id
+              const filtersOpen = expandedFilters === s.id && !del
               const fCount = filterCount(s)
               return (
-                <div key={s.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <div className="hit" style={{ borderBottom: filtersOpen ? 0 : undefined }}>
+                <>
+                  <div className="ent-main">
                     <span className="src-badge" title={`类型：${typeBadge(s)}`}>
                       {typeBadge(s)}
                     </span>
-                    {name !== null && <span className="src-name">{name}</span>}
-                    <span className="ai-reason" title={url}>
+                    {name !== null && (
+                      <span className="ent-name" title={name}>
+                        {name}
+                      </span>
+                    )}
+                    <span className="ent-sum" title={url}>
                       {url}
                     </span>
-                    <span className="src-last switch-row">
-                      <button
-                        type="button"
-                        className={`btn${filtersOpen ? ' active' : ''}`}
-                        title={
-                          fCount > 0
-                            ? `分类 / 作者过滤（已配 ${fCount} 条）——点击${filtersOpen ? '收起' : '编辑'}`
-                            : `配置该来源的分类 / 作者过滤（当前未配置）`
-                        }
-                        aria-expanded={filtersOpen}
-                        onClick={() => setExpandedFilters(filtersOpen ? null : s.id)}
-                      >
-                        过滤{fCount > 0 ? ` ${fCount}` : ''}
-                      </button>
-                      <button
-                        type="button"
-                        role="switch"
-                        className="switch"
-                        aria-checked={s.enabled}
-                        aria-label={`${s.enabled ? '停用' : '启用'}来源 ${name ?? typeBadge(s)}`}
-                        title={s.enabled ? '点击停用该来源' : '点击启用该来源'}
-                        onClick={() => toggle(s.id)}
-                      />
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        disabled={!canRemove(s)}
-                        title={removeTitle(s)}
-                        aria-label={`删除来源 ${name ?? typeBadge(s)}`}
-                        onClick={() => remove(s.id)}
-                      >
-                        <IconX size={14} />
-                        删除
-                      </button>
+                    {del && <span className="badge-del">待删除</span>}
+                    <span className="ent-ops">
+                      {!del ? (
+                        <>
+                          <button
+                            type="button"
+                            className={`ent-btn${filtersOpen ? ' active' : ''}`}
+                            title={
+                              fCount > 0
+                                ? `分类 / 作者过滤（已配 ${fCount} 条）——点击${filtersOpen ? '收起' : '编辑'}`
+                                : `配置该来源的分类 / 作者过滤（当前未配置）`
+                            }
+                            aria-expanded={filtersOpen}
+                            onClick={() => setExpandedFilters(filtersOpen ? null : s.id)}
+                          >
+                            过滤{fCount > 0 ? ` ${fCount}` : ''}
+                          </button>
+                          <button
+                            type="button"
+                            role="switch"
+                            className="switch"
+                            aria-checked={s.enabled}
+                            aria-label={`${s.enabled ? '停用' : '启用'}来源 ${name ?? typeBadge(s)}`}
+                            title={s.enabled ? '点击停用该来源' : '点击启用该来源'}
+                            onClick={() => toggle(s.id)}
+                          />
+                          <button
+                            type="button"
+                            className="ent-btn danger"
+                            disabled={!canRemove(s)}
+                            title={removeTitle(s)}
+                            aria-label={`删除来源 ${name ?? typeBadge(s)}`}
+                            onClick={() => onMarkDelete(s.id)}
+                          >
+                            <IconX size={14} />
+                            删除
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ent-btn"
+                          title={`撤销删除「${name ?? typeBadge(s)}」`}
+                          onClick={() => onUndoDelete(s.id)}
+                        >
+                          撤销删除
+                        </button>
+                      )}
                     </span>
                   </div>
                   {filtersOpen && (
-                    <div
-                      style={{
-                        padding: 'var(--space-2) var(--space-3) var(--space-3)',
-                        background: 'var(--card-alt)'
-                      }}
-                    >
+                    <div className="ent-expand">
                       <Field
                         label="分类白名单"
                         hint="非空时只放行命中分类的帖子：匹配分类显示名或 slug（如 交易 / trade），不区分大小写。"
@@ -244,13 +271,18 @@ export function SourceCard(props: {
                           onChange={(v) => patchFilters(s.id, { blockedAuthors: v })}
                         />
                       </Field>
+                      <div className="ent-expand-foot">
+                        <button type="button" className="btn" onClick={() => setExpandedFilters(null)}>
+                          收起
+                        </button>
+                      </div>
                     </div>
                   )}
-                </div>
+                </>
               )
-            })
-          )}
-        </div>
+            }}
+          />
+        )}
       </Field>
       <Field label="预设来源" hint="点击一键添加（仍需保存才生效）；已添加的置灰。">
         <div className="input-row">
@@ -280,6 +312,7 @@ export function SourceCard(props: {
       </Field>
       <Field
         label="RSS 地址"
+        htmlFor="src-url"
         hint={
           urlBad ? (
             <span className="feedback err">
@@ -291,7 +324,9 @@ export function SourceCard(props: {
         }
       >
         <input
+          id="src-url"
           className={`input mono${urlBad ? ' invalid' : ''}`}
+          aria-invalid={urlBad}
           type="text"
           spellCheck={false}
           autoComplete="off"
@@ -303,8 +338,9 @@ export function SourceCard(props: {
           }}
         />
       </Field>
-      <Field label="显示名（可选）" hint="列表里展示的名字；留空时用地址的域名。">
+      <Field label="显示名（可选）" htmlFor="src-label" hint="列表里展示的名字；留空时用地址的域名。">
         <input
+          id="src-label"
           className="input"
           type="text"
           spellCheck={false}

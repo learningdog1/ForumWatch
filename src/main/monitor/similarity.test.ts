@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  SHORT_TITLE_GUARD,
-  isSimilarToAny,
-  jaccard,
-  normalizeTitle,
-  trigrams
-} from './similarity'
+import { SHORT_TITLE_GUARD, findSimilarTo, isSimilarToAny, jaccard, normalizeTitle, trigrams } from './similarity'
 
 /**
  * 黄金样本全部来自实现的真实行为（写测试前先跑通实现再固化预期），
@@ -187,5 +181,46 @@ describe('isSimilarToAny', () => {
   it('空 recentTitles → 恒 false', () => {
     expect(isSimilarToAny('随便一个长标题', [], 0.72)).toBe(false)
     expect(isSimilarToAny('随便一个长标题', [], 0)).toBe(false)
+  })
+})
+
+describe('findSimilarTo（带明细版）', () => {
+  it('返回首个命中条目的标题与相似度', () => {
+    // 与既有 isSimilarToAny 用例同款相似对（装饰符归一后高重叠）
+    const m = findSimilarTo(
+      '【转发】便宜 VPS 年付 99 元的活动帖子！',
+      [normalizeTitle('无关标题很长的一行字'), normalizeTitle('便宜 vps 年付 99 元的活动帖子')],
+      0.72
+    )
+    expect(m).not.toBeNull()
+    expect(m!.title).toBe(normalizeTitle('便宜 vps 年付 99 元的活动帖子'))
+    expect(m!.score).toBeGreaterThan(0.72)
+    expect(m!.score).toBeLessThanOrEqual(1)
+  })
+
+  it('完全相同标题 → score 恰为 1', () => {
+    const m = findSimilarTo('same title here', [normalizeTitle('same title here')], 0.72)
+    expect(m).toMatchObject({ score: 1 })
+  })
+
+  it('遍历序 = 入参序：前条略低于阈、后条更高时返回后条', () => {
+    const title = '[福利] 腾讯云 38/月 新用户首年冲了'
+    const weak = normalizeTitle('腾讯云 38/月 新用户首年') // J≈0.706 < 0.72
+    const strong = normalizeTitle(title) // J=1
+    const m = findSimilarTo(title, [weak, strong], 0.72)
+    expect(m!.title).toBe(strong)
+  })
+
+  it('不相似 / 空窗口 / 短标题守卫 → null（与 isSimilarToAny 布尔投影一致）', () => {
+    expect(findSimilarTo('聊聊完全不同的 vps 话题', [normalizeTitle('便宜 vps 年付 99 元的活动帖子')], 0.72)).toBeNull()
+    expect(findSimilarTo('随便一个长标题', [], 0.72)).toBeNull()
+    expect(findSimilarTo('vps2', [normalizeTitle('vps2')], 0.72)).toBeNull()
+    // 布尔投影对齐
+    for (const [t, recents, th] of [
+      ['same title here', [normalizeTitle('same title here')], 0.72],
+      ['聊聊完全不同的 vps 话题', [normalizeTitle('便宜 vps 年付 99 元的活动帖子')], 0.72]
+    ] as const) {
+      expect(isSimilarToAny(t, [...recents], th)).toBe(findSimilarTo(t, [...recents], th) !== null)
+    }
   })
 })

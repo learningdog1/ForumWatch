@@ -1,5 +1,7 @@
 /**
  * 「推送策略」卡片（R6-W4）：notify 段的 UI——
+ * - 推送总开关（阶段 5a 起「行为」卡废止，本 Field 自该卡并入为首行，
+ *   settings.md §7；字段仍存于 draft 顶层 notifyEnabled，由 Settings 下发回写）；
  * - mode 单选：instant 命中即推 / digest 摘要攒批；
  * - digestIntervalMin 数字输入（sanitize 钳 [1,120]，前端只提示不拦截）；
  * - 免打扰：开关 + start/end（HH:MM 时间输入，跨午夜合法——23:00-08:00 表示
@@ -19,6 +21,9 @@ const NOTIFY_MODES: { value: NotifyConfig['mode']; title: string; desc: string }
 export function NotifyCard(props: {
   notify: NotifyConfig
   onChange: (notify: NotifyConfig) => void
+  /** 推送总开关（临时静音）——不传则不渲染该 Field（机制字段在 draft 顶层） */
+  notifyEnabled?: boolean
+  onNotifyEnabledToggle?: () => void
 }) {
   const { notify, onChange } = props
 
@@ -26,13 +31,32 @@ export function NotifyCard(props: {
   const intervalBad = !Number.isFinite(intervalNum) || intervalNum < 1 || intervalNum > 120
 
   return (
-    <section className="card">
+    <section className="card snot">
       <div className="card-head">
         <span className="card-title">推送策略</span>
-        <span className="card-title-aux">{notify.mode === 'digest' ? `摘要 · ${notify.digestIntervalMin} 分钟` : '实时'}</span>
+        <span className="card-title-aux">
+          {notify.mode === 'digest' ? `摘要 · ${notify.digestIntervalMin} 分钟` : '实时'}
+          {props.notifyEnabled === false ? ' · 静音中' : ''}
+        </span>
       </div>
+      {props.notifyEnabled != null && props.onNotifyEnabledToggle != null && (
+        <Field label="推送总开关" hint="临时静音：仍记录命中但不推送。">
+          <div className="switch-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={props.notifyEnabled}
+              className="switch"
+              aria-label="推送总开关"
+              onClick={props.onNotifyEnabledToggle}
+            />
+            <span className="feedback muted">{props.notifyEnabled ? '开启' : '已静音'}</span>
+          </div>
+        </Field>
+      )}
       <Field
         label="推送模式"
+        htmlFor="notify-mode-instant"
         hint={
           <span>
             摘要模式下命中不即时推送：先进挂起队列，到达间隔后按插入序合并冲刷
@@ -44,6 +68,7 @@ export function NotifyCard(props: {
           {NOTIFY_MODES.map((m) => (
             <label className="radio" key={m.value}>
               <input
+                id={`notify-mode-${m.value}`}
                 type="radio"
                 name="notify-mode"
                 checked={notify.mode === m.value}
@@ -59,6 +84,7 @@ export function NotifyCard(props: {
       </Field>
       <Field
         label="摘要间隔"
+        htmlFor="notify-digest-interval"
         hint={
           intervalBad ? (
             <span className="err">需为 1-120 的分钟数（保存时会被钳制）</span>
@@ -69,6 +95,7 @@ export function NotifyCard(props: {
       >
         <div className="input-row">
           <input
+            id="notify-digest-interval"
             className={`input num${intervalBad ? ' invalid' : ''}`}
             type="number"
             min={1}
@@ -84,6 +111,7 @@ export function NotifyCard(props: {
       </Field>
       <Field
         label="免打扰时段"
+        htmlFor="notify-quiet-start"
         hint={
           <span>
             窗内命中的推送挂起到窗尾合并发送（只作用于实时模式——摘要模式本身已是
@@ -107,6 +135,7 @@ export function NotifyCard(props: {
             }
           />
           <input
+            id="notify-quiet-start"
             className={`input input-time num${notify.quietHours.enabled ? '' : ' input-disabled'}`}
             type="time"
             value={notify.quietHours.startHHMM}
@@ -118,6 +147,7 @@ export function NotifyCard(props: {
           />
           <span className="feedback muted">至</span>
           <input
+            id="notify-quiet-end"
             className={`input input-time num${notify.quietHours.enabled ? '' : ' input-disabled'}`}
             type="time"
             value={notify.quietHours.endHHMM}

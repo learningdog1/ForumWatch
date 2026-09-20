@@ -192,6 +192,14 @@ export interface Topic {
   pinned: boolean
   /** 最近活跃时间（ISO 字符串，来自 <time datetime>，是最后回复时间而非发帖时间） */
   lastActiveAt: string | null
+  /**
+   * 帖子摘要（纯文本：已剥 HTML 标签、压缩空白、截断）。**可选**：RSS
+   * description / V2EX content 能提供，nodeseek 列表页没有——无摘要的来源不写
+   * 该键。随 Topic 进 HitRecord/hits jsonl 落盘：**旧记录没有此字段，消费方必须
+   * 容忍 undefined**（等价"无摘要"，与 matchedRule 可选字段同款约定）；推送文案
+   * （telegram 的 📄 摘要行）按缺省省略。
+   */
+  excerpt?: string
 }
 
 /** 命中记录：一个新帖命中（字面、语义或价格规则）并（尝试）推送 */
@@ -451,25 +459,18 @@ export interface SourceStatus {
 export interface AiRuntimeStatus {
   /** Provider 三项（baseUrl/apiKey/model）是否齐备 */
   configured: boolean
-  /** 生效模式：Provider 未配置或当日配额耗尽时降级为 'literal' */
+  /** 生效模式：Provider 未配置时降级为 'literal' */
   effectiveMode: MatchMode
-  degraded: 'none' | 'unconfigured' | 'quota-exhausted'
-  /** 今日语义评估调用次数（本地自然日滚动） */
+  /** 降级态：'unconfigured' = Provider 未配置（语义档整体降级字面）。无配额降级（不设每日上限） */
+  degraded: 'none' | 'unconfigured'
+  /** 今日 AI 调用次数（语义评估 + 锐评合计；本地自然日滚动，纯观测计数，无上限） */
   callsToday: number
   /**
-   * 每日锐评调用数，上限 100（第三轮）。**可选**：渲染层后续消费，旧消费者
-   * （状态快照的既有读者）不破——缺字段等价于 0。与 callsToday 共用同一本地
-   * 自然日滚动与同一总桶（dailyLimit 300）：锐评每次调用同时计入两者。
+   * 今日锐评调用数（第三轮）。**可选**：渲染层消费，旧消费者（状态快照的既有
+   * 读者）不破——缺字段等价于 0。与 callsToday 共用同一本地自然日滚动；已计入
+   * callsToday（锐评一次调用两计数各 +1），无独立子限额。
    */
   commentaryToday?: number
-  /**
-   * 每日锐评调用上限（当前 100，常量不进配置；F4 单一事实源）。**可选**：由
-   * engine 的 deriveAiStatus 随状态下发，渲染层读它而非硬编码；缺字段时消费方
-   * 回退默认 100（旧状态快照读者不破）。
-   */
-  commentaryLimit?: number
-  /** 每日调用上限（常量 300，v2 不进配置） */
-  dailyLimit: number
   lastAiError: string | null
 }
 
@@ -521,7 +522,6 @@ export const INITIAL_ENGINE_STATUS: EngineStatus = {
     effectiveMode: 'literal',
     degraded: 'unconfigured',
     callsToday: 0,
-    dailyLimit: 300,
     lastAiError: null
   }
 }

@@ -131,6 +131,26 @@ describe('formatHitSummaryLine（bark body / ntfy message 共用摘要行）', (
     // 空串 reason 视为无理由（与 telegram 的空串省略习惯一致）
     expect(formatHitSummaryLine(topic, [], null, '')).toBe('[交易] 张三<b> · 语义命中')
   })
+
+  it('锐评行：commentary 非空时追加第二行 💬 锐评（与 telegram 同款）；null/undefined/空串不追加', () => {
+    expect(formatHitSummaryLine(topic, ['冰箱'], null, null, '一句锐评')).toBe(
+      '[交易] 张三<b> · 命中: 冰箱\n💬 锐评: 一句锐评'
+    )
+    expect(formatHitSummaryLine(topic, [], null, '理由', '语义锐评')).toBe(
+      '[交易] 张三<b> · 语义命中: 理由\n💬 锐评: 语义锐评'
+    )
+    expect(formatHitSummaryLine(topic, [], '白菜月付', null, '规则锐评')).toBe(
+      '[交易] 张三<b> · 命中规则: 白菜月付\n💬 锐评: 规则锐评'
+    )
+    // 三态缺省：整行省略（对齐 telegram 的空/null 省略契约）
+    expect(formatHitSummaryLine(topic, ['冰箱'], null, null, null)).toBe(
+      '[交易] 张三<b> · 命中: 冰箱'
+    )
+    expect(formatHitSummaryLine(topic, ['冰箱'], null, null, undefined)).toBe(
+      '[交易] 张三<b> · 命中: 冰箱'
+    )
+    expect(formatHitSummaryLine(topic, ['冰箱'], null, null, '')).toBe('[交易] 张三<b> · 命中: 冰箱')
+  })
 })
 
 describe('BarkNotifier', () => {
@@ -150,6 +170,12 @@ describe('BarkNotifier', () => {
     expect(body.url).toBe(topic.url)
     expect(body.group).toBe('ForumWatch')
     expect(h.sleeps).toEqual([]) // 首条不等待
+  })
+
+  it('sendHit 带锐评：body 为摘要行 + 第二行锐评（引擎传 commentary 时）', async () => {
+    const h = makeHarness(() => okRes)
+    await h.notifier.sendHit({ topic, matchedKeywords: ['冰箱'], commentary: '好价，但先问自己需不需要' })
+    expect(bodyOf(h).body).toBe('[交易] 张三<b> · 命中: 冰箱\n💬 锐评: 好价，但先问自己需不需要')
   })
 
   it('自定义 serverUrl：以其为端点 base，且去尾斜杠', async () => {

@@ -183,7 +183,9 @@ describe('runMatchTest：相似降噪', () => {
     )
     const s = stageOf(r, STAGE_SIMILARITY)
     expect(s.outcome).toBe('block')
-    expect(s.detail).toContain('与近期已推标题相似')
+    expect(s.detail).toContain('与近期已推标题相似（相似度 ')
+    // 命中明细：指出与哪条已推标题相似（归一化标题进引号）
+    expect(s.detail).toContain('「便宜 vps 年付 99 元的活动帖子」')
     expect(stageOf(r, STAGE_LITERAL).outcome).toBe('pass')
     expect(r.wouldPush).toBe(false)
   })

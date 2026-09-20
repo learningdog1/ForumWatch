@@ -5,9 +5,10 @@
  * - **绝不抛**：网络/超时/未配置/HTTP/bad-json/空响应等一切异常在内部消化为
  *   null——锐评是锦上添花，绝不允许拖垮命中推送主链路（对齐 D5 日报"不许因
  *   LLM 挂掉而失败"的降级哲学，但更彻底：连降级文案都没有，直接无锐评）。
- * - 结果缓存（仅内存 Map，对齐 D4 verdict 的语义）：成功缓存评论文本、**失败
- *   也缓存 null（负缓存）**——同 key 再调用不再打 LLM，防 engine 推送重试
- *   路径反复烧配额；重启后重生成一次的成本可忽略。
+ * - 结果缓存（仅内存 Map，对齐 D4 verdict 的语义）：成功缓存评论文本；**失败
+ *   也缓存 null（负缓存，10 分钟 TTL）**——TTL 内同 key 再调用不打 LLM，防
+ *   engine 推送重试路径反复打调用；TTL 过期放行重试，供应商恢复后能自愈
+ *   （旧语义失败永续，慢供应商恢复后锐评仍全灭）。重启后重生成一次的成本可忽略。
  * - 并发去重：同 key 在途 Promise 复用，防重试路径并发双打。
  * - prune/clear：与 engine 的 pruneRetryMaps 同语义——轮末只保留本轮仍出现
  *   在页面上的帖子的键（`${sourceId}:${id}`，与 seen 键同构）；滚出首页后
@@ -25,10 +26,18 @@
 import type { Topic } from '../../shared/types'
 import type { AiProvider } from './provider'
 
-/** 锐评请求超时：非关键路径，远小于评估批的 15s / 日报的 30s */
-export const COMMENTARY_TIMEOUT_MS = 8000
-/** 锐评请求 max_tokens：60 字中文锐评的规模余量 */
-export const COMMENTARY_MAX_TOKENS = 120
+/** 锐评请求超时：慢供应商（推理型模型常规延迟 15s+，实测评估批 15s 也成片超时）
+ * 下 8s 预算全灭（0/83），对齐日报的 30s 档取 25s；锐评在推送前生成，此值即
+ * 慢供应商下单条命中的额外推送延迟上限 */
+export const COMMENTARY_TIMEOUT_MS = 25000
+/** 锐评请求 max_tokens：推理型模型的思考 token 与正文**共用产出预算**，
+ * 预算不足时思考吃光、content 返回空串（实测 512 下 64 次 content="" 仅
+ * 14/146 挤出正文；评估批同模型 2000 稳定有正文）——对齐评估批预算取 2000；
+ * 可见正文仍由 COMMENTARY_MAX_CHARS 截到 80 */
+export const COMMENTARY_MAX_TOKENS = 2000
+/** 失败负缓存 TTL：窗口内同 key 重试直接 null 不打 LLM（防推送重试风暴），
+ * 过期后放行重试——供应商恢复后能自愈（旧语义：失败永续缓存到 prune/重启） */
+export const COMMENTARY_NEG_CACHE_TTL_MS = 10 * 60 * 1000
 /** 后处理长度上限（字符口径）：prompt 要求 60 字，留 1/3 余量到 80 截断 */
 export const COMMENTARY_MAX_CHARS = 80
 /** 去引号轮数上限：正常最多两层包裹（“"..."”），3 轮防病态输入 */
@@ -51,17 +60,28 @@ const SYSTEM_PROMPT =
 
 export interface CommentGeneratorDeps {
   provider: Pick<AiProvider, 'chat'>
+  /** 失败/空响应的可观测钩子（生产接 logger.warn；缺省静默——旧测试不注入即旧行为）。
+   * 旧版失败完全无声，慢供应商下锐评全灭而无任何日志可查，故补此口。 */
+  logWarn?: (message: string) => void
+  /** 测试注入假时钟；默认 Date.now（负缓存 TTL 判定用，对齐 bark/ntfy 的注入风格） */
+  now?: () => number
 }
 
 export class CommentGenerator {
   private readonly provider: Pick<AiProvider, 'chat'>
-  /** 已落定的结果缓存：成功 = 评论文本，失败 = null（负缓存） */
+  private readonly logWarn: (message: string) => void
+  private readonly now: () => number
+  /** 已落定的结果缓存：成功 = 评论文本，失败 = null（负缓存，TTL 见 negExpiresAt） */
   private readonly cache = new Map<string, string | null>()
+  /** 负缓存到期表：key → 失败结果作废时刻（now() 口径）；成功缓存无到期 */
+  private readonly negExpiresAt = new Map<string, number>()
   /** 在途去重：同 key 并发 generate 复用同一个 Promise */
   private readonly inflight = new Map<string, Promise<string | null>>()
 
   constructor(deps: CommentGeneratorDeps) {
     this.provider = deps.provider
+    this.logWarn = deps.logWarn ?? (() => undefined)
+    this.now = deps.now ?? (() => Date.now())
   }
 
   /**
@@ -71,7 +91,15 @@ export class CommentGenerator {
   async generate(topic: Topic): Promise<string | null> {
     const key = commentaryKey(topic)
     const settled = this.cache.get(key)
-    if (settled !== undefined) return settled
+    if (settled !== undefined) {
+      if (settled !== null) return settled
+      // 失败负缓存：TTL 内直接 null 不打 LLM；过期视为未缓存，放行重试自愈。
+      // 无到期记录（防御：非本类写入的 null）按旧语义永久缓存。
+      const expiresAt = this.negExpiresAt.get(key)
+      if (expiresAt === undefined || this.now() < expiresAt) return null
+      this.cache.delete(key)
+      this.negExpiresAt.delete(key)
+    }
     const existing = this.inflight.get(key)
     if (existing !== undefined) return existing
 
@@ -80,6 +108,8 @@ export class CommentGenerator {
       // 调用方仍拿到本次结果，但缓存态以清理动作为准
       if (this.inflight.get(key) === p) {
         this.cache.set(key, text)
+        if (text === null) this.negExpiresAt.set(key, this.now() + COMMENTARY_NEG_CACHE_TTL_MS)
+        else this.negExpiresAt.delete(key)
         this.inflight.delete(key)
       }
       return text
@@ -101,6 +131,11 @@ export class CommentGenerator {
         this.cache.delete(key)
       }
     }
+    for (const key of [...this.negExpiresAt.keys()]) {
+      if (!keepKeys.has(key) && this.shouldPrune(key, observedSources)) {
+        this.negExpiresAt.delete(key)
+      }
+    }
     for (const key of [...this.inflight.keys()]) {
       if (!keepKeys.has(key) && this.shouldPrune(key, observedSources)) {
         this.inflight.delete(key)
@@ -116,10 +151,12 @@ export class CommentGenerator {
   /** 测试/重置用：清空结果缓存与在途表（在途调用仍会完成但不回填缓存） */
   clear(): void {
     this.cache.clear()
+    this.negExpiresAt.clear()
     this.inflight.clear()
   }
 
-  /** 单次 LLM 调用 + 后处理；一切异常消化为 null（generate 的绝不抛契约） */
+  /** 单次 LLM 调用 + 后处理；一切异常消化为 null（generate 的绝不抛契约）。
+   * 失败与空响应经 logWarn 钩子留痕（缺省静默）——降级本身不变，但不再无声。 */
   private async requestCommentary(topic: Topic): Promise<string | null> {
     try {
       const content = await this.provider.chat({
@@ -132,9 +169,20 @@ export class CommentGenerator {
         timeoutMs: COMMENTARY_TIMEOUT_MS,
         maxTokens: COMMENTARY_MAX_TOKENS
       })
-      return normalizeComment(content)
-    } catch {
-      // 网络/超时/未配置/HTTP/bad-json：锐评非关键路径，静默降级为无锐评
+      const normalized = normalizeComment(content)
+      if (normalized === null) {
+        this.logWarn(
+          `commentary empty after normalize (content=${JSON.stringify((content ?? '').slice(0, 40))}` +
+            `, possibly reasoning consumed max_tokens): "${topic.title}"`
+        )
+      }
+      return normalized
+    } catch (err) {
+      // 网络/超时/未配置/HTTP/bad-json：锐评非关键路径，降级为无锐评（留一条 warn）
+      this.logWarn(
+        `commentary failed: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}` +
+          ` (topic: "${topic.title}")`
+      )
       return null
     }
   }

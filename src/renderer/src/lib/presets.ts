@@ -41,7 +41,7 @@ export const SOURCE_PRESETS: SourcePreset[] = [
     config: {
       id: 'lowendtalk',
       type: 'rss',
-      url: 'https://lowendtalk.com/feed',
+      url: 'https://lowendtalk.com/discussions/feed.rss',
       label: 'LowEndTalk',
       enabled: true
     }

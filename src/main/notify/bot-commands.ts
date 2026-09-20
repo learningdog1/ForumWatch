@@ -118,11 +118,7 @@ export function formatStatusReply(s: EngineStatus): string {
         ? '语义'
         : '字面+语义'
   const degradedText =
-    s.ai.degraded === 'unconfigured'
-      ? '（Provider 未配置，已降级字面）'
-      : s.ai.degraded === 'quota-exhausted'
-        ? '（当日配额耗尽，已降级字面）'
-        : ''
+    s.ai.degraded === 'unconfigured' ? '（Provider 未配置，已降级字面）' : ''
   return [
     '📊 ForumWatch 状态',
     `引擎: ${desiredText} · 健康: ${healthText}`,

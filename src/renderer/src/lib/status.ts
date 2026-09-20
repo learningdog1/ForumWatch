@@ -19,9 +19,21 @@ export function deriveRunState(s: EngineStatus): RunState {
   return { key: 'running', label: '运行中' }
 }
 
-/** 来源 id → 展示名（'nodeseek' → 'NodeSeek'；未知 id 原样展示） */
+/**
+ * 来源 id → 展示名：全应用唯一映射（R10 阶段 2 升级为单源，REDESIGN §6.7 /
+ * audit #9——去向 / 历史命中 / 监控台状态卡与命中行共用；设置路由下拉阶段 5 接入）。
+ * 内置 id 全集与 lib/presets.ts 的来源预设对齐；用户自建 RSS 来源（任意 slug）
+ * 无内置映射，原样展示 id。
+ */
+const SOURCE_LABELS: Record<string, string> = {
+  nodeseek: 'NodeSeek',
+  v2ex: 'V2EX',
+  'linux-do': 'Linux.do',
+  lowendtalk: 'LowEndTalk'
+}
+
 export function sourceLabel(id: string): string {
-  return id === 'nodeseek' ? 'NodeSeek' : id
+  return SOURCE_LABELS[id] ?? id
 }
 
 /** 匹配模式 → 中文徽标文案 */

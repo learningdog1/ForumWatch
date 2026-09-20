@@ -22,7 +22,7 @@
 import { applySourceFilters } from './filters'
 import { matchTopic } from './matcher'
 import { evaluateRules, extractDeal } from './rules'
-import { isSimilarToAny } from './similarity'
+import { findSimilarTo, type SimilarityMatch } from './similarity'
 import type { AppConfig, SourceFilters, Topic } from '../../shared/types'
 import type { MatchStageResult, MatchTestResult } from '../../shared/ipc'
 
@@ -50,7 +50,7 @@ export interface MatchTestInput {
   /** 选中来源的 filters（无 = undefined：来源过滤阶段 skip） */
   filters?: SourceFilters
   cfg: Pick<AppConfig, 'excludeKeywords' | 'includeKeywords' | 'priceRules' | 'similarity' | 'ai'>
-  /** 已归一化的近期已推标题（调用方从 hitsStore.readRecent 准备，契约同 isSimilarToAny） */
+  /** 已归一化的近期已推标题（调用方从 hitsStore.readRecent 准备，契约同 findSimilarTo） */
   recentPushedTitles: string[]
   /** 可选：AI 档结果（见 SemanticTestInput） */
   semantic?: SemanticTestInput
@@ -115,6 +115,13 @@ function describeDeal(title: string): string {
 }
 
 /** trim + 小写相等（filters.ts 的 norm 同口径，仅用于 block 原因的展示文案） */
+/** 相似拦截明细里已推标题的展示截断（字符）：长标题截尾省略号，detail 保持可读 */
+const SIMILAR_DETAIL_TITLE_MAX = 40
+
+function clipTitle(s: string): string {
+  return s.length <= SIMILAR_DETAIL_TITLE_MAX ? s : `${s.slice(0, SIMILAR_DETAIL_TITLE_MAX - 1)}…`
+}
+
 function eqIgnoreCase(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
@@ -161,6 +168,8 @@ export function runMatchTest(input: MatchTestInput): MatchTestResult {
   let hitAny = false
   /** 相似降噪是否拦截 */
   let similarBlocked = false
+  /** 相似命中的窗口条目明细（拦截时向用户展示"和哪条相似"） */
+  let similarMatch: SimilarityMatch | null
 
   const push = (
     stage: string,
@@ -249,13 +258,18 @@ export function runMatchTest(input: MatchTestInput): MatchTestResult {
     pushSkip(STAGE_SIMILARITY, '相似降噪', dead)
   } else if (!cfg.similarity.enabled) {
     push(STAGE_SIMILARITY, '相似降噪', 'skip', '相似降噪已关闭')
-  } else if (isSimilarToAny(title, input.recentPushedTitles, cfg.similarity.threshold)) {
+  } else if (
+    (similarMatch = findSimilarTo(title, input.recentPushedTitles, cfg.similarity.threshold)) !==
+    null
+  ) {
     similarBlocked = true
     push(
       STAGE_SIMILARITY,
       '相似降噪',
       'block',
-      `与近期已推标题相似（阈值 ${cfg.similarity.threshold}）——即使命中也不推送`
+      `与近期已推标题相似（相似度 ${similarMatch.score.toFixed(2)} ≥ 阈值 ${cfg.similarity.threshold}）：` +
+        `「${clipTitle(similarMatch.title)}」——即使命中也不推送（48h 已推窗口的防重复语义；` +
+        `测试台在推送之后回测同帖会与它自己相似，属正常）`
     )
   } else {
     push(

@@ -986,7 +986,7 @@ describe('ConfigStore', () => {
     expect(tg0(loaded.channels).chatId).toBe('-100200')
     // 盘上是带 schemaVersion 的信封
     const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
-    expect(onDisk.schemaVersion).toBe(3)
+    expect(onDisk.schemaVersion).toBe(4)
     expect(onDisk.config.channels[0].botToken).toBe('111:abc')
     // 旧顶层 telegram 键已消失：写路径只写新形状（DEC-9）
     expect('telegram' in onDisk.config).toBe(false)
@@ -1028,7 +1028,7 @@ describe('ConfigStore', () => {
     // 保存回写的是 v3 信封（迁移完成后不再回落 v1/v2）
     new ConfigStore(configPath).save(loaded)
     const onDisk = JSON.parse(await readFile(configPath, 'utf-8'))
-    expect(onDisk.schemaVersion).toBe(3)
+    expect(onDisk.schemaVersion).toBe(4)
   })
 
   it('v2 config 文件落盘后 load 出 v3：sources 逐项映射为 nodeseek 形状，其余字段保留', async () => {
@@ -1057,7 +1057,7 @@ describe('ConfigStore', () => {
     ])
     // 再保存即落 v3
     new ConfigStore(configPath).save(loaded)
-    expect(JSON.parse(await readFile(configPath, 'utf-8')).schemaVersion).toBe(3)
+    expect(JSON.parse(await readFile(configPath, 'utf-8')).schemaVersion).toBe(4)
   })
 
   it('update：浅合并顶层字段，channels 数组整体替换（R6-W1）', () => {
@@ -1304,17 +1304,17 @@ describe('ConfigStore', () => {
       schemaVersion: number
       config: Record<string, unknown>
     }
-    expect(onDisk.schemaVersion).toBe(3)
+    expect(onDisk.schemaVersion).toBe(4)
     expect('telegram' in onDisk.config).toBe(false) // 旧键消失：写路径只写新形状
     expect(onDisk.config['channels']).toEqual([
       { id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' }
     ])
   })
 
-  it('盘上信封 schemaVersion 未知（4）：按损坏备份并回默认', async () => {
+  it('盘上信封 schemaVersion 未知（5）：按损坏备份并回默认', async () => {
     await writeFile(
       configPath,
-      JSON.stringify({ schemaVersion: 4, config: { includeKeywords: ['vps'] } }),
+      JSON.stringify({ schemaVersion: 5, config: { includeKeywords: ['vps'] } }),
       'utf-8'
     )
     const store = new ConfigStore(configPath)

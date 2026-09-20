@@ -45,7 +45,7 @@ export const DISPOSITION_OUTCOMES = [
   'semantic-miss',
   /** 语义判 hit 但置信度 < ai.semanticThreshold（终态：入 seen） */
   'semantic-below-threshold',
-  /** 语义未决（不入 seen，下轮重评；含评估失败/配额耗尽滞留） */
+  /** 语义未决（不入 seen，下轮重评；评估失败时滞留在此状态） */
   'semantic-pending',
   /** 相似降噪：与 48h 已推窗口相似被吞（终态：入 seen） */
   'similar-swallowed',

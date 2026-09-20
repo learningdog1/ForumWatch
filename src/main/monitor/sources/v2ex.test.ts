@@ -12,7 +12,7 @@ const fullItem = {
   id: 1243180,
   title: '有没有好用的 RSS 阅读器推荐',
   url: 'https://www.v2ex.com/t/1243180',
-  content: '正文内容（Topic 契约无正文字段，adapter 不使用）',
+  content: '正文内容，映射为 Topic.excerpt（截断见 rss adapter 的 toExcerpt）',
   replies: 12,
   created: 1700000000,
   last_touched: 1700000061,
@@ -71,8 +71,21 @@ describe('V2exSourceAdapter.fetchLatest', () => {
       category: '问与答',
       categorySlug: 'qna',
       pinned: false,
-      lastActiveAt: '2023-11-14T22:14:21.000Z' // last_touched=1700000061
+      lastActiveAt: '2023-11-14T22:14:21.000Z', // last_touched=1700000061
+      excerpt: '正文内容，映射为 Topic.excerpt（截断见 rss adapter 的 toExcerpt）'
     })
+  })
+
+  it('content 缺失 / 空白 → 不写 excerpt 键（undefined 容忍约定）', async () => {
+    const noContent = { ...fullItem, id: 1243178 }
+    delete (noContent as Partial<typeof fullItem>).content
+    const blankContent = { ...fullItem, id: 1243177, content: '   ' }
+    const fetchJson = vi.fn(
+      async (): Promise<HttpResponse> => ({ status: 200, headers: {}, body: JSON.stringify([noContent, blankContent]) })
+    )
+    const topics = await new V2exSourceAdapter({ fetchJson }).fetchLatest()
+    expect('excerpt' in topics[0]!).toBe(false)
+    expect('excerpt' in topics[1]!).toBe(false)
   })
 
   it('member/node 缺失 → author 与 category/categorySlug 兜底空串', async () => {

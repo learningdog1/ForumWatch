@@ -61,27 +61,35 @@ export function truncateTitle(title: string, maxChars: number = BARK_TITLE_MAX_C
 }
 
 /**
- * 命中摘要一行（bark body / ntfy message 共用的文案格式，本文件先落地）：
+ * 命中摘要（bark body / ntfy message 共用的文案格式，本文件先落地）：
  * `[分类] 作者 · 命中: {关键词}` / `· 命中规则: {label}`（规则命中优先，对齐
  * telegram formatHitMessage 的行选择逻辑）/ `· 语义命中: {理由}`（语义命中无
  * 词无规则时的兜底行；semanticReason 缺省则止于「语义命中」）。
+ * commentary 非空时追加第二行 `💬 锐评: {text}`（与 telegram 同款行；正文由
+ * CommentGenerator 后处理保证 ≤80 字符，无需再截断）。
  */
 export function formatHitSummaryLine(
   topic: Topic,
   matchedKeywords: string[],
   matchedRule?: string | null,
-  semanticReason?: string | null
+  semanticReason?: string | null,
+  commentary?: string | null
 ): string {
   const who = `[${topic.category}] ${topic.author}`
+  let line: string
   if (typeof matchedRule === 'string' && matchedRule.length > 0) {
-    return `${who} · 命中规则: ${matchedRule}`
+    line = `${who} · 命中规则: ${matchedRule}`
+  } else if (matchedKeywords.length > 0) {
+    line = `${who} · 命中: ${matchedKeywords.join(', ')}`
+  } else {
+    const reason =
+      typeof semanticReason === 'string' && semanticReason.length > 0 ? `: ${semanticReason}` : ''
+    line = `${who} · 语义命中${reason}`
   }
-  if (matchedKeywords.length > 0) {
-    return `${who} · 命中: ${matchedKeywords.join(', ')}`
+  if (typeof commentary === 'string' && commentary.length > 0) {
+    line += `\n💬 锐评: ${commentary}`
   }
-  const reason =
-    typeof semanticReason === 'string' && semanticReason.length > 0 ? `: ${semanticReason}` : ''
-  return `${who} · 语义命中${reason}`
+  return line
 }
 
 /** Bark 响应体判定：ok = code===200；bad-code 携带 code/message 供错误消息引用 */
@@ -145,7 +153,8 @@ export class BarkNotifier implements Notifier {
             input.topic,
             input.matchedKeywords,
             input.matchedRule,
-            input.semanticReason
+            input.semanticReason,
+            input.commentary
           ),
           ...(input.topic.url !== '' ? { url: input.topic.url } : {}),
           group: 'ForumWatch'
