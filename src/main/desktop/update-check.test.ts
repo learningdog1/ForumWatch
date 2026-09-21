@@ -231,7 +231,7 @@ describe('UpdateChecker.check（三态，fetch 注入）', () => {
     expect(UPDATE_INTERVAL_MS).toBe(24 * 60 * 60 * 1000)
     expect(UPDATE_CHECK_TIMEOUT_MS).toBe(15_000)
     expect(GITHUB_LATEST_RELEASE_URL).toBe(
-      'https://api.github.com/repos/colmidad/forumwatch/releases/latest'
+      'https://api.github.com/repos/learningdog1/ForumWatch/releases/latest'
     )
   })
 })
