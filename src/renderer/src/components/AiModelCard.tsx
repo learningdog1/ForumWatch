@@ -28,10 +28,13 @@ export function AiModelCard(props: {
   apiKey: string
   model: string
   commentaryEnabled: boolean
+  /** 锐评思考开关（R12）：仅 commentaryEnabled 时呈现 */
+  commentaryUseThinking: boolean
   onBaseUrlChange: (v: string) => void
   onApiKeyChange: (v: string) => void
   onModelChange: (v: string) => void
   onCommentaryToggle: () => void
+  onCommentaryThinkingToggle: () => void
   onPresetPick: (baseUrl: string, model: string) => void
   test: AiModelTestProps
 }) {
@@ -163,6 +166,26 @@ export function AiModelCard(props: {
           <span className="feedback muted">{props.commentaryEnabled ? '开启' : '关闭'}</span>
         </div>
       </Field>
+      {props.commentaryEnabled && (
+        <Field
+          label="锐评深度思考"
+          hint="关闭（推荐）：AI 直接写一句锐评，速度快、成功率高，失败还会自动重试一次。开启：允许推理型模型（如 GLM）先思考再点评，明显更慢，且可能因思考占满输出预算而挤不出锐评。该开关仅对支持思考参数的服务（如智谱 GLM）生效。"
+        >
+          <div className="switch-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={props.commentaryUseThinking}
+              className="switch"
+              aria-label="锐评深度思考"
+              onClick={props.onCommentaryThinkingToggle}
+            />
+            <span className="feedback muted">
+              {props.commentaryUseThinking ? '开启（慢，可能空评）' : '关闭（推荐）'}
+            </span>
+          </div>
+        </Field>
+      )}
     </section>
   )
 }

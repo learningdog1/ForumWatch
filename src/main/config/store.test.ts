@@ -502,6 +502,21 @@ describe('sanitizeConfig', () => {
     expect(enabledOf({ enabled: false })).toBe(false) // 唯一能关掉的方式：显式布尔 false
   })
 
+  it('ai.commentary.useThinking（R12）：**默认关**的布尔——缺失/非法 → false（直出模式），仅显式 true 保留（思考模式）', () => {
+    const thinkingOf = (c: unknown) =>
+      sanitizeConfig(
+        cfg({ ai: { ...cfg().ai, commentary: c as unknown as AppConfig['ai']['commentary'] } })
+      ).ai.commentary.useThinking
+    expect(thinkingOf(undefined)).toBe(false) // 旧配置缺失 → 直出（新默认行为）
+    expect(thinkingOf(null)).toBe(false) // 段整体为 null
+    expect(thinkingOf({})).toBe(false) // 段在但缺 useThinking
+    expect(thinkingOf({ enabled: true })).toBe(false) // R12 前的配置形状
+    expect(thinkingOf('true')).toBe(false) // 字符串等非法值 → false
+    expect(thinkingOf(1)).toBe(false)
+    expect(thinkingOf({ useThinking: false })).toBe(false) // 显式 false 保留
+    expect(thinkingOf({ useThinking: true })).toBe(true) // 唯一开启方式：显式布尔 true
+  })
+
   it('ai.semanticThreshold：非法回 0（默认=行为不变），钳到 [0,1]（不取整）', () => {
     const thrOf = (t: unknown) =>
       sanitizeConfig(cfg({ ai: { ...cfg().ai, semanticThreshold: t as number } })).ai
@@ -1175,7 +1190,7 @@ describe('ConfigStore', () => {
       'utf-8'
     )
     const loaded = new ConfigStore(configPath).load()
-    expect(loaded.ai.commentary).toEqual({ enabled: true }) // 新增字段缺失 → 默认开
+    expect(loaded.ai.commentary).toEqual({ enabled: true, useThinking: false }) // 新增字段缺失 → 默认开 + 直出模式
     expect(loaded.ai.matchMode).toBe('semantic')
     expect(loaded.ai.provider.model).toBe('m')
   })

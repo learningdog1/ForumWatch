@@ -49,7 +49,7 @@ function v2Config(): Record<string, unknown> {
       matchMode: 'semantic',
       interests: ['便宜大内存 VPS'],
       dailyReport: { enabled: true, timeHHMM: '09:30' },
-      commentary: { enabled: false }
+      commentary: { enabled: false, useThinking: false }
     }
   }
 }
@@ -256,7 +256,7 @@ describe('migrateConfigEnvelope', () => {
         matchMode: 'semantic',
         interests: ['便宜大内存 VPS'],
         dailyReport: { enabled: true, timeHHMM: '09:30' },
-        commentary: { enabled: true }
+        commentary: { enabled: true, useThinking: false }
       }
     }
     const out = migrateConfigEnvelope({ schemaVersion: MIGRATOR_TARGET_VERSION, config: v3 })

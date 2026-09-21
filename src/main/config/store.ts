@@ -828,7 +828,11 @@ function sanitizeAi(ai: AiConfig | undefined): AiConfig {
     // 若"风格统一"改成 `=== true`，会把所有老用户的锐评静默关掉。改向前先想清楚。
     // （similarity.enabled 第五轮加入同一方向：旧配置缺失时同样不能静默关掉降噪。）
     commentary: {
-      enabled: ai?.commentary?.enabled !== false
+      enabled: ai?.commentary?.enabled !== false,
+      // 锐评思考开关（R12）：**默认关**（`=== true`，缺省 false——方向与
+      // enabled 相反但同属"新增字段的旧配置缺失取新默认值"约定：直出模式是
+      // 新默认行为，老用户静默迁移到更快更稳的路径；显式 true 保留思考语义）
+      useThinking: ai?.commentary?.useThinking === true
     }
   }
 }

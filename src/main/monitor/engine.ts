@@ -1604,6 +1604,9 @@ export class MonitorEngine {
    * - deps.commentaryGenerator 已注入（旧装配/测试不注入 = 恒 null，行为不变）；
    * - cfg.ai.commentary.enabled === true（恒存在恒布尔，防御式严格比较）；
    * - provider 齐备（this.aiConfigured，每轮 updateAiConfig 从配置刷新）。
+   * 模式透传（R12）：cfg.ai.commentary.useThinking === true 走思考模式（旧
+   * 语义：预算 2000、单发不重试），否则（缺省含旧配置）直出模式——禁思考
+   * 参数 + 预算 200 + 失败自动重试一次；防御式严格比较。
    * 无每日配额语义（不设上限）。真调用前后双计数（callsToday++ /
    * commentaryToday++，均为纯观测计数）：generate 内部消化一切异常，调用即
    * 计数无论成败；推送失败重试轮 generate 会被再次调用并计数，但其内部缓存
@@ -1617,7 +1620,7 @@ export class MonitorEngine {
     this.rollAiDay()
     this.aiCallsToday++
     this.commentaryToday++
-    return await gen.generate(topic)
+    return await gen.generate(topic, { useThinking: cfg.ai.commentary.useThinking === true })
   }
 
   // ---- 相似降噪窗口（R5-P2a 第 8/10/11 步） --------------------------------

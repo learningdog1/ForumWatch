@@ -18,6 +18,10 @@
  *   完成后不回填缓存（调用方仍拿到本次结果，缓存态以清理动作为准）。
  * - 注入边界（D6 先例）：user 只送 JSON.stringify 的标题/分类/作者三字段
  *   摘要，不送原文 HTML；回复纯文本，不用 jsonMode。
+ * - 模式（R12）：默认**直出**——请求附 thinking:{type:'disabled'}、预算 200、
+ *   失败自动重试一次（推理型模型的思考 token 与正文共用产出预算，思考吃光
+ *   预算返回空串是 R11 事故的主因）；generate({useThinking:true}) 走旧思考
+ *   语义（预算 2000、单发不重试），由配置 ai.commentary.useThinking 决定。
  * - 后处理：trim → 去首尾配对引号（模型爱加引号）→ 超 80 字符截断（代理对
  *   安全，F2）→ 空串归 null。
  *
@@ -28,13 +32,19 @@ import type { AiProvider } from './provider'
 
 /** 锐评请求超时：慢供应商（推理型模型常规延迟 15s+，实测评估批 15s 也成片超时）
  * 下 8s 预算全灭（0/83），对齐日报的 30s 档取 25s；锐评在推送前生成，此值即
- * 慢供应商下单条命中的额外推送延迟上限 */
+ * 慢供应商下单条命中的额外推送延迟上限（直出模式重试一次时上限 ×2） */
 export const COMMENTARY_TIMEOUT_MS = 25000
-/** 锐评请求 max_tokens：推理型模型的思考 token 与正文**共用产出预算**，
- * 预算不足时思考吃光、content 返回空串（实测 512 下 64 次 content="" 仅
- * 14/146 挤出正文；评估批同模型 2000 稳定有正文）——对齐评估批预算取 2000；
- * 可见正文仍由 COMMENTARY_MAX_CHARS 截到 80 */
+/** 思考模式 max_tokens（R12 前的旧语义，用户显式开启思考时沿用）：推理型模型
+ * 的思考 token 与正文**共用产出预算**，预算不足时思考吃光、content 返回空串
+ * （实测 512 下 64 次 content="" 仅 14/146 挤出正文；评估批同模型 2000 稳定
+ * 有正文）——对齐评估批预算取 2000；可见正文仍由 COMMENTARY_MAX_CHARS 截到 80 */
 export const COMMENTARY_MAX_TOKENS = 2000
+/** 直出模式 max_tokens（R12 默认）：请求附 thinking:{type:'disabled'}，产出全部
+ * 是正文——提示词要求 60 字，200 留足余量；可见正文仍由 COMMENTARY_MAX_CHARS 截到 80 */
+export const COMMENTARY_MAX_TOKENS_DIRECT = 200
+/** 直出模式失败重试次数：快路径单次成本秒级，失败（网络/超时/空响应）自动补
+ * 一发再降级 null；思考模式不重试（单次已 25s 级，重试会把推送延迟上限翻倍） */
+export const COMMENTARY_DIRECT_RETRIES = 1
 /** 失败负缓存 TTL：窗口内同 key 重试直接 null 不打 LLM（防推送重试风暴），
  * 过期后放行重试——供应商恢复后能自愈（旧语义：失败永续缓存到 prune/重启） */
 export const COMMENTARY_NEG_CACHE_TTL_MS = 10 * 60 * 1000
@@ -67,6 +77,12 @@ export interface CommentGeneratorDeps {
   now?: () => number
 }
 
+/** generate 的模式选项（R12）：useThinking 缺省/false = 直出模式（默认，
+ * 附 thinking 禁用参数、预算 200、失败重试一次）；true = 思考模式（旧语义） */
+export interface GenerateOptions {
+  useThinking?: boolean
+}
+
 export class CommentGenerator {
   private readonly provider: Pick<AiProvider, 'chat'>
   private readonly logWarn: (message: string) => void
@@ -87,8 +103,14 @@ export class CommentGenerator {
   /**
    * 生成一句锐评。**绝不抛**——一切异常内部消化返回 null。
    * 命中缓存（含失败负缓存）直接返回，不再调 chat。
+   *
+   * 模式（R12）：opts.useThinking === true 走思考模式（慢、预算 2000、失败
+   * 不重试——旧语义）；否则（缺省）直出模式——请求附 thinking 禁用参数、
+   * 预算 200、失败自动重试 COMMENTARY_DIRECT_RETRIES 次。缓存键不含模式，
+   * 思考/直出结果互通（锐评文本即锐评文本）。
    */
-  async generate(topic: Topic): Promise<string | null> {
+  async generate(topic: Topic, opts: GenerateOptions = {}): Promise<string | null> {
+    const useThinking = opts.useThinking === true
     const key = commentaryKey(topic)
     const settled = this.cache.get(key)
     if (settled !== undefined) {
@@ -103,7 +125,7 @@ export class CommentGenerator {
     const existing = this.inflight.get(key)
     if (existing !== undefined) return existing
 
-    const p = this.requestCommentary(topic).then((text) => {
+    const p = this.requestCommentary(topic, useThinking).then((text) => {
       // 在途期间被 prune/clear（或被新 Promise 顶替）→ 不回填缓存：
       // 调用方仍拿到本次结果，但缓存态以清理动作为准
       if (this.inflight.get(key) === p) {
@@ -156,35 +178,45 @@ export class CommentGenerator {
   }
 
   /** 单次 LLM 调用 + 后处理；一切异常消化为 null（generate 的绝不抛契约）。
-   * 失败与空响应经 logWarn 钩子留痕（缺省静默）——降级本身不变，但不再无声。 */
-  private async requestCommentary(topic: Topic): Promise<string | null> {
-    try {
-      const content = await this.provider.chat({
-        system: SYSTEM_PROMPT,
-        user: JSON.stringify({
-          title: topic.title,
-          category: topic.category,
-          author: topic.author
-        }),
-        timeoutMs: COMMENTARY_TIMEOUT_MS,
-        maxTokens: COMMENTARY_MAX_TOKENS
-      })
-      const normalized = normalizeComment(content)
-      if (normalized === null) {
+   * 失败与空响应经 logWarn 钩子留痕（缺省静默）——降级本身不变，但不再无声。
+   *
+   * 直出模式（R12 默认）失败自动重试 COMMENTARY_DIRECT_RETRIES 次（每次各留
+   * 一条 warn，attempt 编号可辨）；思考模式单发（旧语义，重试会把 25s 级延迟
+   * 上限翻倍）。 */
+  private async requestCommentary(topic: Topic, useThinking: boolean): Promise<string | null> {
+    const attempts = useThinking ? 1 : 1 + COMMENTARY_DIRECT_RETRIES
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const content = await this.provider.chat({
+          system: SYSTEM_PROMPT,
+          user: JSON.stringify({
+            title: topic.title,
+            category: topic.category,
+            author: topic.author
+          }),
+          timeoutMs: COMMENTARY_TIMEOUT_MS,
+          maxTokens: useThinking ? COMMENTARY_MAX_TOKENS : COMMENTARY_MAX_TOKENS_DIRECT,
+          disableThinking: !useThinking
+        })
+        const normalized = normalizeComment(content)
+        if (normalized !== null) return normalized
         this.logWarn(
-          `commentary empty after normalize (content=${JSON.stringify((content ?? '').slice(0, 40))}` +
+          `commentary empty after normalize (attempt ${attempt}/${attempts}` +
+            `, mode=${useThinking ? 'thinking' : 'direct'}` +
+            `, content=${JSON.stringify((content ?? '').slice(0, 40))}` +
             `, possibly reasoning consumed max_tokens): "${topic.title}"`
         )
+      } catch (err) {
+        // 网络/超时/未配置/HTTP/bad-json：锐评非关键路径，降级为无锐评（留一条 warn）
+        this.logWarn(
+          `commentary failed (attempt ${attempt}/${attempts}` +
+            `, mode=${useThinking ? 'thinking' : 'direct'}): ` +
+            `${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}` +
+            ` (topic: "${topic.title}")`
+        )
       }
-      return normalized
-    } catch (err) {
-      // 网络/超时/未配置/HTTP/bad-json：锐评非关键路径，降级为无锐评（留一条 warn）
-      this.logWarn(
-        `commentary failed: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}` +
-          ` (topic: "${topic.title}")`
-      )
-      return null
     }
+    return null
   }
 }
 

@@ -147,6 +147,15 @@ export interface AiConfig {
    */
   commentary: {
     enabled: boolean
+    /**
+     * 锐评是否允许模型思考（R12）：推理型模型（如智谱 GLM）的思考 token 与
+     * 正文共用 max_tokens 产出预算——开启更慢，且思考吃光预算时正文为空
+     * （R11 事故主因）。**默认 false = 直出模式**：请求附 thinking 禁用参数、
+     * 预算降 200、失败自动重试一次。加法字段不 bump schemaVersion
+     * （commentary.enabled 先例），旧配置缺失 → false（新默认行为）。
+     * 仅对支持思考参数的服务（智谱 GLM 系）生效，其余供应商该参数不下发。
+     */
+    useThinking: boolean
   }
 }
 
@@ -430,7 +439,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     interests: [],
     semanticThreshold: 0,
     dailyReport: { enabled: false, timeHHMM: '22:00' },
-    commentary: { enabled: true }
+    commentary: { enabled: true, useThinking: false }
   }
 }
 

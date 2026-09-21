@@ -153,6 +153,8 @@ interface Draft {
   dailyEnabled: boolean
   dailyTime: string
   commentaryEnabled: boolean
+  /** 锐评思考开关（R12，「AI 模型」卡；仅锐评开启时呈现） */
+  commentaryUseThinking: boolean
   /** 价格规则（R5-P2c 起由本页「价格规则」卡管理） */
   priceRules: PriceRuleConfig[]
   /** 相似降噪（「相似降噪」卡） */
@@ -200,6 +202,7 @@ function toDraft(c: AppConfig): Draft {
     dailyEnabled: c.ai.dailyReport.enabled,
     dailyTime: c.ai.dailyReport.timeHHMM,
     commentaryEnabled: c.ai.commentary.enabled,
+    commentaryUseThinking: c.ai.commentary.useThinking,
     priceRules: c.priceRules.map((r) => ({ ...r })),
     similarityEnabled: c.similarity.enabled,
     similarityThreshold: c.similarity.threshold,
@@ -235,7 +238,7 @@ const SEGMENTS: ReadonlyArray<{ key: SegmentKey; group: GroupKey; pick: (d: Draf
   { key: 'sources', group: 'grp-monitor', pick: (d) => d.sources },
   { key: 'keywords', group: 'grp-monitor', pick: (d) => [d.includeKeywords, d.excludeKeywords] },
   { key: 'priceRules', group: 'grp-monitor', pick: (d) => d.priceRules },
-  { key: 'aiModel', group: 'grp-match', pick: (d) => [d.aiBaseUrl, d.aiApiKey, d.aiModel, d.commentaryEnabled] },
+  { key: 'aiModel', group: 'grp-match', pick: (d) => [d.aiBaseUrl, d.aiApiKey, d.aiModel, d.commentaryEnabled, d.commentaryUseThinking] },
   { key: 'matchMode', group: 'grp-match', pick: (d) => [d.matchMode, d.interests, d.aiSemanticThreshold] },
   { key: 'similarity', group: 'grp-match', pick: (d) => [d.similarityEnabled, d.similarityThreshold] },
   { key: 'channels', group: 'grp-notify', pick: (d) => d.channels },
@@ -496,8 +499,8 @@ export function Settings(props: {
           // 语义置信度阈值（第五轮 / R5-P2c：「监控模式」卡的滑杆）
           semanticThreshold: d.aiSemanticThreshold,
           dailyReport: { enabled: d.dailyEnabled, timeHHMM: d.dailyTime },
-          // 锐评开关（「AI 模型」卡的「推送锐评」控件）
-          commentary: { enabled: d.commentaryEnabled }
+          // 锐评开关（「AI 模型」卡的「推送锐评」控件）；思考开关同卡（R12）
+          commentary: { enabled: d.commentaryEnabled, useThinking: d.commentaryUseThinking }
         }
       }
       const r = await window.api.saveConfig(cfg)
@@ -766,10 +769,14 @@ export function Settings(props: {
                 apiKey={draft.aiApiKey}
                 model={draft.aiModel}
                 commentaryEnabled={draft.commentaryEnabled}
+                commentaryUseThinking={draft.commentaryUseThinking}
                 onBaseUrlChange={(v) => patch({ aiBaseUrl: v })}
                 onApiKeyChange={(v) => patch({ aiApiKey: v })}
                 onModelChange={(v) => patch({ aiModel: v })}
                 onCommentaryToggle={() => patch({ commentaryEnabled: !draft.commentaryEnabled })}
+                onCommentaryThinkingToggle={() =>
+                  patch({ commentaryUseThinking: !draft.commentaryUseThinking })
+                }
                 onPresetPick={(baseUrl, model) => patch({ aiBaseUrl: baseUrl, aiModel: model })}
                 test={{
                   testing: aiTesting,

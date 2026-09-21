@@ -225,7 +225,7 @@ function aiSemanticConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['
     matchMode: 'semantic',
     interests: ['自建主机'],
     dailyReport: { enabled: false, timeHHMM: '22:00' },
-    commentary: { enabled: false },
+    commentary: { enabled: false, useThinking: false },
     semanticThreshold: 0,
     ...overrides
   }
@@ -979,7 +979,7 @@ describe('语义评估管线（D4）', () => {
       matchMode: 'both',
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
-      commentary: { enabled: false },
+      commentary: { enabled: false, useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
@@ -1258,7 +1258,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
       matchMode: 'both',
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
-      commentary: { enabled: false },
+      commentary: { enabled: false, useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
@@ -1408,7 +1408,7 @@ describe('语义置信度阈值（R5-P2b：ai.semanticThreshold）', () => {
       matchMode: 'semantic',
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
-      commentary: { enabled: false },
+      commentary: { enabled: false, useThinking: false },
       semanticThreshold: 0,
       ...overrides
     }
@@ -1566,7 +1566,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
       matchMode: 'semantic',
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
-      commentary: { enabled: false },
+      commentary: { enabled: false, useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
@@ -1912,7 +1912,7 @@ describe('AI 锐评集成（第三轮）', () => {
       matchMode: 'literal',
       interests: [],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
-      commentary: { enabled: false },
+      commentary: { enabled: false, useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       ...overrides
     }
@@ -1950,7 +1950,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock('犀利点评')
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ matchMode: 'literal', commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ matchMode: 'literal', commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await literalHitRound(h)
@@ -1970,6 +1970,34 @@ describe('AI 锐评集成（第三轮）', () => {
     expect(st.ai.commentaryToday).toBe(1)
   })
 
+  it('思考模式透传（R12）：generate 第二参随 ai.commentary.useThinking——true 传 true，默认 false 传 false', async () => {
+    const genThinking = commentMock('思考锐评')
+    const h1 = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'literal', commentary: { enabled: true, useThinking: true } }) },
+      commentaryGenerator: genThinking
+    })
+    await literalHitRound(h1)
+    expect(genThinking.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: '2' }),
+      { useThinking: true }
+    )
+
+    const genDirect = commentMock('直出锐评')
+    const h2 = build({
+      impl: async () => [topic('1')],
+      // 同一 it 内第二台引擎须用独立 seen 路径（build 的 dir 是 per-test 共享的）
+      seenPath: join(dir, 'seen-direct.json'),
+      config: { ai: aiConfig({ matchMode: 'literal', commentary: { enabled: true, useThinking: false } }) },
+      commentaryGenerator: genDirect
+    })
+    await literalHitRound(h2)
+    expect(genDirect.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: '2' }),
+      { useThinking: false }
+    )
+  })
+
   it('语义命中同样带锐评：evaluate 与 generate 各一次，callsToday=2 / commentaryToday=1', async () => {
     const gen = commentMock('语义锐评')
     const evaluate = vi.fn(
@@ -1982,7 +2010,7 @@ describe('AI 锐评集成（第三轮）', () => {
         ai: aiConfig({
           matchMode: 'semantic',
           interests: ['自建主机'],
-          commentary: { enabled: true }
+          commentary: { enabled: true, useThinking: false }
         })
       },
       evaluator: { evaluate },
@@ -2008,7 +2036,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock()
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: false } }) },
+      config: { ai: aiConfig({ commentary: { enabled: false, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await literalHitRound(h)
@@ -2027,7 +2055,7 @@ describe('AI 锐评集成（第三轮）', () => {
       config: {
         ai: aiConfig({
           provider: { baseUrl: '', apiKey: '', model: '' },
-          commentary: { enabled: true }
+          commentary: { enabled: true, useThinking: false }
         })
       },
       commentaryGenerator: gen
@@ -2050,7 +2078,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const h = build({
       impl: async () => [topic('1')],
       config: {
-        ai: aiConfig({ matchMode: 'both', interests: ['自建主机'], commentary: { enabled: true } })
+        ai: aiConfig({ matchMode: 'both', interests: ['自建主机'], commentary: { enabled: true, useThinking: false } })
       },
       evaluator: { evaluate },
       commentaryGenerator: gen
@@ -2084,7 +2112,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock()
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await literalHitRound(h)
@@ -2106,7 +2134,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const generateSpy = vi.spyOn(gen, 'generate')
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await h.engine.pollOnce() // 基线
@@ -2138,7 +2166,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock()
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await h.engine.pollOnce() // 基线轮：页面 {1}
@@ -2160,7 +2188,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = commentMock()
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await h.engine.pollOnce() // 成功观测轮
@@ -2182,7 +2210,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = new CommentGenerator({ provider: { chat } })
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await h.engine.pollOnce() // 基线
@@ -2217,7 +2245,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen = new CommentGenerator({ provider: { chat } })
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen
     })
     await h.engine.pollOnce() // 基线
@@ -2243,7 +2271,7 @@ describe('AI 锐评集成（第三轮）', () => {
   it('deps 未注入 commentaryGenerator：行为与升级前一致（恒 null、sendHit 第三参 null、零计数）', async () => {
     const h = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) } // 开关开也没用：没注入生成器
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) } // 开关开也没用：没注入生成器
     })
     await literalHitRound(h)
 
@@ -2260,7 +2288,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const genNull = commentMock(null)
     const h1 = build({
       impl: async () => [topic('1')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: genNull
     })
     await literalHitRound(h1)
@@ -2274,7 +2302,7 @@ describe('AI 锐评集成（第三轮）', () => {
     const gen2 = commentMock('失败轮锐评')
     const h2 = build({
       impl: async () => [topic('9')],
-      config: { ai: aiConfig({ commentary: { enabled: true } }) },
+      config: { ai: aiConfig({ commentary: { enabled: true, useThinking: false } }) },
       commentaryGenerator: gen2
     })
     await h2.engine.pollOnce() // 基线（state 沿用 a) 的 baselineDone=true，9 为新帖入集）

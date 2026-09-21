@@ -99,6 +99,7 @@ describe('AiProvider.chat', () => {
     expect(body.stream).toBe(false)
     expect(body.response_format).toBeUndefined() // 非 jsonMode 不带
     expect(body.max_tokens).toBeUndefined() // 未给 maxTokens 不带
+    expect(body.thinking).toBeUndefined() // 未给 disableThinking 不带（R12：未知供应商不被动收参）
   })
 
   it('jsonMode/maxTokens/timeoutMs：response_format、max_tokens、超时透传', async () => {
@@ -108,6 +109,16 @@ describe('AiProvider.chat', () => {
     expect(body.response_format).toEqual({ type: 'json_object' })
     expect(body.max_tokens).toBe(512)
     expect(h.calls[0]?.init?.timeoutMs).toBe(5000)
+  })
+
+  it('disableThinking（R12）：true 时请求体附 thinking:{type:"disabled"}，false 不带', async () => {
+    const h1 = makeHarness(() => okRes)
+    await h1.provider.chat({ system: 's', user: 'u', disableThinking: true })
+    expect(JSON.parse(h1.calls[0]!.init!.body as string).thinking).toEqual({ type: 'disabled' })
+
+    const h2 = makeHarness(() => okRes)
+    await h2.provider.chat({ system: 's', user: 'u', disableThinking: false })
+    expect(JSON.parse(h2.calls[0]!.init!.body as string).thinking).toBeUndefined()
   })
 
   it('baseUrl 规范化：尾斜杠/空白/多斜杠等价，统一拼 /chat/completions', async () => {

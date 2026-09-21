@@ -55,6 +55,13 @@ export interface ChatRequest {
   timeoutMs?: number
   /** 可选 max_tokens 上限 */
   maxTokens?: number
+  /**
+   * true 时请求体附 thinking:{type:'disabled'}（智谱 GLM 系推理模型的思考开关，
+   * R12）：思考 token 与正文共用 max_tokens 产出预算，短文本任务禁思考更快更稳。
+   * **仅显式要求时下发**——OpenAI 官方端点对未知字段会 400，未声明支持的
+   * 供应商不该被动收到这个参数。
+   */
+  disableThinking?: boolean
 }
 
 export interface AiProviderDeps {
@@ -144,6 +151,7 @@ export class AiProvider {
     }
     if (req.jsonMode === true) payload.response_format = { type: 'json_object' }
     if (req.maxTokens !== undefined) payload.max_tokens = req.maxTokens
+    if (req.disableThinking === true) payload.thinking = { type: 'disabled' }
 
     const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const init: HttpRequestInit = {
