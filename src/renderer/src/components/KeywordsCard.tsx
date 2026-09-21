@@ -45,6 +45,9 @@ export function KeywordsCard(props: {
           onChange={props.onExcludeChange}
         />
       </Field>
+      <div className="notice muted-notice">
+        以上为全局默认；单个来源可在 设置 → 来源 → 该行「匹配」面板单独覆盖（设置后替换，不是合并）。
+      </div>
     </section>
   )
 }

@@ -60,6 +60,18 @@
  * R5-P2a（第五轮引擎确定性管线）：
  * - per-source 过滤（getSourceFilters 访问器，可选依赖）：unseen 链第 2 步，
  *   滤帖入 seen 不推送不评估（filters.ts 纯函数）。
+ * - per-source 匹配覆盖（R13）：pollSource 经 matching.ts 的
+ *   resolveSourceMatching(cfg, sourceId) 解析生效值（include/exclude/
+ *   matchMode/interests/threshold 五字段，未覆盖回退全局），替换全部六个
+ *   消费点（语义档门控 / 排除词 / 字面匹配 / 语义批的 interests·阈值闸·
+ *   处置流水 detail）。**价格规则与 AI 锐评不参与覆盖（恒用全局配置）**。
+ *   R13-2 追加第六字段 matchAll（来源级全匹配，仅 per-source 可开）：开启时
+ *   过闸新帖直接命中（matchedBy='matchall'），literal/语义档整体跳过，
+ *   见 pollSource 第 6.5 步注释。
+ *   注意与 getSourceFilters 的 accessor 先例形态不同——有意不新增
+ *   getSourceMatching accessor：cfg 每轮 pollOnce 重读已是热更新语义，且全部
+ *   同类匹配输入本就从 cfg 读，accessor 只增装配面（runtime/headless/test
+ *   三处）无行为收益；filters 的既有 accessor 保留不动，后来者勿"统一"。
  * - 价格规则（rules.ts）：第 6 步、先于 literal、命中即得（同一帖只记一种命中
  *   方式，规则优先）；matchedBy='rule' + matchedRule（规则 label，无 label 用 id）。
  * - 相似降噪（similarity.ts，DEC-4）：命中帖推送前与 48h"近期已推"窗口比对
@@ -124,6 +136,7 @@
  */
 import { applySourceFilters } from './filters'
 import { isExcluded, matchTopic } from './matcher'
+import { resolveSourceMatching } from './matching'
 import { evaluateRules } from './rules'
 import { findSimilarTo, normalizeTitle, type SimilarityMatch } from './similarity'
 import type { DispositionOutcome } from './dispositions'
@@ -188,11 +201,25 @@ export const DEFERRED_HIT_TIMEOUT_MS = 24 * 60 * 60 * 1000
 export const DEFERRED_FLUSH_MAX_ATTEMPTS = 3
 
 /**
+ * 语义评估退避曲线（R13-3）：第 n 次连续失败冷却 BASE × 2^(n-1)，
+ * 封顶 CAP（30s → 1m → 2m → 4m → 8m → 10m…）；任一批评估成功即全部复位。
+ * 冷却期内 evaluateSemantic 零调用（新帖累积为未决，冷却结束随下一轮批量重评）。
+ */
+export const SEMANTIC_BACKOFF_BASE_MS = 30_000
+export const SEMANTIC_BACKOFF_CAP_MS = 600_000
+/**
+ * 未决帖重评轮次上限（R13-3）：同一帖连续 SEMANTIC_MAX_UNDECIDED_ROUNDS 轮
+ * 拿不到裁决（评估失败/回包缺项/冷却期跳过都计一轮），第 N 轮起降级字面判定
+ * 收口——命中即推（matchedBy='literal'）、未中入 seen，防无限重评与静默丢失。
+ */
+export const SEMANTIC_MAX_UNDECIDED_ROUNDS = 5
+
+/**
  * 挂起队列条目（DEC-11）：payload 自含 flush 所需全量信息——topic/关键词/
  * 规则/语义理由/锐评（锐评在 match 时已生成，flush 直接用不再重打 LLM）。
  */
 interface DeferredHit {
-  payload: HitMessageInput & { matchedBy: 'literal' | 'semantic' | 'rule' }
+  payload: HitMessageInput & { matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall' }
   /** 首次挂起时刻（epoch ms；24h 超时 prune 的基准，重试不刷新） */
   addedAt: number
   /** flush 推送失败计数；达 DEFERRED_FLUSH_MAX_ATTEMPTS 落终态出队 */
@@ -480,6 +507,21 @@ export class MonitorEngine {
   private aiCallsDay = ''
   /** 最近一次评估错误消息（provider 已脱敏）；评估成功后清空 */
   private aiLastError: string | null = null
+  /**
+   * 语义评估连续失败数（R13-3）：驱动指数退避——第 n 次连续失败冷却
+   * SEMANTIC_BACKOFF_BASE_MS × 2^(n-1)（封顶 CAP）；任一批成功即清零。
+   * 防上游限流/故障时的重试风暴：冷却期 evaluateSemantic 不发任何请求。
+   */
+  private aiConsecutiveFailures = 0
+  /** 语义评估退避冷却截止时刻（epoch ms；null = 无冷却） */
+  private aiCooldownUntilMs: number | null = null
+  /**
+   * 未决帖重评轮次计数（R13-3）：键 = seen 键，值 = 已连续未决轮数。
+   * 达 SEMANTIC_MAX_UNDECIDED_ROUNDS 后降级字面判定收口（防未决帖无限
+   * 重评与滚出首页静默丢失）；裁决落定（hit/miss）即删键；轮末随
+   * pruneRetryMaps 同款键集清理。
+   */
+  private semanticUndecidedRounds = new Map<string, number>()
   private status: EngineStatus
 
   constructor(deps: EngineDeps) {
@@ -672,10 +714,16 @@ export class MonitorEngine {
       configured: this.aiConfigured,
       callsToday: this.aiCallsToday,
       commentaryToday: this.commentaryToday,
-      lastAiError: this.aiLastError
+      lastAiError: this.aiLastError,
+      semanticCooldownUntil:
+        this.aiCooldownUntilMs !== null ? new Date(this.aiCooldownUntilMs).toISOString() : null
     }
     if (!this.aiConfigured) {
       return { ...base, effectiveMode: 'literal', degraded: 'unconfigured' }
+    }
+    // R13-3：退避冷却进行中 → degraded='backoff'（冷却期零调用，新帖累积未决）
+    if (this.aiCooldownUntilMs !== null && this.now() < this.aiCooldownUntilMs) {
+      return { ...base, effectiveMode: this.aiMode, degraded: 'backoff' }
     }
     return { ...base, effectiveMode: this.aiMode, degraded: 'none' }
   }
@@ -791,10 +839,18 @@ export class MonitorEngine {
     let swallowedByFilters = 0
     /** R5-P2a：本轮进入匹配管线（规则/字面/语义）的有效新帖数——page2 自适应的输入 */
     let effectiveNew = 0
-    const effective = this.deriveAiStatus().effectiveMode
-    const literalActive = effective === 'literal' || effective === 'both'
+    // per-source 匹配覆盖（R13）：五字段生效值（未覆盖回退全局）。直读 cfg.sources
+    // 而非新增 deps accessor——cfg 每轮 pollOnce 重读已是热更新语义，且全部同类
+    // 匹配输入本就从 cfg 读；差异说明见类头 R13 段（勿与 getSourceFilters 统一）。
+    const m = resolveSourceMatching(cfg, adapter.id)
+    // 门控按 per-source 生效模式派生（镜像 deriveAiStatus 的降级口径：Provider 未
+    // 配置时语义档整体降级字面，this.aiConfigured 每轮 updateAiConfig 从配置刷新）。
+    // 全局 AiRuntimeStatus.effectiveMode 观测面不动（仍是全局口径——per-source
+    // 覆盖后托盘/UI 显示的模式可能与该来源实际门控不符，见 usage.md 口径差提示）。
+    const effectiveMode: MatchMode = this.aiConfigured ? m.matchMode : 'literal'
+    const literalActive = effectiveMode === 'literal' || effectiveMode === 'both'
     const semanticActive =
-      (effective === 'semantic' || effective === 'both') &&
+      (effectiveMode === 'semantic' || effectiveMode === 'both') &&
       this.deps.semanticEvaluator !== undefined
     /** 语义候选（页面顺序旧→新）：遍历后按批评估 */
     const aiPending: Topic[] = []
@@ -849,10 +905,11 @@ export class MonitorEngine {
         this.noteDisposition(topic, 'pinned')
         continue
       }
-      // 排除词字面一票否决（第 5 步，D4：永远先于 AI；语义模式下同样否决）
-      if (isExcluded(topic, cfg.excludeKeywords)) {
+      // 排除词字面一票否决（第 5 步，D4：永远先于 AI；语义模式下同样否决）。
+      // R13：用 per-source 生效排除词（未覆盖 = 全局列表）
+      if (isExcluded(topic, m.excludeKeywords)) {
         this.deps.seen.add(key)
-        const excludedWord = findExcludedWord(topic, cfg.excludeKeywords)
+        const excludedWord = findExcludedWord(topic, m.excludeKeywords)
         this.noteDisposition(
           topic,
           'excluded',
@@ -883,12 +940,22 @@ export class MonitorEngine {
           continue
         }
       }
-      // literal 档（第 7 步；mode 含 literal 时生效；语义档未配置也降到这里）
+      // 来源级全匹配（R13-2 第 6.5 步，价格规则之后）：matchAll 覆盖开启时
+      // 过闸新帖直接命中（matchedBy='matchall'），literal/语义档整体跳过——
+      // 规则放前面保留 'rule' 归因（同一帖只记一种命中方式，规则优先）。
+      // matchMode/includeKeywords/interests/semanticThreshold 覆盖对本帖全部
+      // 不参与；四道闸与相似降噪（processHit 内）照常否决——全匹配 ≠ 全推送。
+      if (m.matchAll) {
+        await this.processHit(topic, [], cfg, 'matchall')
+        continue
+      }
+      // literal 档（第 7 步；mode 含 literal 时生效；语义档未配置也降到这里）。
+      // R13：包含/排除词都用 per-source 生效值（未覆盖 = 全局列表）
       if (literalActive) {
         const { matched, matchedKeywords } = matchTopic(
           topic,
-          cfg.includeKeywords,
-          cfg.excludeKeywords
+          m.includeKeywords,
+          m.excludeKeywords
         )
         if (matched) {
           await this.processHit(topic, matchedKeywords, cfg)
@@ -913,7 +980,14 @@ export class MonitorEngine {
     }
 
     if (aiPending.length > 0) {
-      await this.evaluateSemantic(adapter.id, aiPending, cfg)
+      await this.evaluateSemantic(
+        adapter.id,
+        aiPending,
+        cfg,
+        m.interests,
+        m.semanticThreshold,
+        m.includeKeywords
+      )
     }
 
     // W3 轮末：本轮 unseen 键集整集替换为下一轮的豁免集（替换即裁剪，生命周期
@@ -964,30 +1038,50 @@ export class MonitorEngine {
    * interests 为空 → 直接短路（F3）：不调 evaluator、不计 callsToday，全部
    * 按语义未命中入 seen（evaluator 本就快速全 miss，引擎侧跳过更干净，
    * 行为一致只是不再空转计数）。
+   * R13：interests / semanticThreshold 改由调用方传 per-source 生效值
+   * （pollSource 经 resolveSourceMatching 解析；未覆盖 = 全局 ai 段的值），
+   * 本方法不再读 cfg.ai 的这两段——同一轮不同 source 可用不同兴趣与阈值；
+   * cfg 本身仍透传给 processHit（相似降噪/挂起/推送等全局策略）。
    * verdict 三态（R5-P2b：hit 的去留多一道置信度闸）：
-   * - hit=true **且 score >= cfg.ai.semanticThreshold** → processHit(matchedBy=
+   * - hit=true **且 score >= semanticThreshold** → processHit(matchedBy=
    *   'semantic'，semanticReason=reason)；threshold=0（默认）时 score>=0 恒真 =
    *   行为不变。其中推送真失败的 reason 会进 semanticVerdicts 缓存（坑⑥，见
    *   pollSource）——缓存的是**已过闸**的 verdict，重试轮直接重推、不再过阈值；
    * - hit=false，或 hit=true 但 score < 阈值 → 入 seen（与字面未命中同待遇，
    *   不再重评；低置信 hit 不推送、不写语义理由/任何记录，只 log 一条观测）；
    * - 无 verdict（未决）→ 不入 seen，下轮重评（帖子滚出首页即止，对齐 8.10）。
-   * evaluate 整体抛错 → 该批全部未决 + 记 lastAiError + log warn，
+   *   R13-3：未决轮次计数 +1，连续 SEMANTIC_MAX_UNDECIDED_ROUNDS 轮未决则
+   *   降级字面判定收口（见 settleUndecided）——不再无限重评、不再静默滚丢。
+   * evaluate 整体抛错 → 该批全部未决 + 记 lastAiError + **指数退避**（R13-3：
+   * 连续失败翻倍冷却至封顶，冷却期零调用防重试风暴）+ log warn，
    * **不动 consecutiveFailures**（AI 故障 ≠ 抓取故障）。每次真实调用计入
    * callsToday（含失败的调用；纯观测计数，无每日上限）。
+   * includeKeywords 为该来源生效包含词（R13-3 新增入参）：未决超限降级字面
+   * 判定的输入（排除词已在 pollSource 四道闸过掉，这里不重复）。
    */
   private async evaluateSemantic(
     sourceId: string,
     topics: Topic[],
-    cfg: AppConfig
+    cfg: AppConfig,
+    interests: string[],
+    semanticThreshold: number,
+    includeKeywords: string[]
   ): Promise<void> {
     const evaluator = this.deps.semanticEvaluator
     if (evaluator === undefined) return
-    if (cfg.ai.interests.length === 0) {
+    if (interests.length === 0) {
       // F3：空兴趣 = 语义档永不命中（镜像字面档防风暴规则）——不入 AI 批
       for (const topic of topics) {
         this.deps.seen.add(seenKeyFor(sourceId, topic.id))
         this.noteDisposition(topic, 'semantic-miss', '兴趣描述为空：语义档永不命中')
+      }
+      return
+    }
+    // R13-3 退避冷却：上游连续失败后的指数冷却期内**零调用**——直接按未决
+    // 挂起（轮次照常累计，超限走降级收口），冷却结束随下一轮批量重评。
+    if (this.aiCooldownUntilMs !== null && this.now() < this.aiCooldownUntilMs) {
+      for (const topic of topics) {
+        await this.settleUndecided(sourceId, topic, cfg, includeKeywords, 'AI 评估退避中（上游连续失败，本轮不调用）')
       }
       return
     }
@@ -996,30 +1090,34 @@ export class MonitorEngine {
       this.rollAiDay()
       this.aiCallsToday++
       try {
-        const verdicts = await evaluator.evaluate(batch, cfg.ai.interests)
+        const verdicts = await evaluator.evaluate(batch, interests)
         this.aiLastError = null // 评估成功：清掉历史错误（恢复观测）
+        // R13-3：成功即复位退避（连续失败计数与冷却一并清零）
+        this.aiConsecutiveFailures = 0
+        this.aiCooldownUntilMs = null
         for (const topic of batch) {
           const verdict = verdicts.get(seenKeyFor(sourceId, topic.id))
           if (verdict === undefined) {
-            // 未决：不入 seen，下轮重评
-            this.noteDisposition(topic, 'semantic-pending')
+            // 未决：不入 seen，下轮重评（R13-3：轮次计数 + 超限降级收口）
+            await this.settleUndecided(sourceId, topic, cfg, includeKeywords, 'AI 未给出该帖裁决（未决）')
             continue
           }
-          if (verdict.hit && verdict.score >= cfg.ai.semanticThreshold) {
+          this.semanticUndecidedRounds.delete(seenKeyFor(sourceId, topic.id)) // 裁决落定：清轮次
+          if (verdict.hit && verdict.score >= semanticThreshold) {
             await this.processHit(topic, [], cfg, 'semantic', verdict.reason)
           } else {
-            // hit=false，或 hit=true 但置信度 < cfg.ai.semanticThreshold（R5-P2b）：
+            // hit=false，或 hit=true 但置信度 < semanticThreshold（R5-P2b）：
             // 都按不相关处理——入 seen 不再重评、不推送、语义理由不写任何记录。
             // threshold=0（默认）时 score >= 0 恒真 = 行为与阈值特性引入前完全一致。
             if (verdict.hit) {
               this.deps.logger.info(
                 `semantic hit below confidence threshold ` +
-                  `(${verdict.score} < ${cfg.ai.semanticThreshold}): "${topic.title}"`
+                  `(${verdict.score} < ${semanticThreshold}): "${topic.title}"`
               )
               this.noteDisposition(
                 topic,
                 'semantic-below-threshold',
-                `置信度 ${verdict.score} < 阈值 ${cfg.ai.semanticThreshold}`
+                `置信度 ${verdict.score} < 阈值 ${semanticThreshold}`
               )
             } else {
               this.noteDisposition(
@@ -1033,15 +1131,59 @@ export class MonitorEngine {
         }
       } catch (err) {
         this.aiLastError = describeError(err)
+        // R13-3 指数退避：连续失败翻倍冷却至封顶（指数封 2^10 防溢出），
+        // 冷却期内不再打上游——把"失败→下轮全量重发→更失败"的风暴断掉。
+        this.aiConsecutiveFailures += 1
+        const backoffMs = Math.min(
+          SEMANTIC_BACKOFF_BASE_MS * 2 ** Math.min(this.aiConsecutiveFailures - 1, 10),
+          SEMANTIC_BACKOFF_CAP_MS
+        )
+        this.aiCooldownUntilMs = this.now() + backoffMs
         for (const topic of batch) {
-          this.noteDisposition(topic, 'semantic-pending', 'AI 评估失败，下轮重试')
+          await this.settleUndecided(sourceId, topic, cfg, includeKeywords, 'AI 评估失败，进入退避冷却')
         }
         this.deps.logger.warn(
           `semantic evaluation failed (${batch.length} topics undecided, ` +
-            `will retry next poll): ${this.aiLastError}`
+            `backoff ${Math.round(backoffMs / 1000)}s until ` +
+            `${new Date(this.aiCooldownUntilMs).toISOString()}): ${this.aiLastError}`
         )
       }
     }
+  }
+
+  /**
+   * 未决帖的轮次收口（R13-3）：轮次 +1 后若仍 < SEMANTIC_MAX_UNDECIDED_ROUNDS，
+   * 记 pending 处置等下一轮重评；达到上限则**降级字面判定**收口——用该来源的
+   * 生效包含词做一次字面匹配（镜像 Provider 未配置的整体降级语义），命中即推
+   * （matchedBy='literal'）、未中入 seen 记 giveup 处置。防的是：上游长时间
+   * 故障/限流下，未决帖要么无限重评烧调用、要么滚出首页被静默丢弃。
+   */
+  private async settleUndecided(
+    sourceId: string,
+    topic: Topic,
+    cfg: AppConfig,
+    includeKeywords: string[],
+    pendingDetail: string
+  ): Promise<void> {
+    const key = seenKeyFor(sourceId, topic.id)
+    const rounds = (this.semanticUndecidedRounds.get(key) ?? 0) + 1
+    if (rounds < SEMANTIC_MAX_UNDECIDED_ROUNDS) {
+      this.semanticUndecidedRounds.set(key, rounds)
+      this.noteDisposition(topic, 'semantic-pending', pendingDetail)
+      return
+    }
+    this.semanticUndecidedRounds.delete(key)
+    const { matched, matchedKeywords } = matchTopic(topic, includeKeywords, [])
+    if (matched) {
+      await this.processHit(topic, matchedKeywords, cfg) // matchedBy='literal'
+      return
+    }
+    this.deps.seen.add(key)
+    this.noteDisposition(
+      topic,
+      'semantic-miss',
+      `AI 连续 ${rounds} 轮未决，降级字面判定：未命中（防重试风暴/静默丢失）`
+    )
   }
 
   /** 取（或建）source 运行态；建卡时并入其持久化 totalHits（含热更新新增的 source） */
@@ -1241,6 +1383,13 @@ export class MonitorEngine {
         }
       }
     }
+    if (this.semanticUndecidedRounds.size > 0) {
+      for (const key of [...this.semanticUndecidedRounds.keys()]) {
+        if (!roundTopicKeys.has(key) && observedSources.has(sourceIdOfKey(key))) {
+          this.semanticUndecidedRounds.delete(key)
+        }
+      }
+    }
   }
 
   // ---- 免打扰/digest 挂起队列（R6-W1q，DEC-11） -----------------------------
@@ -1407,7 +1556,7 @@ export class MonitorEngine {
     topic: Topic,
     matchedKeywords: string[],
     cfg: AppConfig,
-    matchedBy: 'literal' | 'semantic' | 'rule' = 'literal',
+    matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall' = 'literal',
     semanticReason: string | null = null,
     matchedRule: string | null = null,
     matchedRuleId: string | null = null

@@ -39,6 +39,7 @@ import {
   type RoutingWhen,
   type SourceConfig,
   type SourceFilters,
+  type SourceMatchingConfig,
   type V2exSourceConfig
 } from '../../shared/types'
 import { migrateConfigEnvelope } from './migrations'
@@ -130,7 +131,8 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.72
  *   filters 走 sanitizeFilters；rss 项同上且 **url 必须是合法 http(s) URL（能
  *   new URL 且有 host），否则整项丢弃**，label trim 后为空视为无，缺 id 时可从
  *   url host 派生建议 id（id 以用户给的为准）；未知 type 整项丢弃；按 id 全列表
- *   去重（保留首个）。
+ *   去重（保留首个）。三种类型都可带可选 matching（R13 per-source 匹配覆盖，
+ *   走 sanitizeSourceMatching——清洗后五字段全空不落键 = 未覆盖）。
  * - `priceRules`（第五轮，见 sanitizePriceRules）：非数组 → []（空列表 = 无规则，
  *   合法状态）；整条非对象/无可用 id 丢弃；id slug 化去重、enabled 布尔化、
  *   cycle/currency 枚举非法（含缺失）回 'any'、label trim 空则不落键、
@@ -350,6 +352,7 @@ type RawSourceItem = {
   url?: unknown
   label?: unknown
   filters?: unknown
+  matching?: unknown
 }
 
 /**
@@ -389,6 +392,8 @@ function sanitizeSources(list: SourceConfig[] | undefined): SourceConfig[] {
       if (label !== '') clean.label = label
       const filters = sanitizeFilters(raw.filters)
       if (filters !== undefined) clean.filters = filters
+      const matching = sanitizeSourceMatching(raw.matching)
+      if (matching !== undefined) clean.matching = matching
       out.push(clean)
       continue
     }
@@ -401,6 +406,8 @@ function sanitizeSources(list: SourceConfig[] | undefined): SourceConfig[] {
       const clean: NodeseekSourceConfig | V2exSourceConfig = { id, type: raw.type, enabled }
       const filters = sanitizeFilters(raw.filters)
       if (filters !== undefined) clean.filters = filters
+      const matching = sanitizeSourceMatching(raw.matching)
+      if (matching !== undefined) clean.matching = matching
       out.push(clean)
       continue
     }
@@ -488,6 +495,54 @@ function sanitizeFilterList(list: unknown, maxItems: number = SOURCE_FILTERS_MAX
     if (out.length >= maxItems) break
   }
   return out
+}
+
+/**
+ * per-source 匹配覆盖清洗（R13 契约，引擎消费经 matching.ts 的
+ * resolveSourceMatching；字段级回退语义见 shared/types.ts）：
+ * - 非对象 / 清洗后五字段全空 → 返回 undefined（等价"未覆盖，跟随全局"，不落
+ *   空对象——对齐 sanitizeFilters 全空返 undefined 的惯例）。
+ * - includeKeywords / excludeKeywords：复用 sanitizeKeywordList（trim、去空、
+ *   大小写不敏感去重保留首现写法）；清洗后空数组**不落键 = 未覆盖**——契约上
+ *   「显式清空包含词」不可表达，该意图用 matchMode:'semantic' 表达。
+ * - matchMode：只认 AI_MATCH_MODES 枚举，非法/缺失**不落键**（与全局 sanitizeAi
+ *   非法回 'literal' 的口径**有意不同**：覆盖里非法回字面模式会静默改掉该来源
+ *   的档位门控，"非法 = 用户没想覆盖"才是安全方向）。
+ * - interests：复用 sanitizeInterests（每条 trim、单条 ≤500 字符截断、≤20 条）；
+ *   清洗后空不落键。
+ * - semanticThreshold：**仅当入参是有限数字才落键**（先 typeof 判型再 clamp01
+ *   钳 [0,1]；非法 = 不落键 = 跟随全局）——与全局 clamp01 非法回 0 的口径
+ *   **有意不同**：全局非法回 0 = "不过滤"是行为不变的安全默认；覆盖里非法回 0
+ *   会把用户显式调高的全局阈值在该来源静默清零。
+ * - matchAll（R13-2）：仅 `=== true` 落键（false/缺失/非法 = 不落键 = 不全匹配）——
+ *   布尔覆盖只有一档有意义，"非法 = 用户没想开"是安全方向。
+ */
+function sanitizeSourceMatching(raw: unknown): SourceMatchingConfig | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const m = raw as {
+    includeKeywords?: unknown
+    excludeKeywords?: unknown
+    matchMode?: unknown
+    interests?: unknown
+    semanticThreshold?: unknown
+    matchAll?: unknown
+  }
+  const clean: SourceMatchingConfig = {}
+  const includeKeywords = sanitizeKeywordList(m.includeKeywords as string[] | undefined)
+  if (includeKeywords.length > 0) clean.includeKeywords = includeKeywords
+  const excludeKeywords = sanitizeKeywordList(m.excludeKeywords as string[] | undefined)
+  if (excludeKeywords.length > 0) clean.excludeKeywords = excludeKeywords
+  if (AI_MATCH_MODES.includes(m.matchMode as MatchMode)) {
+    clean.matchMode = m.matchMode as MatchMode
+  }
+  const interests = sanitizeInterests(m.interests as string[] | undefined)
+  if (interests.length > 0) clean.interests = interests
+  if (typeof m.semanticThreshold === 'number' && Number.isFinite(m.semanticThreshold)) {
+    clean.semanticThreshold = clamp01(m.semanticThreshold, 0)
+  }
+  if (m.matchAll === true) clean.matchAll = true
+  if (Object.keys(clean).length === 0) return undefined
+  return clean
 }
 
 /** sanitize 视角下的原始 priceRules 项（未知数据，逐字段判型后再组装） */

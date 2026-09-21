@@ -250,7 +250,7 @@ export interface HitQueryOptions {
   /** 来源精确匹配；undefined / 空串 = 不过滤 */
   sourceId?: string
   /** 命中方式过滤（包含语义：给数组则命中方式须在其内）；undefined / 空数组 = 不过滤 */
-  matchedBy?: ('literal' | 'semantic' | 'rule')[]
+  matchedBy?: ('literal' | 'semantic' | 'rule' | 'matchall')[]
   /** 对 title + matchedKeywords + matchedRule 的大小写不敏感子串；undefined / 空白 = 不过滤 */
   text?: string
   /** 页大小；上限 200（超出钳位），<=0 / 非法 = 0（total 仍准确） */
@@ -297,8 +297,8 @@ export interface StatsResult {
   total: number
   /** 有命中的日期，新→旧 */
   byDay: StatsDayCount[]
-  /** 三档命中方式计数 */
-  byMatchedBy: { literal: number; semantic: number; rule: number }
+  /** 四档命中方式计数（R13-2 起 + matchall 来源级全匹配） */
+  byMatchedBy: { literal: number; semantic: number; rule: number; matchall: number }
   /** 来源分布，count 降序 */
   bySource: StatsSourceCount[]
   /** 关键词命中榜：count 降序，零命中关键词附尾（zeroHit: true） */

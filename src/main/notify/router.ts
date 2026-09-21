@@ -34,8 +34,8 @@ import type { RoutingRule, RoutingWhen } from '@shared/types'
 export interface RouteContext {
   /** 帖子来源 id（= topic.sourceId） */
   sourceId: string
-  /** 命中方式：literal / semantic / rule */
-  matchedBy: 'literal' | 'semantic' | 'rule'
+  /** 命中方式：literal / semantic / rule / matchall（R13-2 来源级全匹配） */
+  matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall'
   /** 命中的价格规则 id；literal/semantic 命中恒为 null */
   ruleId: string | null
 }

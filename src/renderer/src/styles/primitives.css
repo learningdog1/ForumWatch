@@ -180,6 +180,17 @@
 .ent-expand .field:last-child {
   border-bottom: 0;
 }
+/* R13-2 匹配覆盖分组（fieldset 原生 disabled 语义）：全匹配开启时整组禁用置灰——
+   fieldset 默认盒样式全部归零，视觉上与 .ent-expand 的 field 流融为一体 */
+.ent-match-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ent-match-fields:disabled {
+  opacity: 0.55;
+}
 .ent-expand-foot {
   display: flex;
   justify-content: flex-end;

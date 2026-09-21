@@ -50,12 +50,13 @@ const ALL_FROM = '2000-01-01'
 /** 默认页大小档（Pager 三档之一） */
 const DEFAULT_PAGE_SIZE = 50
 
-type MatchedBy = 'literal' | 'semantic' | 'rule'
+type MatchedBy = 'literal' | 'semantic' | 'rule' | 'matchall'
 
 const MB_OPTIONS: { value: MatchedBy; label: string }[] = [
   { value: 'literal', label: '字面' },
   { value: 'semantic', label: '语义' },
-  { value: 'rule', label: '规则' }
+  { value: 'rule', label: '规则' },
+  { value: 'matchall', label: '全匹配' }
 ]
 
 /** 日期快捷 chips（单选；自定义激活时展开两个 date input） */
@@ -137,13 +138,14 @@ function readStatsCollapsed(): boolean {
 
 // ---- Z1 统计画像子块 ---------------------------------------------------------
 
-/** 三命中方式占比：堆叠比例条（宽度 = 占比）+ 三行图例（数字 + 比例） */
+/** 四命中方式占比：堆叠比例条（宽度 = 占比）+ 图例行（数字 + 比例） */
 function MatchedByBreakdown(props: { stats: StatsResult }) {
   const { byMatchedBy, total } = props.stats
   const rows: { key: MatchedBy; label: string; count: number }[] = [
     { key: 'literal', label: '字面', count: byMatchedBy.literal },
     { key: 'semantic', label: '语义', count: byMatchedBy.semantic },
-    { key: 'rule', label: '规则', count: byMatchedBy.rule }
+    { key: 'rule', label: '规则', count: byMatchedBy.rule },
+    { key: 'matchall', label: '全匹配', count: byMatchedBy.matchall }
   ]
   return (
     <div>

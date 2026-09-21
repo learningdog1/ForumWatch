@@ -116,6 +116,14 @@ function AiBlock(props: { ai: AiRuntimeStatus }) {
       {ai.degraded === 'unconfigured' && (
         <div className="ai-degraded">AI 未配置 · 语义监控停用，仅字面与规则命中</div>
       )}
+      {ai.degraded === 'backoff' && (
+        <div
+          className="ai-degraded"
+          title={ai.semanticCooldownUntil ?? undefined}
+        >
+          AI 评估退避中 · 上游连续失败，暂停调用（指数冷却，成功即恢复）
+        </div>
+      )}
       {ai.lastAiError != null && (
         <div className="ai-err" title={ai.lastAiError}>
           最近 AI 错误：{ai.lastAiError}

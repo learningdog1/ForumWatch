@@ -86,7 +86,8 @@ function CommentaryLine(props: { commentary: string | null }) {
 
 /**
  * 命中方式区：字面 → 命中词 chips；语义 → AI 理由（斜体小字）；规则 →
- * 规则徽标（.how-badge.rule 类，色值走 token——原内联样式收敛）+ 命中规则名。
+ * 规则徽标（.how-badge.rule 类，色值走 token——原内联样式收敛）+ 命中规则名；
+ * 全匹配（R13-2）→ 琥珀徽标（该来源 matchAll 覆盖的直接命中，无命中词/理由）。
  */
 function MatchInfo(props: { hit: HitRecord }) {
   const { hit } = props
@@ -115,6 +116,14 @@ function MatchInfo(props: { hit: HitRecord }) {
             {matchedRule}
           </span>
         )}
+        <CommentaryLine commentary={commentary} />
+      </span>
+    )
+  }
+  if (hit.matchedBy === 'matchall') {
+    return (
+      <span className="hit-how matchall" title="该来源开启了全匹配：新帖直接命中">
+        <span className="how-badge">全匹配</span>
         <CommentaryLine commentary={commentary} />
       </span>
     )

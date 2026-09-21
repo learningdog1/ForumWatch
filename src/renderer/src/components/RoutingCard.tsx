@@ -41,7 +41,8 @@ type MatchedBy = NonNullable<RoutingWhen['matchedBy']>[number]
 const MATCHED_BY_LABEL: Record<MatchedBy, string> = {
   literal: '字面',
   semantic: '语义',
-  rule: '规则'
+  rule: '规则',
+  matchall: '全匹配'
 }
 
 /**
@@ -310,7 +311,7 @@ export function RoutingCard(
                         hint="多选；一个都不勾 = 不限方式。"
                       >
                         <div className="input-row">
-                          {(['literal', 'semantic', 'rule'] as MatchedBy[]).map((m) => (
+                          {(['literal', 'semantic', 'rule', 'matchall'] as MatchedBy[]).map((m) => (
                             <label key={m} className="radio radio-tight">
                               <input
                                 id={`rule-${rule.id}-matched-${m}`}
@@ -412,7 +413,7 @@ export function RoutingCard(
       </Field>
       <Field label="命中方式" htmlFor="rule-new-matched-literal" hint="多选；一个都不勾 = 不限方式。">
         <div className="input-row">
-          {(['literal', 'semantic', 'rule'] as MatchedBy[]).map((m) => (
+          {(['literal', 'semantic', 'rule', 'matchall'] as MatchedBy[]).map((m) => (
             <label key={m} className="radio radio-tight">
               <input
                 id={`rule-new-matched-${m}`}

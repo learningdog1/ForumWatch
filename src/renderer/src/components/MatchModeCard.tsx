@@ -122,6 +122,9 @@ export function MatchModeCard(props: {
           </span>
         </div>
       </Field>
+      <div className="notice muted-notice">
+        以上为全局默认；单个来源可在 设置 → 来源 → 该行「匹配」面板单独覆盖匹配模式、兴趣描述与阈值。
+      </div>
     </section>
   )
 }

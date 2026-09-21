@@ -884,6 +884,220 @@ describe('sanitizeConfig', () => {
     ])
   })
 
+  it('sources matching（R13）：各字段清洗往返保留——关键词 trim 去重、枚举/有限数校验、interests 同全局口径', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          {
+            id: 'lowendtalk-offers',
+            type: 'rss',
+            enabled: true,
+            url: 'https://lowendtalk.com/discussions/feed.rss',
+            matching: {
+              includeKeywords: ['  vps ', 'VPS', 'dedicated'],
+              excludeKeywords: ['giveaway', ' giveaway '],
+              matchMode: 'semantic',
+              interests: [' 便宜大碗的独服 ', ''],
+              semanticThreshold: 0.35
+            }
+          }
+        ]
+      })
+    )
+    expect(out.sources[0]!.matching).toEqual({
+      includeKeywords: ['vps', 'dedicated'],
+      excludeKeywords: ['giveaway'],
+      matchMode: 'semantic',
+      interests: ['便宜大碗的独服'],
+      semanticThreshold: 0.35
+    })
+  })
+
+  it('sources matching（R13-2）：matchAll 仅 true 落键，false/非法 = 不落键（不全匹配）', () => {
+    const base = { type: 'v2ex' as const, enabled: true }
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: 'on', ...base, matching: { matchAll: true } },
+          { id: 'off', ...base, matching: { matchAll: false } },
+          { id: 'junk', ...base, matching: { matchAll: 'yes' as never } },
+          // matchAll:true + 其余全空 → matching 键保留（只有全匹配一项覆盖也算覆盖）
+          { id: 'solo', ...base, matching: { includeKeywords: [], matchAll: true } }
+        ]
+      })
+    )
+    expect(out.sources[0]!.matching).toEqual({ matchAll: true })
+    expect(out.sources[1]!.matching).toBeUndefined()
+    expect(out.sources[2]!.matching).toBeUndefined()
+    expect(out.sources[3]!.matching).toEqual({ matchAll: true })
+  })
+
+  it('sources matching：非对象 / 清洗后全空 → 不落 matching 键（等价未覆盖，跟随全局）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: 'a', type: 'v2ex', enabled: true, matching: 'garbage' as never },
+          { id: 'b', type: 'v2ex', enabled: true, matching: {} },
+          {
+            id: 'c',
+            type: 'v2ex',
+            enabled: true,
+            matching: { includeKeywords: ['  ', ''], excludeKeywords: [], interests: [] }
+          },
+          {
+            id: 'd',
+            type: 'rss',
+            enabled: true,
+            url: 'https://example.com/feed',
+            // rss 分支同样接入 sanitizeSourceMatching（坑4：两分支都要补）
+            matching: { matchMode: 'nonsense' as never, semanticThreshold: Number.NaN }
+          }
+        ]
+      })
+    )
+    expect(out.sources).toEqual([
+      { id: 'a', type: 'v2ex', enabled: true },
+      { id: 'b', type: 'v2ex', enabled: true },
+      { id: 'c', type: 'v2ex', enabled: true },
+      { id: 'd', type: 'rss', enabled: true, url: 'https://example.com/feed' }
+    ])
+    for (const s of out.sources) expect('matching' in s).toBe(false)
+  })
+
+  it('sources matching：非法 matchMode 剔除字段（而非回 literal——覆盖里非法 = 未覆盖）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          {
+            id: 'a',
+            type: 'v2ex',
+            enabled: true,
+            matching: { matchMode: 'fuzzy' as never, includeKeywords: ['vps'] }
+          }
+        ]
+      })
+    )
+    // matchMode 键不存在（undefined = 跟随全局），includeKeywords 保留
+    expect(out.sources[0]!.matching).toEqual({ includeKeywords: ['vps'] })
+    expect('matchMode' in (out.sources[0]!.matching ?? {})).toBe(false)
+  })
+
+  it('sources matching：非法 semanticThreshold 剔除字段（而非回 0），越界钳 [0,1]', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          {
+            id: 'a',
+            type: 'v2ex',
+            enabled: true,
+            matching: { semanticThreshold: 'high' as never }
+          },
+          {
+            id: 'b',
+            type: 'v2ex',
+            enabled: true,
+            matching: { semanticThreshold: Number.NaN }
+          },
+          { id: 'c', type: 'v2ex', enabled: true, matching: { semanticThreshold: 1.7 } },
+          { id: 'd', type: 'v2ex', enabled: true, matching: { semanticThreshold: -0.2 } }
+        ]
+      })
+    )
+    // 非法（非数字 / NaN）= 不落键 = 跟随全局——与全局 clamp01 非法回 0 的口径有意不同
+    expect(out.sources[0]!.matching).toBeUndefined()
+    expect(out.sources[1]!.matching).toBeUndefined()
+    expect(out.sources[2]!.matching).toEqual({ semanticThreshold: 1 })
+    expect(out.sources[3]!.matching).toEqual({ semanticThreshold: 0 })
+  })
+
+  it('sources matching：nodeseek / v2ex / rss 三类型都接受 matching（坑4 白名单完整性）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        sources: [
+          { id: 'nodeseek', type: 'nodeseek', enabled: true, matching: { matchMode: 'both' } },
+          { id: 'v2ex', type: 'v2ex', enabled: true, matching: { matchMode: 'semantic' } },
+          {
+            id: 'rss-x',
+            type: 'rss',
+            enabled: true,
+            url: 'https://example.com/feed',
+            matching: { matchMode: 'literal' }
+          }
+        ]
+      })
+    )
+    expect(out.sources.map((s) => s.matching)).toEqual([
+      { matchMode: 'both' },
+      { matchMode: 'semantic' },
+      { matchMode: 'literal' }
+    ])
+  })
+
+  it('坑4 回归：save→load 往返不丢 matching（sanitize 重建对象的白名单完整性）；旧配置无 matching 往返不受影响', () => {
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        sources: [
+          {
+            id: 'nodeseek',
+            type: 'nodeseek',
+            enabled: true,
+            matching: { includeKeywords: ['vps'], matchMode: 'semantic', semanticThreshold: 0.4 }
+          },
+          {
+            id: 'v2ex',
+            type: 'v2ex',
+            enabled: true
+            // 无 matching：老用户形状，sanitize 后同样不落键
+          }
+        ]
+      })
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.sources).toEqual([
+      {
+        id: 'nodeseek',
+        type: 'nodeseek',
+        enabled: true,
+        matching: { includeKeywords: ['vps'], matchMode: 'semantic', semanticThreshold: 0.4 }
+      },
+      { id: 'v2ex', type: 'v2ex', enabled: true }
+    ])
+    expect('matching' in loaded.sources[1]!).toBe(false)
+  })
+
+  it('UI 清空路径（R13）：matching 清成全空（SourceCard patchMatching 删键语义）→ 保存往返不落键（无假 dirty）', () => {
+    // 模拟 SourceCard.patchMatching 的落键语义：字段全空时 delete copy.matching
+    // （对齐 sanitize），用户在 UI 看到的 sources 形状与保存重载后的形状一致，
+    // 保存后 dirty 计数回到 0。这里以纯函数等价链路锁定（node 环境无 DOM，
+    // 组件交互本身无法渲染测试——仓库先例见 ReportDoc.test.ts 头注释）。
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        sources: [
+          {
+            id: 'nodeseek',
+            type: 'nodeseek',
+            enabled: true,
+            matching: { includeKeywords: ['vps'] }
+          }
+        ]
+      })
+    )
+    // 用户在「匹配」面板删掉最后一个标签 → patchMatching 全空删键
+    const cleared: AppConfig = {
+      ...store.get(),
+      sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }]
+    }
+    store.save(cleared)
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.sources).toEqual([{ id: 'nodeseek', type: 'nodeseek', enabled: true }])
+    expect('matching' in loaded.sources[0]!).toBe(false)
+    // 清空后的 draft 与重载值 JSON 等价 = 设置页 dirty 判定（draft vs toDraft(saved)
+    // 的 JSON 比对）回到干净态
+    expect(JSON.stringify(loaded.sources)).toBe(JSON.stringify(cleared.sources))
+  })
+
   it('坑4 回归：save→load 往返不丢 priceRules/similarity/ai.semanticThreshold（sanitize 白名单完整性）', () => {
     const store = new ConfigStore(configPath)
     store.save(

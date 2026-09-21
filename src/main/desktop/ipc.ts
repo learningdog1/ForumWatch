@@ -61,6 +61,7 @@ import type {
 import type { DesktopRuntime } from './runtime'
 import { allowedExternalDomains, isHostAllowed } from '../monitor/sources/registry'
 import { formatLocalDate } from '../monitor/hits-store'
+import { resolveSourceMatching } from '../monitor/matching'
 import { computeStats } from '../monitor/stats'
 import { normalizeTitle } from '../monitor/similarity'
 import { runMatchTest, type SemanticTestInput } from '../monitor/testbench'
@@ -303,6 +304,9 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
    * invoke(days?) → StatsResult：近 N 天（缺省 14，钳 [1,90]）命中的纯读聚合。
    * readRecent 以当前时刻起算本地自然日窗口；includeKeywords 取当前生效配置
    * （零命中关键词检出基准）。读取失败按空数据聚合（不抛）。
+   * R13：基准 = 全局包含词 ∪ 各来源的覆盖包含词（去重交给 computeStats——
+   * 它对 cfg.includeKeywords 已按小写归并去重，并集传入不会重复列出），
+   * 让 per-source 关键词也进零命中检出。
    */
   ipcMain.handle(IPC.getStats, async (_event, days: unknown): Promise<StatsResult> => {
     const n =
@@ -310,7 +314,12 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
         ? Math.min(Math.max(Math.floor(days), 1), STATS_DAYS_MAX)
         : STATS_DAYS_DEFAULT
     const hits = await rt.hitsStore.readRecent(n)
-    return computeStats(hits, { includeKeywords: rt.store.get().includeKeywords })
+    const cfg = rt.store.get()
+    const includeKeywords = [
+      ...cfg.includeKeywords,
+      ...cfg.sources.flatMap((s) => s.matching?.includeKeywords ?? [])
+    ]
+    return computeStats(hits, { includeKeywords })
   })
 
   // ---- 命中反馈（R7-W4 AI 反馈闭环，DEC-5） ---------------------------------
@@ -404,6 +413,10 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
     const author = typeof raw.author === 'string' ? raw.author.trim() : ''
 
     const cfg: AppConfig = rt.store.get()
+    // R13 诊断面 parity：per-source 匹配覆盖用与引擎同一解析器（matching.ts 的
+    // resolveSourceMatching）——两处各自解析会漂移，测试台将给出与引擎相反的
+    // 结论。sourceId 未指定时整体回退全局（未知 id 同样回退）。
+    const m = resolveSourceMatching(cfg, sourceId ?? '')
     const filters = sourceId !== undefined
       ? cfg.sources.find((s) => s.id === sourceId)?.filters
       : undefined
@@ -428,7 +441,7 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
         p.baseUrl.trim() !== '' && p.apiKey.trim() !== '' && p.model.trim() !== ''
       if (!configured) {
         semantic = { skipped: 'AI 未配置（Base URL / API Key / 模型名不齐）' }
-      } else if (cfg.ai.interests.length === 0) {
+      } else if (m.interests.length === 0) {
         // evaluator 对空兴趣会快速全 miss 不调 API；直接说明原因更清楚
         semantic = { skipped: '兴趣描述为空：语义档永不命中（未调 AI）' }
       } else {
@@ -445,7 +458,7 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
           lastActiveAt: null
         }
         try {
-          const verdicts = await rt.semanticEvaluator.evaluate([topic], cfg.ai.interests)
+          const verdicts = await rt.semanticEvaluator.evaluate([topic], m.interests)
           const verdict = verdicts.get(`${topic.sourceId}:${topic.id}`)
           semantic =
             verdict === undefined
@@ -462,10 +475,20 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
     return runMatchTest({
       title,
       filters,
-      cfg,
+      // R13：exclude / literal / threshold 三个消费点用 per-source 生效值——直接
+      // 把 cfg 覆盖成"该来源视角"的配置（浅拷贝组装，不动 store 内存；testbench
+      // 的「字面/语义档不受 matchMode 门控」既有意差保留，诊断工具语义不变）。
+      // R13-2：matchAll 走独立入参（cfg 无对应全局字段，只有来源级覆盖）。
+      cfg: {
+        ...cfg,
+        includeKeywords: m.includeKeywords,
+        excludeKeywords: m.excludeKeywords,
+        ai: { ...cfg.ai, semanticThreshold: m.semanticThreshold }
+      },
       recentPushedTitles,
       semantic,
-      topic: { category, categorySlug: category, author }
+      topic: { category, categorySlug: category, author },
+      matchAll: m.matchAll
     })
   })
 

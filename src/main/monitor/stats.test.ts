@@ -48,7 +48,7 @@ describe('computeStats（R7-W3 统计面板聚合）', () => {
     const r = computeStats([], { includeKeywords: ['vps', '香港', 'Mega'] })
     expect(r.total).toBe(0)
     expect(r.byDay).toEqual([])
-    expect(r.byMatchedBy).toEqual({ literal: 0, semantic: 0, rule: 0 })
+    expect(r.byMatchedBy).toEqual({ literal: 0, semantic: 0, rule: 0, matchall: 0 })
     expect(r.bySource).toEqual([])
     expect(r.pushFailRate).toBe(0)
     expect(r.keywordHits).toEqual([
@@ -75,7 +75,7 @@ describe('computeStats（R7-W3 统计面板聚合）', () => {
     )
     expect(r.total).toBe(4)
     expect(r.byDay).toEqual([{ date: '2026-09-18', count: 4 }])
-    expect(r.byMatchedBy).toEqual({ literal: 2, semantic: 1, rule: 1 })
+    expect(r.byMatchedBy).toEqual({ literal: 2, semantic: 1, rule: 1, matchall: 0 })
   })
 
   it('多日：byDay 新→旧、只含有命中的日期（无命中日不占位）', () => {

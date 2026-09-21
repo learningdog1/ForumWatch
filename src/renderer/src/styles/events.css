@@ -1162,6 +1162,11 @@ button.report-meta:hover {
 .lg-dot.rule {
   background: var(--color-primary);
 }
+/* 全匹配（R13-2）：warn 琥珀档，与命中方式徽标（dashboard.css）同色系 */
+.stack-seg.matchall,
+.lg-dot.matchall {
+  background: var(--warn);
+}
 .legend {
   display: flex;
   flex-direction: column;

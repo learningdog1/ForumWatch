@@ -12,6 +12,7 @@ import {
   STAGE_EXCLUDE,
   STAGE_FILTERS,
   STAGE_LITERAL,
+  STAGE_MATCHALL,
   STAGE_RULES,
   STAGE_SEMANTIC,
   STAGE_SIMILARITY,
@@ -38,12 +39,13 @@ function stageOf(result: ReturnType<typeof runMatchTest>, stage: string) {
 }
 
 describe('runMatchTest：阶段顺序与默认形态', () => {
-  it('六阶段按引擎管线顺序输出；全空配置下 wouldPush=false', () => {
+  it('七阶段按引擎管线顺序输出；全空配置下 wouldPush=false', () => {
     const r = runMatchTest(input({ title: '随便一个标题' }))
     expect(r.stages.map((s) => s.stage)).toEqual([
       STAGE_FILTERS,
       STAGE_EXCLUDE,
       STAGE_RULES,
+      STAGE_MATCHALL,
       STAGE_LITERAL,
       STAGE_SIMILARITY,
       STAGE_SEMANTIC
@@ -52,6 +54,7 @@ describe('runMatchTest：阶段顺序与默认形态', () => {
     expect(stageOf(r, STAGE_FILTERS).outcome).toBe('skip')
     expect(stageOf(r, STAGE_EXCLUDE).outcome).toBe('pass')
     expect(stageOf(r, STAGE_RULES).outcome).toBe('info')
+    expect(stageOf(r, STAGE_MATCHALL).outcome).toBe('info')
     expect(stageOf(r, STAGE_LITERAL).outcome).toBe('info')
     expect(stageOf(r, STAGE_SIMILARITY).outcome).toBe('pass')
     expect(stageOf(r, STAGE_SEMANTIC).outcome).toBe('skip')
@@ -356,6 +359,50 @@ describe('runMatchTest：per-source 过滤', () => {
     )
     expect(stageOf(r, STAGE_FILTERS).outcome).toBe('skip')
     expect(r.wouldPush).toBe(true)
+  })
+})
+
+describe('runMatchTest：来源级全匹配（R13-2）', () => {
+  it('matchAll=true → 全匹配 pass、wouldPush=true；字面/语义按引擎同款短路 skip', () => {
+    const r = runMatchTest(input({ title: '什么词都没有的标题', matchAll: true }))
+    expect(stageOf(r, STAGE_MATCHALL).outcome).toBe('pass')
+    expect(stageOf(r, STAGE_LITERAL).outcome).toBe('skip')
+    expect(stageOf(r, STAGE_LITERAL).detail).toContain('全匹配已命中')
+    expect(stageOf(r, STAGE_SEMANTIC).outcome).toBe('skip')
+    expect(stageOf(r, STAGE_SEMANTIC).detail).toContain('全匹配已命中')
+    expect(r.wouldPush).toBe(true)
+  })
+
+  it('排除词/来源过滤仍先否决：全匹配救不回被闸帖', () => {
+    const r = runMatchTest(
+      input({ title: '广告 spam', matchAll: true, cfg: cfg({ excludeKeywords: ['广告'] }) })
+    )
+    expect(stageOf(r, STAGE_EXCLUDE).outcome).toBe('block')
+    expect(stageOf(r, STAGE_MATCHALL).outcome).toBe('skip')
+    expect(r.wouldPush).toBe(false)
+  })
+
+  it('价格规则命中优先归因：全匹配阶段 skip（规则保留）', () => {
+    const r = runMatchTest(
+      input({
+        title: '年付 88元 小鸡',
+        matchAll: true,
+        cfg: cfg({ priceRules: [rule({ id: 'cheap-year', cycle: 'yearly', maxPrice: 100 })] })
+      })
+    )
+    expect(stageOf(r, STAGE_RULES).outcome).toBe('pass')
+    expect(stageOf(r, STAGE_MATCHALL).outcome).toBe('skip')
+    expect(stageOf(r, STAGE_MATCHALL).detail).toContain('价格规则已命中')
+    expect(r.wouldPush).toBe(true)
+  })
+
+  it('matchAll 缺省/false → info 说明未开启，字面档照常评估', () => {
+    const r = runMatchTest(input({ title: 'vps 优惠', cfg: cfg({ includeKeywords: ['vps'] }) }))
+    expect(stageOf(r, STAGE_MATCHALL).outcome).toBe('info')
+    expect(stageOf(r, STAGE_LITERAL).outcome).toBe('pass')
+    expect(r.wouldPush).toBe(true)
+    const r2 = runMatchTest(input({ title: 'vps 优惠', matchAll: false, cfg: cfg({ includeKeywords: ['vps'] }) }))
+    expect(stageOf(r2, STAGE_MATCHALL).outcome).toBe('info')
   })
 })
 

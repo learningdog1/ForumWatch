@@ -53,7 +53,7 @@ function dayOf(hit: HitRecord): string | null {
  * 聚合一批命中记录为 StatsResult。纯函数：同输入同输出，不碰文件与时钟。
  */
 export function computeStats(hits: HitRecord[], cfg: ComputeStatsConfig): StatsResult {
-  const byMatchedBy = { literal: 0, semantic: 0, rule: 0 }
+  const byMatchedBy = { literal: 0, semantic: 0, rule: 0, matchall: 0 }
   const dayCounts = new Map<string, number>()
   const sourceCounts = new Map<string, number>()
   const keywordCounts = new Map<string, KeywordCount>() // key = 小写
@@ -62,6 +62,7 @@ export function computeStats(hits: HitRecord[], cfg: ComputeStatsConfig): StatsR
   for (const hit of hits) {
     if (hit.matchedBy === 'literal') byMatchedBy.literal += 1
     else if (hit.matchedBy === 'semantic') byMatchedBy.semantic += 1
+    else if (hit.matchedBy === 'matchall') byMatchedBy.matchall += 1
     else byMatchedBy.rule += 1
     const day = dayOf(hit)
     if (day !== null) dayCounts.set(day, (dayCounts.get(day) ?? 0) + 1)

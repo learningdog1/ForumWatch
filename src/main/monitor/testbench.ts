@@ -60,12 +60,19 @@ export interface MatchTestInput {
    *（真实帖子无分类时的引擎行为一致），detail 会说明原因。
    */
   topic?: { category?: string; categorySlug?: string; author?: string }
+  /**
+   * 来源级全匹配（R13-2）：ipc 调用方传 resolveSourceMatching 的生效值。
+   * true = 过闸标题直接命中（matchedBy='matchall'），字面/语义档按引擎同款
+   * 短路展示为 skip。
+   */
+  matchAll?: boolean
 }
 
 /** 阶段标识常量（测试与消费方共用，防字符串漂移） */
 export const STAGE_FILTERS = 'source-filters'
 export const STAGE_EXCLUDE = 'exclude'
 export const STAGE_RULES = 'rules'
+export const STAGE_MATCHALL = 'matchall'
 export const STAGE_LITERAL = 'literal'
 export const STAGE_SIMILARITY = 'similarity'
 export const STAGE_SEMANTIC = 'semantic'
@@ -164,6 +171,8 @@ export function runMatchTest(input: MatchTestInput): MatchTestResult {
   let dead: string | null = null
   /** 价格规则命中：短路后续命中类阶段（literal / semantic），相似闸照常评估 */
   let ruleHit = false
+  /** 来源级全匹配命中（R13-2）：短路字面/语义档（价格规则优先保留归因） */
+  let matchAllHit = false
   /** 命中类通道（规则/字面/语义过闸）是否任一 pass */
   let hitAny = false
   /** 相似降噪是否拦截 */
@@ -231,11 +240,26 @@ export function runMatchTest(input: MatchTestInput): MatchTestResult {
     }
   }
 
+  // ---- 3.5 来源级全匹配（R13-2 第 6.5 步，价格规则之后） --------------------
+  if (dead !== null) {
+    pushSkip(STAGE_MATCHALL, '全匹配', dead)
+  } else if (ruleHit) {
+    pushSkip(STAGE_MATCHALL, '全匹配', '价格规则已命中（引擎同款短路，保留规则归因）')
+  } else if (input.matchAll === true) {
+    matchAllHit = true
+    hitAny = true
+    push(STAGE_MATCHALL, '全匹配', 'pass', '该来源已开启全匹配：过闸新帖直接命中（字面/语义档跳过；排除词与来源过滤仍否决）')
+  } else {
+    push(STAGE_MATCHALL, '全匹配', 'info', '未开启（该来源未设置全匹配覆盖）')
+  }
+
   // ---- 4. 字面匹配（第 7 步） ----------------------------------------------
   if (dead !== null) {
     pushSkip(STAGE_LITERAL, '字面匹配', dead)
   } else if (ruleHit) {
     pushSkip(STAGE_LITERAL, '字面匹配', '价格规则已命中（引擎同款短路，只记一种命中方式）')
+  } else if (matchAllHit) {
+    pushSkip(STAGE_LITERAL, '字面匹配', '全匹配已命中（引擎同款短路，字面档跳过）')
   } else {
     const { matched, matchedKeywords } = matchTopic(topic, cfg.includeKeywords, cfg.excludeKeywords)
     if (matched) {
@@ -287,6 +311,8 @@ export function runMatchTest(input: MatchTestInput): MatchTestResult {
     pushSkip(STAGE_SEMANTIC, '语义评估', dead)
   } else if (ruleHit) {
     pushSkip(STAGE_SEMANTIC, '语义评估', '价格规则已命中（引擎同款短路，不进 AI 批）')
+  } else if (matchAllHit) {
+    pushSkip(STAGE_SEMANTIC, '语义评估', '全匹配已命中（引擎同款短路，不进 AI 批）')
   } else if (input.semantic === undefined) {
     push(STAGE_SEMANTIC, '语义评估', 'skip', '未调用 AI 评估（未勾选或调用前置条件不满足）')
   } else if ('skipped' in input.semantic) {

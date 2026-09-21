@@ -45,6 +45,31 @@ export const SOURCE_PRESETS: SourcePreset[] = [
       label: 'LowEndTalk',
       enabled: true
     }
+  },
+  {
+    // R13：offers 推送预设——用全站 feed（实测稳定 200，单条 feed 已覆盖多个
+    // 优惠类分类；/categories/offers 端点的 Cloudflare 策略时变）+ 分类白名单，
+    // 零 adapter 改动（rss.ts 已把 RSS <category> 填进 topic.category/
+    // categorySlug，filters.ts 按显示名/slug 双口径匹配）。白名单保存后可在
+    // 「来源 → 过滤」面板自行调整。与「LowEndTalk」全站预设按 id 区分
+    // （presetAdded 不互斥）：两者同时启用时同一帖可能各推一次——去重键是
+    // per-source 的，跨源双推靠默认相似降噪（0.72/48h 标题级）兜底吞重，
+    // 建议二选一或停用其一。
+    name: 'LowEndTalk Offers',
+    desc:
+      '全站 RSS + 分类白名单（Offers / Shared Hosting Offers / Giveaways & Freebies，保存后可在「过滤」面板调整），只推优惠帖。' +
+      '与全站「LowEndTalk」来源同时启用时同帖可能各推一次（靠相似降噪吞重），建议二选一。' +
+      '部分网络会被 Cloudflare 拦截，建议配合代理使用。',
+    config: {
+      id: 'lowendtalk-offers',
+      type: 'rss',
+      url: 'https://lowendtalk.com/discussions/feed.rss',
+      label: 'LowEndTalk Offers',
+      enabled: true,
+      filters: {
+        includeCategories: ['Offers', 'Shared Hosting Offers', 'Giveaways & Freebies']
+      }
+    }
   }
 ]
 

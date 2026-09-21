@@ -50,6 +50,33 @@
  * R9-W1 变更（2026-09-19，DEC-6 Telegram bot 双向遥控）：
  * - NotifyConfig 增加 remoteControl（enabled + allowedChatIds，默认关/空列表）：
  *   加法字段，不 bump schemaVersion；sanitize 见 store.ts sanitizeNotify。
+ *
+ * R13 变更（2026-09-21，per-source 匹配覆盖 + LowEndTalk Offers 预设）：
+ * - 三种 SourceConfig 各加可选 `matching?: SourceMatchingConfig`（与 filters?
+ *   并列；五个**全可选**字段，字段级回退全局——未设置/清洗后空数组不落键 =
+ *   未覆盖 = 跟随全局同名配置）。**加法字段，不 bump schemaVersion**（R5 先例），
+ *   盘上兼容由 load 的 merge DEFAULT + sanitize 兜底。
+ * - 生效配置统一走 src/main/monitor/matching.ts 的 resolveSourceMatching 纯函数
+ *   （引擎 pollSource 与 ipc 诊断面共用，防两处口径分叉）。
+ * - 「显式清空包含词仍开字面档」**不可表达**——该意图用 matchMode:'semantic'
+ *   表达（literalActive=false，字面档整体跳过）；排除词同理无法表达「该来源
+ *   不排除」。契约细节见 SourceMatchingConfig 注释与 docs/usage.md。
+ *
+ * R13-2 变更（2026-09-21，来源级全匹配）：
+ * - SourceMatchingConfig 增加可选 `matchAll?: boolean`（未设置 = 不全匹配）：
+ *   开启后该来源过闸新帖**直接命中**（matchedBy='matchall'），字面/语义档整体
+ *   跳过；价格规则仍先评估（命中记 'rule'，保留规则归因与路由能力）。四道闸
+ *   （来源过滤/旧帖阈值/置顶/排除词）与相似降噪**照常生效**——全匹配 ≠ 全推送。
+ * - HitRecord.matchedBy 扩为四档（+ 'matchall'）：旧 hits/*.jsonl 行不可能有
+ *   该值，消费方枚举分支缺省即可；RoutingWhen.matchedBy / queryHits 过滤同步扩。
+ *   加法字段，不 bump schemaVersion（R13 先例）。
+ *
+ * R13-3 变更（2026-09-21，语义评估节流与降级）：
+ * - AiRuntimeStatus.degraded 扩 'backoff'（语义评估连续失败 → 指数退避冷却，
+ *   冷却期零调用防重试风暴）+ 可选 semanticCooldownUntil（ISO 截止时刻）。
+ * - 未决帖轮次上限（引擎常量 5 轮）：超限按「降级字面判定」收口（镜像
+ *   Provider 未配置的整体降级语义）——命中即推、未中入 seen，防未决帖
+ *   无限重评与滚出首页静默丢失。
  */
 
 /** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
@@ -75,6 +102,48 @@ export interface SourceFilters {
   blockedAuthors?: string[]
 }
 
+/**
+ * per-source 匹配覆盖契约（R13，字段级回退全局）。
+ *
+ * 语义：五个字段**全可选**——未设置（或 sanitize 清洗后空数组不落键）= 未覆盖
+ * = 跟随全局同名配置（AppConfig.includeKeywords / ai.matchMode 等）。
+ * 引擎消费经 matching.ts 的 resolveSourceMatching 解析为生效值（与 ipc 诊断面
+ * 共用同一实现）。
+ *
+ * **不可表达的意图（务必读）**：
+ * - 「显式清空包含词（该来源字面档永不命中）」无法用 includeKeywords: []
+ *   表达——sanitize 空数组不落键 = 回退全局。该意图用 matchMode:'semantic'
+ *   表达（此时字面档整体跳过，见 engine 的 literalActive 派生）。
+ * - 排除词同理无法表达「该来源不排除」——只能靠全局列表里不放该词。
+ *
+ * 覆盖是**替换**不是合并：includeKeywords/excludeKeywords/interests 设置后
+ * 完全替换全局同名列表。价格规则与 AI 锐评**不参与**覆盖（恒用全局配置）。
+ *
+ * R13-2：`matchAll: true` = 来源级全匹配——该来源过闸新帖直接命中
+ * （matchedBy='matchall'），字面/语义档与其余覆盖字段全部跳过（UI 侧开启时
+ * 置灰其余覆盖项）；价格规则仍先评估（命中记 'rule'）；排除词/来源过滤/
+ * 旧帖/置顶/相似降噪照常否决。典型用法：LowEndTalk Offers 来源开全匹配，
+ * 所有 offers 新帖全推（对齐参考项目的"全部推送"行为）。
+ */
+export interface SourceMatchingConfig {
+  /** 包含词覆盖（空 = 未覆盖，跟随全局；设置后**替换**全局列表） */
+  includeKeywords?: string[]
+  /** 排除词覆盖（空 = 未覆盖，跟随全局；设置后**替换**全局列表，一票否决） */
+  excludeKeywords?: string[]
+  /** 匹配模式覆盖（未设置 = 跟随全局 ai.matchMode；Provider 未配置时仍整体降级字面） */
+  matchMode?: MatchMode
+  /** 兴趣描述覆盖（空 = 未覆盖，跟随全局；sanitize 同全局口径 20 条 / 500 字） */
+  interests?: string[]
+  /** 语义置信度阈值覆盖（未设置 = 跟随全局 ai.semanticThreshold；范围 [0,1]） */
+  semanticThreshold?: number
+  /**
+   * 来源级全匹配（R13-2）：true = 该来源过闸新帖直接命中（matchedBy='matchall'），
+   * 字面/语义档与 matchMode/includeKeywords/interests/semanticThreshold 覆盖全部
+   * 跳过；价格规则先评估（命中记 'rule'）。sanitize 仅 true 落键（false/非法 = 不落键）。
+   */
+  matchAll?: boolean
+}
+
 /** NodeSeek 来源（SSR HTML 抓取，现有主路径） */
 export interface NodeseekSourceConfig {
   /** 稳定 slug；与去重键前缀、状态键一致 */
@@ -83,6 +152,8 @@ export interface NodeseekSourceConfig {
   enabled: boolean
   /** per-source 过滤（可选，见 SourceFilters 语义） */
   filters?: SourceFilters
+  /** per-source 匹配覆盖（可选，见 SourceMatchingConfig 语义；R13） */
+  matching?: SourceMatchingConfig
 }
 
 /** V2EX 来源 */
@@ -93,6 +164,8 @@ export interface V2exSourceConfig {
   enabled: boolean
   /** per-source 过滤（可选，见 SourceFilters 语义） */
   filters?: SourceFilters
+  /** per-source 匹配覆盖（可选，见 SourceMatchingConfig 语义；R13） */
+  matching?: SourceMatchingConfig
 }
 
 /** 通用 RSS 来源 */
@@ -107,6 +180,8 @@ export interface RssSourceConfig {
   label?: string
   /** per-source 过滤（可选，见 SourceFilters 语义） */
   filters?: SourceFilters
+  /** per-source 匹配覆盖（可选，见 SourceMatchingConfig 语义；R13） */
+  matching?: SourceMatchingConfig
 }
 
 /** 一个已配置的论坛来源（判别联合：按 type 分派，rss 额外带 url） */
@@ -211,13 +286,17 @@ export interface Topic {
   excerpt?: string
 }
 
-/** 命中记录：一个新帖命中（字面、语义或价格规则）并（尝试）推送 */
+/** 命中记录：一个新帖命中（字面、语义、价格规则或来源级全匹配）并（尝试）推送 */
 export interface HitRecord {
   topic: Topic
-  /** 字面命中的包含词；matchedBy='semantic' 时为空数组 */
+  /** 字面命中的包含词；matchedBy 非 'literal' 时为空数组 */
   matchedKeywords: string[]
-  /** 命中方式（第五轮起三档：字面 / 语义 / 价格规则） */
-  matchedBy: 'literal' | 'semantic' | 'rule'
+  /**
+   * 命中方式（R13-2 起四档：字面 / 语义 / 价格规则 / 来源级全匹配）。
+   * 'matchall' 仅来自 SourceMatchingConfig.matchAll（旧 hits/*.jsonl 行不可能
+   * 有该值，消费方枚举分支缺省容错）。
+   */
+  matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall'
   /** AI 的一句话判定理由（matchedBy='semantic' 时给出，可能为 null） */
   semanticReason: string | null
   /**
@@ -343,8 +422,8 @@ export interface NotifyConfig {
 export interface RoutingWhen {
   /** 限定来源（须存在于 sources，悬挂由 sanitize 剔除字段） */
   sourceId?: string
-  /** 限定命中方式（枚举过滤，空数组不落键） */
-  matchedBy?: ('literal' | 'semantic' | 'rule')[]
+  /** 限定命中方式（枚举过滤，空数组不落键；R13-2 起 + 'matchall'） */
+  matchedBy?: ('literal' | 'semantic' | 'rule' | 'matchall')[]
   /** 限定价格规则（须存在于 priceRules，悬挂由 sanitize 剔除字段） */
   ruleId?: string
 }
@@ -470,8 +549,17 @@ export interface AiRuntimeStatus {
   configured: boolean
   /** 生效模式：Provider 未配置时降级为 'literal' */
   effectiveMode: MatchMode
-  /** 降级态：'unconfigured' = Provider 未配置（语义档整体降级字面）。无配额降级（不设每日上限） */
-  degraded: 'none' | 'unconfigured'
+  /**
+   * 降级态：'unconfigured' = Provider 未配置（语义档整体降级字面）；
+   * 'backoff'（R13-3）= 语义评估连续失败进入指数退避冷却——冷却期内不调
+   * 上游（防重试风暴），新帖累积为未决待重评。无配额降级（不设每日上限）。
+   */
+  degraded: 'none' | 'unconfigured' | 'backoff'
+  /**
+   * 语义评估退避冷却截止时刻 ISO（R13-3）。**可选**：旧状态快照没有此字段，
+   * 消费方容忍缺失（等价 null = 无冷却）；仅 degraded='backoff' 时非 null。
+   */
+  semanticCooldownUntil?: string | null
   /** 今日 AI 调用次数（语义评估 + 锐评合计；本地自然日滚动，纯观测计数，无上限） */
   callsToday: number
   /**

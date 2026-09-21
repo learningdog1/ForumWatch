@@ -559,6 +559,12 @@
   color: var(--ok-text);
   border-color: color-mix(in srgb, var(--ok) 40%, transparent);
 }
+/* 全匹配徽标（R13-2）：warn 琥珀 chip 档——与字面(中性)/语义(紫)/规则(绿)区分 */
+.hit-how.matchall .how-badge {
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
 .ai-reason {
   min-width: 0;
   font-size: var(--fs-12);

@@ -739,6 +739,7 @@ export function Settings(props: {
                 pendingDelete={pendingDel.sources}
                 onMarkDelete={(id) => markDelete('sources', id)}
                 onUndoDelete={(id) => undoDelete('sources', id)}
+                globalSemanticThreshold={draft.aiSemanticThreshold}
               />
             </Slot>
             <Slot anchor="keywords" flashId={flashId}>
