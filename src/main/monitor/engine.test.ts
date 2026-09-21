@@ -605,7 +605,7 @@ describe('推送失败重试（ADR 8.10）', () => {
 })
 
 describe('失败与健康流转', () => {
-  it('ChallengeError → health=challenged，间隔按指数退避放大（冷却剩余折进全局间隔）', async () => {
+  it('ChallengeError → health=challenged；退避只计 source 冷却，不抬全局间隔', async () => {
     const h = build({ impl: async () => [topic('1')] })
     await h.engine.pollOnce() // 基线成功
     const spy = vi.spyOn(h.scheduler, 'setIntervalSec')
@@ -616,21 +616,22 @@ describe('失败与健康流转', () => {
     expect(st.health).toBe('challenged')
     expect(st.consecutiveFailures).toBe(1)
     expect(st.lastError).toContain('challenge')
-    // 全局间隔 = max(配置 60, 冷却剩余 120s)
-    expect(spy).toHaveBeenLastCalledWith(computeBackoffMs(1, 60_000) / 1000) // 120
+    // 全局间隔恒为配置值（60）；退避体现在 per-source cooldownUntil
+    expect(spy).toHaveBeenLastCalledWith(60)
+    expect(st.sources[0].cooldownUntil).not.toBeNull()
 
     // 冷却结束后的失败轮才再计一次（冷却中的轮次跳过该 source）
     advanceMs(computeBackoffMs(1, 60_000))
     await h.engine.pollOnce()
     st = h.engine.getStatus()
     expect(st.consecutiveFailures).toBe(2)
-    expect(spy).toHaveBeenLastCalledWith(computeBackoffMs(2, 60_000) / 1000) // 240
+    expect(spy).toHaveBeenLastCalledWith(60)
     expect(st.health).toBe('challenged')
     expect(st.sources[0]).toMatchObject({ sourceId: 'nodeseek', health: 'challenged' })
     expect(st.sources[0].cooldownUntil).not.toBeNull()
   })
 
-  it('一般 Error → health=backoff；成功后复位 ok 且间隔回配置值', async () => {
+  it('一般 Error → health=backoff；成功后复位 ok（全局间隔恒为配置值）', async () => {
     const h = build({ impl: async () => [topic('1')] })
     await h.engine.pollOnce()
     const spy = vi.spyOn(h.scheduler, 'setIntervalSec')
@@ -641,7 +642,8 @@ describe('失败与健康流转', () => {
     expect(st.health).toBe('backoff')
     expect(st.consecutiveFailures).toBe(1)
     expect(st.lastError).toBe('network down')
-    expect(spy).toHaveBeenLastCalledWith(120)
+    expect(spy).toHaveBeenLastCalledWith(60)
+    expect(st.sources[0].cooldownUntil).not.toBeNull()
 
     // 越过冷却（120s）后成功 → 复位
     advanceMs(computeBackoffMs(1, 60_000))
@@ -678,7 +680,7 @@ describe('失败与健康流转', () => {
     expect(st.consecutiveFailures).toBe(1)
   })
 
-  it('getConfig 抛错时退避基数用最近一次成功的间隔（默认 60s）', async () => {
+  it('getConfig 抛错时调度间隔沿用最近一次成功的配置值（默认 60s）', async () => {
     const cfg30: AppConfig = {
       ...structuredClone(DEFAULT_APP_CONFIG),
       includeKeywords: ['羊毛'],
@@ -698,7 +700,7 @@ describe('失败与健康流转', () => {
     broken = true
     await h.engine.pollOnce() // getConfig 抛错
     expect(h.engine.getStatus().health).toBe('backoff')
-    expect(spy).toHaveBeenLastCalledWith(computeBackoffMs(1, 30_000) / 1000)
+    expect(spy).toHaveBeenLastCalledWith(30) // 沿用最近成功轮的配置值，而非全局重置
   })
 
   it('seen flush 失败：logger.warn 提示重启后可能重复，不影响本轮健康判定', async () => {
@@ -924,7 +926,7 @@ describe('多来源（D3：单引擎循环多 source）', () => {
     expect(h.sendHit.mock.calls[1][0].topic).toMatchObject({ id: 'b2', sourceId: 'bb' })
   })
 
-  it('全局 scheduler 间隔 = max(配置间隔, 最差 source 剩余退避)；全部健康回配置值', async () => {
+  it('单 source 退避不拖慢全局：间隔恒为配置值，冷却只作用于该 source', async () => {
     const fetchA = vi.fn(async () => [topic('a1')])
     const fetchB = vi.fn(async () => [topic('b1')])
     const h = build({
@@ -937,18 +939,20 @@ describe('多来源（D3：单引擎循环多 source）', () => {
     await h.engine.pollOnce() // 双 source 基线成功
     expect(spy).toHaveBeenLastCalledWith(60) // 全部健康：配置值
 
-    // A 失败（backoff 120s）、B 健康：全局间隔抬到最差剩余退避
+    // A 失败（冷却 120s）、B 健康：全局间隔不抬高，B 照常每轮轮询
     fetchA.mockRejectedValue(new Error('a down'))
     await h.engine.pollOnce()
-    expect(spy).toHaveBeenLastCalledWith(120)
-
-    // 冷却过半（剩余 60s）：间隔随剩余退避回落，但不再低于配置值
-    advanceMs(60_000)
-    await h.engine.pollOnce() // A 跳过、B 成功
     expect(spy).toHaveBeenLastCalledWith(60)
-    expect(fetchA).toHaveBeenCalledTimes(2) // A 冷却中未重试
+    expect(h.engine.getStatus().health).toBe('backoff')
 
-    // A 冷却结束并恢复：全部健康 → 回配置值
+    // A 冷却过半：跳过 A，B 继续正常抓取，间隔仍是配置值
+    advanceMs(60_000)
+    await h.engine.pollOnce()
+    expect(spy).toHaveBeenLastCalledWith(60)
+    expect(fetchA).toHaveBeenCalledTimes(2) // A 冷却中未被重试
+    expect(fetchB).toHaveBeenCalledTimes(3) // B 不受 A 的退避拖累
+
+    // A 冷却结束并恢复：全部健康
     advanceMs(60_000)
     fetchA.mockResolvedValue([topic('a1')])
     await h.engine.pollOnce()

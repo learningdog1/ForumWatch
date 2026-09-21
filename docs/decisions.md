@@ -82,7 +82,7 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 
 **D2 配置 v2**：关键词 v2 全局共享（per-source 覆盖留给 v3 加法迁移）；**baselineDone/totalHits 按 source 拆分**（防风暴语义，不是过度设计）。形状见 `src/shared/types.ts`（sources: SourceConfig[] / ai: AiConfig）。迁移函数放 `src/main/config/migrations.ts` 纯函数（零 electron，ConfigStore envelope 解析后调用）；seen.json v1 裸 id → `nodeseek:{id}` 前缀（视为成功加载，不置 rebuiltFromCorrupt）；state.json v2 = `{schemaVersion:2, sources:Record<id,{baselineDone,totalHits}>}`。
 
-**D3 多来源引擎**：单 MonitorEngine 内循环多 source。`EngineDeps.getSources: () => SourceAdapter[]` 访问器（**不是构造期数组**，否则热更新断裂）；adapter 加 `readonly id`。每 source 独立 try/catch、独立失败计数走同一退避曲线（记 cooldownUntil）。EngineStatus 聚合字段保留 + 新增 `sources: SourceStatus[]`；聚合 health 取最差。seen 键 engine 组装 `${sourceId}:${topic.id}`；Topic.sourceId 由 engine 盖章。已知限制：全局 scheduler 间隔 = max(配置间隔, 最差 source 剩余退避)，v2 单 source 等价现状。
+**D3 多来源引擎**：单 MonitorEngine 内循环多 source。`EngineDeps.getSources: () => SourceAdapter[]` 访问器（**不是构造期数组**，否则热更新断裂）；adapter 加 `readonly id`。每 source 独立 try/catch、独立失败计数走同一退避曲线（记 cooldownUntil）。EngineStatus 聚合字段保留 + 新增 `sources: SourceStatus[]`；聚合 health 取最差。seen 键 engine 组装 `${sourceId}:${topic.id}`；Topic.sourceId 由 engine 盖章。~~已知限制：全局 scheduler 间隔 = max(配置间隔, 最差 source 剩余退避)~~（2026-09 修正：全局间隔恒为配置值，退避只通过 per-source 冷却轮内跳过生效——单 source 被拦不再拖慢其余来源）。
 
 **D4 语义评估**：批式单请求（每轮一次，cap 12 帖）+ pollOnce 内联 await（30s 超时）+ **评估失败不计入 consecutiveFailures**（记 lastAiError）+ **未决不入 seen**（下轮重评，滚出首页即止，对齐 8.10）+ 排除词永远先于 AI 一票否决。管线：排除词 → literal（'both' 命中即推不走 AI）→ 剩余 unseen 进 AI（'semantic'/'both'）。协议：OpenAI 兼容 chat/completions，temperature 0，response_format json_object（失败兜底取响应中首个 {} 块）；system"仅当明确相关才判 hit，宁可漏报不要误报"；响应缺 id 视为未决。语义档 interests 为空 = 永不命中；Provider 未配置 → 整体降级 literal（ai-unconfigured 标志）。每日调用上限 **300**（常量，本地自然日滚动），耗尽降级 literal-only。verdict 仅内存 Map（缓存"已判 hit 推送重试中"的帖子，重启重评一次成本可忽略）。
 
@@ -100,7 +100,7 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 
 ## 第二轮执行纪要（2026-09-19）
 
-- **D1–D3 已落地，无偏差**：更名与首启迁移（字节级拷贝 config/seen/state、logs/ 不拷、旧目录保留、seen 拷失败强制重置 baselineDone、新 config.json 即迁移标记）；配置 v2 + seen/state 迁移函数；多来源引擎（getSources 访问器、per-source 独立退避与状态、聚合 health 取最差、全局间隔 = max(配置间隔, 最差剩余退避)）。
+- **D1–D3 已落地，无偏差**（D3 间隔策略后修正，见 D3 条）：更名与首启迁移（字节级拷贝 config/seen/state、logs/ 不拷、旧目录保留、seen 拷失败强制重置 baselineDone、新 config.json 即迁移标记）；配置 v2 + seen/state 迁移函数；多来源引擎（getSources 访问器、per-source 独立退避与状态、聚合 health 取最差、全局间隔 = max(配置间隔, 最差剩余退避)）。
 - **D4 已落地，无偏差**：批式单请求（cap 12）+ pollOnce 内联 await、评估失败不进 consecutiveFailures、未决不入 seen、排除词先于 AI、300/日限额（常量）、未配置/耗尽降级字面、verdict 仅内存 Map。
 - **D5 已落地，一处执行期细化**：「今日回顾 → 立即生成」对当天已有日报为**覆盖重生成**（裁定只约束了自动触发的"不存在才生成"，手动路径补齐为覆盖语义，writeFile 直接覆写）。3500 字符 UTF-16 按行分段、零命中心跳、attempts≤3、仅当天补做均照裁定。
 - **D6 已落地，无偏差**：第三 aiClient（30s 超时）、proxyScope 复用（telegram-only 时 AI 直连）、redactSecrets 全链路脱敏、baseUrl 去尾斜杠拼 /chat/completions。

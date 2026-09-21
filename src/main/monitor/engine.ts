@@ -107,9 +107,9 @@
  * 全局聚合（每轮收尾 finishRound 派生，既有消费方——托盘/UI——不破）：
  * health = 各 source 最差（challenged > backoff > ok；无 source → ok）；
  * consecutiveFailures 取最差、lastError 取最新、lastSuccessAt 取最新；
- * EngineStatus.sources 填 per-source 快照。scheduler 间隔 =
- * max(配置间隔, ceil(最差 source 剩余退避/1000))——D3 已知限制：某 source 退避中、
- * 其他健康时全局间隔被抬高；所有 source 健康时回到配置值。
+ * EngineStatus.sources 填 per-source 快照。scheduler 间隔恒为配置值——退避
+ * 只作用于冷却中的 source 本身（pollOnce 轮内跳过，冷却结束后的下一个 tick
+ * 重试），不拖慢其他健康 source（D3 原全局抬高行为已按此修正）。
  *
  * 处置流水（R7-W1"为什么没推送"观测面，可选 deps.dispositions——不注入 = 零行为）：
  * unseen 处理链每个分支出口与挂起 flush 收口都向 store 上报一条 Disposition
@@ -1242,7 +1242,7 @@ export class MonitorEngine {
 
   /**
    * 单个 source 失败收尾：区分挑战与普通失败，独立指数退避（记 cooldownUntil，
-   * 不动全局 scheduler 间隔——全局间隔由 finishRound 按 max 规则统一收口）。
+   * 由 pollOnce 轮内跳过生效——全局 scheduler 间隔恒为配置值，不受单 source 退避影响）。
    */
   private failSource(
     sourceId: string,
@@ -1294,19 +1294,20 @@ export class MonitorEngine {
 
   /**
    * 轮末收尾：聚合 per-source 运行态到全局字段 + 重算 scheduler 间隔 + emit。
-   * 只聚合 activeIds 内的 source——热更新移除的 source 不再影响聚合与间隔
-   * （否则残留冷却会把全局间隔永久抬上去）。孤儿失败（无任何 source 且配置层
-   * 报错）在聚合层兜底呈现。
+   * 只聚合 activeIds 内的 source——热更新移除的 source 不再影响聚合
+   * （否则残留冷却会让状态里挂着已下线的 source）。孤儿失败（无任何 source
+   * 且配置层报错）在聚合层兜底呈现。
+   * scheduler 间隔恒为配置值：退避不抬高全局节奏，只通过 per-source
+   * cooldownUntil 让 pollOnce 轮内跳过该 source（冷却结束后的下一个 tick 重试），
+   * 一个 source 被拦/故障不会拖慢其他健康 source 的轮询。
    */
   private finishRound(baseIntervalSec: number, activeIds: string[]): void {
-    const nowMs = this.now()
     const sources: SourceStatus[] = []
     let health: HealthState = 'ok'
     let consecutiveFailures = 0
     let lastError: string | null = null
     let lastErrorAtMs = -1
     let lastSuccessAt: string | null = null
-    let maxRemainingMs = 0
 
     for (const id of activeIds) {
       const rt = this.runtimes.get(id)
@@ -1331,9 +1332,6 @@ export class MonitorEngine {
       if (rt.lastSuccessAt !== null && (lastSuccessAt === null || rt.lastSuccessAt > lastSuccessAt)) {
         lastSuccessAt = rt.lastSuccessAt
       }
-      if (rt.cooldownUntilMs !== null) {
-        maxRemainingMs = Math.max(maxRemainingMs, rt.cooldownUntilMs - nowMs)
-      }
     }
 
     // 没有任何 source 时的孤儿失败（配置层报错且无可归因 source）
@@ -1348,9 +1346,7 @@ export class MonitorEngine {
     this.status.lastError = lastError
     this.status.lastSuccessAt = lastSuccessAt
     this.status.sources = sources
-    this.deps.scheduler.setIntervalSec(
-      Math.max(baseIntervalSec, Math.ceil(Math.max(0, maxRemainingMs) / 1000))
-    )
+    this.deps.scheduler.setIntervalSec(baseIntervalSec)
     this.emitStatus()
   }
 
