@@ -277,7 +277,7 @@ export function RulesCard(
                       </Field>
                       <Field
                         label="关键词（前置）"
-                        hint="非空时标题须包含任一关键词，规则才参与判定（AND 前置条件）；空 = 不限。用于缩小范围（如多价格对比帖）。"
+                        hint="非空时标题须包含任一关键词，规则才参与判定（AND 前置条件；词条内 && 连接的词须同时命中）；空 = 不限。用于缩小范围（如多价格对比帖）。"
                       >
                         <KeywordTagInput
                           label="规则关键词"

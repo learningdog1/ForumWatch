@@ -9,6 +9,7 @@
  * 而不是猜一个近似值喂给 maxPrice/minTrafficGB 比较。
  */
 import type { PriceRuleConfig } from '../../shared/types'
+import { keywordEntryHits } from './matcher'
 
 /** 从标题提取出的结构化交易信息（全部字段可选） */
 export interface DealInfo {
@@ -139,13 +140,11 @@ export function extractDeal(title: string): DealInfo | null {
     : deal
 }
 
-/** keywords 前置过滤（口径对齐 matcher.matchTopic：trim、小写、子串、任一命中） */
+/** keywords 前置过滤（口径对齐 matcher.matchTopic：trim、小写、子串、词条任一命中；词条内 `&&` = 须全部命中） */
 function keywordsMatch(lowerTitle: string, keywords: string[] | undefined): boolean {
   if (!keywords || keywords.length === 0) return true // 空 = 不限（契约注释）
   for (const raw of keywords) {
-    const kw = raw.trim().toLowerCase()
-    if (kw.length === 0) continue
-    if (lowerTitle.includes(kw)) return true
+    if (keywordEntryHits(lowerTitle, raw)) return true
   }
   return false
 }

@@ -395,7 +395,7 @@ export function SourceCard(
                       <fieldset className="ent-match-fields" disabled={matchAllOn}>
                         <Field
                           label="包含关键词（覆盖）"
-                          hint="留空 = 跟随全局；设置后**替换**（不是合并）全局包含词——该来源的字面档只按这里的词命中。想整体关掉字面档请用下方「语义匹配」。"
+                          hint="留空 = 跟随全局；设置后**替换**（不是合并）全局包含词——该来源的字面档只按这里的词命中（词条间任一命中，词条内 && 须全部命中）。想整体关掉字面档请用下方「语义匹配」。"
                         >
                           <KeywordTagInput
                             label={`包含关键词覆盖 ${s.id}`}

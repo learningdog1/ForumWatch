@@ -134,8 +134,8 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 
 | 字段 | 默认 | 说明 / 清洗规则 |
 | --- | --- | --- |
-| `includeKeywords` | `[]` | 包含词。trim、去空、去重（不区分大小写，保留首次写法）。**为空 = 字面档不推送任何帖子** |
-| `excludeKeywords` | `[]` | 排除词，一票否决。清洗规则同上。**语义模式下仍先于 AI 生效** |
+| `includeKeywords` | `[]` | 包含词条。trim、去空、去重（不区分大小写，保留首次写法）。**为空 = 字面档不推送任何帖子**。词条之间任一命中即推（OR）；**词条内部用 `&&` 连接多个词 = 须全部命中**（AND，如 `搬瓦工 && 香港`；全角 `＆＆` 或两边带空格的单个 `&`/`＆` 亦可，单个紧邻的 `&` 如 `AT&T` 是普通字符不拆分）——`(A 且 B) 或 C` 用「`A && B`、`C`」两条词条表达 |
+| `excludeKeywords` | `[]` | 排除词条，一票否决。清洗规则同上，词条内 `&&` AND 语义同上（须全部出现才否决）。**语义模式下仍先于 AI 生效** |
 | `pollIntervalSec` | `60` | 轮询间隔（秒）。非法值回退 60；小于 15 钳到 15 |
 | `proxyUrl` | `''` | 代理地址。必须以 `http://` `https://` `socks5://` 开头（忽略大小写），否则置空（直连） |
 | `proxyScope` | `'telegram-only'` | 代理作用域：`telegram-only`（仅 Telegram **通道**走代理；**来源抓取、AI 请求与 Bark / ntfy / webhook 通道直连**）/ `all`（全部请求走代理，含来源抓取、AI 与全部推送通道）。非法值回退 `telegram-only` |
@@ -148,7 +148,7 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 | `sources` | `[{id:'nodeseek', type:'nodeseek', enabled:true}]` | 论坛来源列表（v3 起为按 type 判别的联合；关键词全局共享，per-source 过滤见下一行 filters）。`type` 三种：`nodeseek`（SSR 页面抓取）/ `v2ex`（官方 API）/ `rss`（额外必带合法 http(s) 的 `url`、可选 `label` 展示名）。清洗：非数组/空回默认单项；未知 type 整项丢弃；rss 的 url 非法（非 http(s) / 解析失败 / 无 host）整项丢弃；label trim 后为空视为无；id 规范成 slug（缺 id 时 rss 从 url 域名派生建议 id）、enabled 布尔化、按 id 去重保留首个；全部项非法回默认单项，绝不落空列表 |
 | `sources[].filters` | （可选，缺省无） | per-source 过滤（**引擎已消费**，管线第 1 步）：`includeCategories`（分类白名单，空/缺失=不限；匹配分类**显示名或 slug**，大小写不敏感、字面相等——非子串/正则）、`excludeCategories`（分类黑名单，命中任一否决；与 include 同时给出时 exclude 优先）、`blockedAuthors`（作者黑名单，命中任一一票否决）。被滤帖入 seen 不推送不评估。三列表各自 trim、去空、大小写不敏感去重、每列表上限 100 条；清洗后全空不落键 |
 | `sources[].matching` | （可选，缺省无） | per-source 匹配覆盖（R13，引擎经 matching.ts 的 `resolveSourceMatching` 解析，测试台 / 统计共用同一实现）：五个**全可选**字段，字段级回退全局——`includeKeywords` / `excludeKeywords`（清洗规则同全局关键词，清洗后空数组不落键 = 未覆盖；设置后**替换**而非合并全局同名列表）、`matchMode`（枚举非法/缺失不落键，**不回 'literal'**——覆盖里非法 = 用户没想覆盖）、`interests`（清洗同全局口径：每条 trim、单条 ≤500 字符、≤20 条）、`semanticThreshold`（**仅有限数字才落键**，钳 [0,1]；非法 = 不落键 = 跟随全局，与全局"非法回 0"有意不同）。清洗后全空不落键。第六字段 `matchAll`（R13-2，仅 `true` 落键）= 来源级全匹配：过闸新帖直接命中（matchedBy='matchall'），字面/语义档跳过。语义细节与限制见[下方小节](#per-source-匹配覆盖)与[来源级全匹配](#来源级全匹配r13-2) |
-| `priceRules` | `[]` | 结构化价格规则（第三种命中方式 `matchedBy='rule'`，条件 AND、首条命中即得；提取口径见[价格规则提取口径](#价格规则提取口径)）。每条：`id`（slug 化、全列表去重）、`label`（trim、空则不落键）、`enabled`（缺省 false）、`cycle`（`yearly`/`monthly`/`any`，非法回 `any`）、`currency`（`CNY`/`USD`/`any`，非法回 `any`）、`maxPrice`/`minTrafficGB`（非有限正数丢字段）、`keywords`（AND 前置，trim/去空/大小写不敏感去重/**每规则上限 20**，清洗后空不落键）。非数组回 `[]`（空列表 = 无规则，合法状态）；整条非对象/无可用 id 丢弃；**列表上限 20 条**（超出截断）。任一条件都不声明的 enabled 规则 = 全匹配（由用户自己负责） |
+| `priceRules` | `[]` | 结构化价格规则（第三种命中方式 `matchedBy='rule'`，条件 AND、首条命中即得；提取口径见[价格规则提取口径](#价格规则提取口径)）。每条：`id`（slug 化、全列表去重）、`label`（trim、空则不落键）、`enabled`（缺省 false）、`cycle`（`yearly`/`monthly`/`any`，非法回 `any`）、`currency`（`CNY`/`USD`/`any`，非法回 `any`）、`maxPrice`/`minTrafficGB`（非有限正数丢字段）、`keywords`（AND 前置，词条任一命中、词条内 `&&` 须全部命中（口径同 `includeKeywords`），trim/去空/大小写不敏感去重/**每规则上限 20**，清洗后空不落键）。非数组回 `[]`（空列表 = 无规则，合法状态）；整条非对象/无可用 id 丢弃；**列表上限 20 条**（超出截断）。任一条件都不声明的 enabled 规则 = 全匹配（由用户自己负责） |
 | `similarity.enabled` | `true` | 相似降噪开关，**默认开的布尔之一**（缺失/非法不会静默关掉，显式 `false` 才是关）。关闭后命中帖推送前不再与已推窗口比对，行为与升级前一致 |
 | `similarity.threshold` | `0.72` | 相似阈值（标题归一化后 3-gram Jaccard ≥ 阈值判相似）。非法回 0.72，钳到 [0,1] 保留两位小数；UI 滑杆范围 0.50–0.95。48h 对比窗口时长是引擎常量，不进配置 |
 | `ai.provider.baseUrl` | `''` | OpenAI 兼容服务地址，如 `https://api.deepseek.com/v1`。trim、去尾斜杠、必须 `http(s)://` 开头否则置空；请求时拼 `/chat/completions` |
@@ -170,7 +170,7 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 3. **置顶**：置顶帖是旧帖，入 seen 不推送（仅 NodeSeek 有此概念）。
 4. **排除词**：标题命中任一排除词 → 一票否决（先于一切命中方式；语义模式下同样否决）。
 5. **价格规则**：`priceRules` 非空时逐条评估（条件 AND、首条命中即得）→ 命中即推送（`matchedBy='rule'`，推送显示「🎯 命中规则: 规则名」），**短路字面与语义**（同一帖只记一种命中方式，规则优先）；**不受 matchMode 门控**（semantic-only 下同样生效）。提取口径见[价格规则提取口径](#价格规则提取口径)。
-6. **字面匹配**：生效模式含 `literal` 时，包含列表为空 → 永不匹配；包含词任一命中 → 推送，命中的词（去重、原始写法）记入 `matchedKeywords` 并出现在推送消息里。
+6. **字面匹配**：生效模式含 `literal` 时，包含列表为空 → 永不匹配；词条任一命中 → 推送（词条内 `&&` 连接的多个词须全部命中），命中的词条（去重、原始写法整条）记入 `matchedKeywords` 并出现在推送消息里。
 7. **相似降噪闸**：规则 / 字面 / 语义**任一命中**的帖子，推送前与近 48 小时**成功推送过**的标题比对（`similarity.enabled`，默认开）——相似 → 入 seen 不推送（日志 `similar topic swallowed`，处置流水 detail 带**命中的已推标题与相似度**，测试台拦截明细同款），被吞帖不生成锐评、不产生命中记录。只拦"装饰级"变体，边界见故障排查矩阵。
 8. **语义批（置信度闸）**：生效模式含 `semantic` 且字面未命中的帖子送 AI 批量评估（每批 ≤ 12 帖一次请求）；判定 hit 且 `score ≥ ai.semanticThreshold` → 过第 7 步相似闸后推送并附 AI 理由（`semanticReason`）；判定不相关、**或 hit 但 score < 阈值**（按不相关处理，入 seen 不再重评）；**评估未决（超时/响应异常）不记已见**，下轮自然重评，滚出首页即止。
 

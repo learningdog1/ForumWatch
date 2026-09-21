@@ -28,16 +28,25 @@ export function KeywordsCard(props: {
       )}
       <Field
         label="包含关键词"
-        hint={<span>任一命中即推送；为空则不推送。输入后回车添加，点标签上的 × 删除。</span>}
+        hint={
+          <span>
+            任一词条命中即推送；为空则不推送。一个词条内用 <code>&amp;&amp;</code>{' '}
+            连接多个词（如「搬瓦工 &amp;&amp; 香港」）表示须<b>同时命中</b>才推。输入后回车添加，点标签上的 ×
+            删除。
+          </span>
+        }
       >
         <KeywordTagInput
           label="包含关键词"
-          placeholder="如：VPS / 白嫖 / nginx"
+          placeholder="如：VPS / 白嫖 / nginx / 搬瓦工 && 香港"
           value={props.includeKeywords}
           onChange={props.onIncludeChange}
         />
       </Field>
-      <Field label="排除关键词" hint="任一命中则不推送（优先于包含词，也优先于 AI 判定）。">
+      <Field
+        label="排除关键词"
+        hint="任一词条命中则不推送（优先于包含词，也优先于 AI 判定）；词条内 && 连接的多个词须同时出现才否决。"
+      >
         <KeywordTagInput
           label="排除关键词"
           placeholder="如：福利 / 广告"
