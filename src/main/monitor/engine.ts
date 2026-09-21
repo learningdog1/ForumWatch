@@ -147,6 +147,7 @@ import type { FileEngineState, SourceEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
 import type { SemanticEvaluator } from '../ai/evaluator'
 import { MAX_SEMANTIC_BATCH } from '../ai/evaluator'
+import { AiProviderError } from '../ai/provider'
 import type { CommentGenerator } from '../ai/commentary'
 import type { Notifier } from '../notify/types'
 import type { HitMessageInput } from '../notify/types'
@@ -204,15 +205,24 @@ export const DEFERRED_FLUSH_MAX_ATTEMPTS = 3
  * 语义评估退避曲线（R13-3）：第 n 次连续失败冷却 BASE × 2^(n-1)，
  * 封顶 CAP（30s → 1m → 2m → 4m → 8m → 10m…）；任一批评估成功即全部复位。
  * 冷却期内 evaluateSemantic 零调用（新帖累积为未决，冷却结束随下一轮批量重评）。
+ * 429 带上游 retry_after 时冷却取 max(自身曲线, retry_after)（R15）。
  */
 export const SEMANTIC_BACKOFF_BASE_MS = 30_000
 export const SEMANTIC_BACKOFF_CAP_MS = 600_000
 /**
- * 未决帖重评轮次上限（R13-3）：同一帖连续 SEMANTIC_MAX_UNDECIDED_ROUNDS 轮
- * 拿不到裁决（评估失败/回包缺项/冷却期跳过都计一轮），第 N 轮起降级字面判定
- * 收口——命中即推（matchedBy='literal'）、未中入 seen，防无限重评与静默丢失。
+ * 语义未决时间窗兜底值（R15）：cfg.ai.semanticUndecidedTimeoutMin 缺失/非法时
+ * 的时间窗（30 分钟）。窗口内未决帖持续重评；超窗仍无裁决 → 降级字面判定收口
+ * （命中即推 matchedBy='literal'、未中入 seen）。取代旧"5 轮上限"——轮数口径
+ * 在快轮询下过激（30s × 5 = 2.5 分钟：上游闪断 3 分钟就够把语义候选全丢了，
+ * 且 matchMode='both' 时降级字面必然 miss，线上实测 97/97 全部静默丢弃）。
  */
-export const SEMANTIC_MAX_UNDECIDED_ROUNDS = 5
+export const DEFAULT_SEMANTIC_UNDECIDED_TIMEOUT_MS = 30 * 60_000
+/**
+ * 语义评估故障告警阈值（R15）：连续失败时长 ≥ 该值且本故障期未发过告警 →
+ * 经 notifier.sendRaw 推一条"语义评估持续失败"提醒（每故障期最多 1 条，恢复时
+ * 补发恢复通知）。把"上游余额不足/限流 → 用户不知不觉漏推"变成显性事件。
+ */
+export const AI_OUTAGE_ALERT_AFTER_MS = 10 * 60_000
 
 /**
  * 挂起队列条目（DEC-11）：payload 自含 flush 所需全量信息——topic/关键词/
@@ -516,12 +526,20 @@ export class MonitorEngine {
   /** 语义评估退避冷却截止时刻（epoch ms；null = 无冷却） */
   private aiCooldownUntilMs: number | null = null
   /**
-   * 未决帖重评轮次计数（R13-3）：键 = seen 键，值 = 已连续未决轮数。
-   * 达 SEMANTIC_MAX_UNDECIDED_ROUNDS 后降级字面判定收口（防未决帖无限
-   * 重评与滚出首页静默丢失）；裁决落定（hit/miss）即删键；轮末随
-   * pruneRetryMaps 同款键集清理。
+   * 语义评估故障期起点（epoch ms；null = 无故障期，R15）：首次评估失败立起，
+   * 任一批成功复位。持续 ≥ AI_OUTAGE_ALERT_AFTER_MS 时经 sendRaw 告警。
    */
-  private semanticUndecidedRounds = new Map<string, number>()
+  private aiFailStreakStartedAt: number | null = null
+  /** 本故障期是否已发过告警（R15 防刷屏：一个故障期最多 1 条） */
+  private aiOutageAlertSent = false
+  /**
+   * 未决帖首判时刻（R15，键 = seen 键，值 = 首次未决的 epoch ms）：
+   * now - since ≥ cfg.ai.semanticUndecidedTimeoutMin 窗口 → 降级字面判定
+   * 收口（防未决帖无限重评与滚出首页静默丢失）；裁决落定（hit/miss）即删键；
+   * 轮末随 pruneRetryMaps 同款键集清理。取代旧"轮次计数"——轮数口径随轮询
+   * 间隔缩水（30s 轮询下 5 轮仅 2.5 分钟），时间窗与轮询频率解耦。
+   */
+  private semanticUndecidedSince = new Map<string, number>()
   private status: EngineStatus
 
   constructor(deps: EngineDeps) {
@@ -1050,13 +1068,17 @@ export class MonitorEngine {
    * - hit=false，或 hit=true 但 score < 阈值 → 入 seen（与字面未命中同待遇，
    *   不再重评；低置信 hit 不推送、不写语义理由/任何记录，只 log 一条观测）；
    * - 无 verdict（未决）→ 不入 seen，下轮重评（帖子滚出首页即止，对齐 8.10）。
-   *   R13-3：未决轮次计数 +1，连续 SEMANTIC_MAX_UNDECIDED_ROUNDS 轮未决则
-   *   降级字面判定收口（见 settleUndecided）——不再无限重评、不再静默滚丢。
+   *   R15：未决改按**时间窗**收口（cfg.ai.semanticUndecidedTimeoutMin，默认 30
+   *   分钟）——窗口内持续重评，超窗降级字面判定收口（见 settleUndecided），
+   *   不再无限重评、不再静默滚丢；轮数口径已废（快轮询下 5 轮仅 2.5 分钟）。
    * evaluate 整体抛错 → 该批全部未决 + 记 lastAiError + **指数退避**（R13-3：
-   * 连续失败翻倍冷却至封顶，冷却期零调用防重试风暴）+ log warn，
-   * **不动 consecutiveFailures**（AI 故障 ≠ 抓取故障）。每次真实调用计入
-   * callsToday（含失败的调用；纯观测计数，无每日上限）。
-   * includeKeywords 为该来源生效包含词（R13-3 新增入参）：未决超限降级字面
+   * 连续失败翻倍冷却至封顶，冷却期零调用防重试风暴；429 的 retry_after 取
+   * max(自身曲线, retry_after)，R15）+ log warn，**不动 consecutiveFailures**
+   * （AI 故障 ≠ 抓取故障）。每次真实调用计入 callsToday（含失败的调用；纯观测
+   * 计数，无每日上限）。
+   * R15 故障告警：故障期（首败起算）持续 ≥ AI_OUTAGE_ALERT_AFTER_MS(10min)
+   * → notifier.sendRaw 推一条告警（每故障期最多 1 条；恢复时补发恢复通知）。
+   * includeKeywords 为该来源生效包含词（R13-3 新增入参）：未决超窗降级字面
    * 判定的输入（排除词已在 pollSource 四道闸过掉，这里不重复）。
    */
   private async evaluateSemantic(
@@ -1077,32 +1099,46 @@ export class MonitorEngine {
       }
       return
     }
-    // R13-3 退避冷却：上游连续失败后的指数冷却期内**零调用**——直接按未决
-    // 挂起（轮次照常累计，超限走降级收口），冷却结束随下一轮批量重评。
-    if (this.aiCooldownUntilMs !== null && this.now() < this.aiCooldownUntilMs) {
-      for (const topic of topics) {
-        await this.settleUndecided(sourceId, topic, cfg, includeKeywords, 'AI 评估退避中（上游连续失败，本轮不调用）')
-      }
-      return
-    }
     for (let i = 0; i < topics.length; i += MAX_SEMANTIC_BATCH) {
+      // R13-3 退避冷却 + R15 批间检查：上游连续失败后的指数冷却期内**零调用**
+      // ——检查放在循环内（不只是函数头）：同轮多批时第一批失败已进冷却，
+      // 剩余批次直接按未决挂起（轮次照常累计，超窗走降级收口），冷却结束随
+      // 下一轮批量重评。旧实现批间不查冷却，一轮 3 批会把退避连升 3 级、白烧
+      // 调用（i=0 时本检查等价于旧的函数头检查，语义不变）。
+      if (this.aiCooldownUntilMs !== null && this.now() < this.aiCooldownUntilMs) {
+        await this.maybeSendAiOutageAlert(cfg) // 冷却中也可能已到告警时长（R15）
+        for (const topic of topics.slice(i)) {
+          await this.settleUndecided(
+            sourceId,
+            topic,
+            cfg,
+            includeKeywords,
+            'AI 评估退避中（上游连续失败，本轮不调用）'
+          )
+        }
+        return
+      }
       const batch = topics.slice(i, i + MAX_SEMANTIC_BATCH)
       this.rollAiDay()
       this.aiCallsToday++
       try {
-        const verdicts = await evaluator.evaluate(batch, interests)
+        const verdicts = await evaluator.evaluate(batch, interests, {
+          useThinking: cfg.ai.evaluation.useThinking === true
+        })
         this.aiLastError = null // 评估成功：清掉历史错误（恢复观测）
         // R13-3：成功即复位退避（连续失败计数与冷却一并清零）
         this.aiConsecutiveFailures = 0
         this.aiCooldownUntilMs = null
+        // R15：故障期结束——已发过告警则补发恢复通知，故障期状态复位
+        await this.noteAiRecoveryIfAlerted(cfg)
         for (const topic of batch) {
           const verdict = verdicts.get(seenKeyFor(sourceId, topic.id))
           if (verdict === undefined) {
-            // 未决：不入 seen，下轮重评（R13-3：轮次计数 + 超限降级收口）
+            // 未决：不入 seen，下轮重评（R15：时间窗超限降级收口）
             await this.settleUndecided(sourceId, topic, cfg, includeKeywords, 'AI 未给出该帖裁决（未决）')
             continue
           }
-          this.semanticUndecidedRounds.delete(seenKeyFor(sourceId, topic.id)) // 裁决落定：清轮次
+          this.semanticUndecidedSince.delete(seenKeyFor(sourceId, topic.id)) // 裁决落定：清计时
           if (verdict.hit && verdict.score >= semanticThreshold) {
             await this.processHit(topic, [], cfg, 'semantic', verdict.reason)
           } else {
@@ -1131,20 +1167,29 @@ export class MonitorEngine {
         }
       } catch (err) {
         this.aiLastError = describeError(err)
+        // R15：故障期计时（首败立起，成功复位；≥10min 触发 sendRaw 告警）
+        if (this.aiFailStreakStartedAt === null) this.aiFailStreakStartedAt = this.now()
         // R13-3 指数退避：连续失败翻倍冷却至封顶（指数封 2^10 防溢出），
         // 冷却期内不再打上游——把"失败→下轮全量重发→更失败"的风暴断掉。
+        // R15：上游 429 明示 retry_after 时冷却取 max(自身曲线, retry_after)——
+        // 指数曲线封顶 10min 可能短于上游要求的等待。
         this.aiConsecutiveFailures += 1
         const backoffMs = Math.min(
           SEMANTIC_BACKOFF_BASE_MS * 2 ** Math.min(this.aiConsecutiveFailures - 1, 10),
           SEMANTIC_BACKOFF_CAP_MS
         )
-        this.aiCooldownUntilMs = this.now() + backoffMs
+        const retryAfterMs =
+          err instanceof AiProviderError && err.retryAfterSec !== undefined
+            ? err.retryAfterSec * 1000
+            : 0
+        this.aiCooldownUntilMs = this.now() + Math.max(backoffMs, retryAfterMs)
         for (const topic of batch) {
           await this.settleUndecided(sourceId, topic, cfg, includeKeywords, 'AI 评估失败，进入退避冷却')
         }
+        await this.maybeSendAiOutageAlert(cfg)
         this.deps.logger.warn(
           `semantic evaluation failed (${batch.length} topics undecided, ` +
-            `backoff ${Math.round(backoffMs / 1000)}s until ` +
+            `backoff ${Math.round((this.aiCooldownUntilMs - this.now()) / 1000)}s until ` +
             `${new Date(this.aiCooldownUntilMs).toISOString()}): ${this.aiLastError}`
         )
       }
@@ -1152,11 +1197,15 @@ export class MonitorEngine {
   }
 
   /**
-   * 未决帖的轮次收口（R13-3）：轮次 +1 后若仍 < SEMANTIC_MAX_UNDECIDED_ROUNDS，
-   * 记 pending 处置等下一轮重评；达到上限则**降级字面判定**收口——用该来源的
-   * 生效包含词做一次字面匹配（镜像 Provider 未配置的整体降级语义），命中即推
+   * 未决帖的时间窗收口（R15）：首判记时（semanticUndecidedSince），窗口
+   * （cfg.ai.semanticUndecidedTimeoutMin，默认 30 分钟）内每轮记 pending 等
+   * 重评；超窗仍无裁决则**降级字面判定**收口——用该来源的生效包含词做一次
+   * 字面匹配（镜像 Provider 未配置的整体降级语义），命中即推
    * （matchedBy='literal'）、未中入 seen 记 giveup 处置。防的是：上游长时间
    * 故障/限流下，未决帖要么无限重评烧调用、要么滚出首页被静默丢弃。
+   * 注意 matchMode='both' 时降级字面必然 miss（能字面命中的帖早进了推送，
+   * 不会留在语义批）——降级主要给 semantic-only 来源兜底；真正的护栏是
+   * 故障告警（maybeSendAiOutageAlert）让用户尽快恢复上游。
    */
   private async settleUndecided(
     sourceId: string,
@@ -1166,13 +1215,23 @@ export class MonitorEngine {
     pendingDetail: string
   ): Promise<void> {
     const key = seenKeyFor(sourceId, topic.id)
-    const rounds = (this.semanticUndecidedRounds.get(key) ?? 0) + 1
-    if (rounds < SEMANTIC_MAX_UNDECIDED_ROUNDS) {
-      this.semanticUndecidedRounds.set(key, rounds)
+    const since = this.semanticUndecidedSince.get(key)
+    if (since === undefined) {
+      this.semanticUndecidedSince.set(key, this.now())
       this.noteDisposition(topic, 'semantic-pending', pendingDetail)
       return
     }
-    this.semanticUndecidedRounds.delete(key)
+    const timeoutMs = this.undecidedTimeoutMs(cfg)
+    if (this.now() - since < timeoutMs) {
+      this.noteDisposition(topic, 'semantic-pending', pendingDetail)
+      return
+    }
+    this.semanticUndecidedSince.delete(key)
+    const waitedMin = Math.max(1, Math.round((this.now() - since) / 60000))
+    this.deps.logger.warn(
+      `semantic undecided for ${waitedMin}min (window ${Math.round(timeoutMs / 60000)}min), ` +
+        `degrading topic ${key} to literal match: "${topic.title}"`
+    )
     const { matched, matchedKeywords } = matchTopic(topic, includeKeywords, [])
     if (matched) {
       await this.processHit(topic, matchedKeywords, cfg) // matchedBy='literal'
@@ -1182,8 +1241,65 @@ export class MonitorEngine {
     this.noteDisposition(
       topic,
       'semantic-miss',
-      `AI 连续 ${rounds} 轮未决，降级字面判定：未命中（防重试风暴/静默丢失）`
+      `AI ${waitedMin} 分钟未决（上游持续故障），降级字面判定：未命中（防无限重评/静默丢失）`
     )
+  }
+
+  /** 未决时间窗毫秒数：cfg.ai.semanticUndecidedTimeoutMin 钳 [1,1440]，非法回 30min */
+  private undecidedTimeoutMs(cfg: AppConfig): number {
+    const raw = cfg.ai.semanticUndecidedTimeoutMin
+    const min =
+      typeof raw === 'number' && Number.isFinite(raw) && raw >= 1
+        ? Math.min(raw, 1440)
+        : DEFAULT_SEMANTIC_UNDECIDED_TIMEOUT_MS / 60_000
+    return min * 60_000
+  }
+
+  /**
+   * AI 故障告警（R15）：故障期持续 ≥ AI_OUTAGE_ALERT_AFTER_MS(10min) 且本故障
+   * 期未发过 → notifier.sendRaw 一条（含最近错误与影响说明）。先置
+   * aiOutageAlertSent 再发送：通道故障也不逐轮重试告警（只 log），防告警本身
+   * 变成刷屏源。通知关闭/无就绪通道时跳过发送（告警仍标记已发——避免通道
+   * 恢复后对早已过去的故障期补发陈旧告警）。
+   */
+  private async maybeSendAiOutageAlert(cfg: AppConfig): Promise<void> {
+    if (this.aiOutageAlertSent || this.aiFailStreakStartedAt === null) return
+    const streakMs = this.now() - this.aiFailStreakStartedAt
+    if (streakMs < AI_OUTAGE_ALERT_AFTER_MS) return
+    this.aiOutageAlertSent = true
+    if (!(cfg.notifyEnabled && anyChannelReady(cfg.channels))) return
+    try {
+      await this.deps.notifier.sendRaw(
+        `⚠️ ForumWatch：AI 语义评估已连续失败 ${Math.round(streakMs / 60_000)} 分钟\n` +
+          `最近错误：${this.aiLastError ?? 'unknown'}\n` +
+          `期间新帖只按字面关键词推送，语义候选超过 ${Math.round(this.undecidedTimeoutMs(cfg) / 60_000)} ` +
+          `分钟未决将按字面词收口（可能漏推）。请检查 AI 服务状态/余额。`
+      )
+    } catch (err) {
+      this.deps.logger.warn(`AI outage alert send failed: ${describeError(err)}`)
+    }
+  }
+
+  /**
+   * 故障期恢复收口（R15，评估成功时调用）：发过告警的故障期补发恢复通知
+   * （含持续时长与"超窗帖不补推"的口径），故障期状态无条件复位。
+   */
+  private async noteAiRecoveryIfAlerted(cfg: AppConfig): Promise<void> {
+    if (this.aiFailStreakStartedAt === null) return
+    const lastedMs = this.now() - this.aiFailStreakStartedAt
+    const alerted = this.aiOutageAlertSent
+    this.aiFailStreakStartedAt = null
+    this.aiOutageAlertSent = false
+    if (!alerted) return
+    if (!(cfg.notifyEnabled && anyChannelReady(cfg.channels))) return
+    try {
+      await this.deps.notifier.sendRaw(
+        `✅ ForumWatch：AI 语义评估已恢复（故障持续约 ${Math.round(lastedMs / 60_000)} 分钟）。` +
+          `故障期间超窗收口的帖子不会补推，可在「处置流水」查看去向。`
+      )
+    } catch (err) {
+      this.deps.logger.warn(`AI recovery notice send failed: ${describeError(err)}`)
+    }
   }
 
   /** 取（或建）source 运行态；建卡时并入其持久化 totalHits（含热更新新增的 source） */
@@ -1379,10 +1495,10 @@ export class MonitorEngine {
         }
       }
     }
-    if (this.semanticUndecidedRounds.size > 0) {
-      for (const key of [...this.semanticUndecidedRounds.keys()]) {
+    if (this.semanticUndecidedSince.size > 0) {
+      for (const key of [...this.semanticUndecidedSince.keys()]) {
         if (!roundTopicKeys.has(key) && observedSources.has(sourceIdOfKey(key))) {
-          this.semanticUndecidedRounds.delete(key)
+          this.semanticUndecidedSince.delete(key)
         }
       }
     }

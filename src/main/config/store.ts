@@ -871,6 +871,14 @@ function sanitizeAi(ai: AiConfig | undefined): AiConfig {
     interests: sanitizeInterests(ai?.interests),
     // 语义置信度阈值（第五轮）：默认 0 = 行为不变（不过滤）；非法回 0、钳到 [0,1]
     semanticThreshold: clamp01(ai?.semanticThreshold, 0),
+    // 语义未决时间窗（R15）：默认 30 分钟；非法回 30、钳到 [1,1440]（加法字段，
+    // 旧配置缺失走默认——commentary.enabled 同款"缺省取新默认值"约定）
+    semanticUndecidedTimeoutMin: clampRange(
+      ai?.semanticUndecidedTimeoutMin,
+      30,
+      1,
+      1440
+    ),
     dailyReport: {
       enabled: ai?.dailyReport?.enabled === true,
       timeHHMM: sanitizeTimeHHMM(ai?.dailyReport?.timeHHMM)
@@ -888,8 +896,27 @@ function sanitizeAi(ai: AiConfig | undefined): AiConfig {
       // enabled 相反但同属"新增字段的旧配置缺失取新默认值"约定：直出模式是
       // 新默认行为，老用户静默迁移到更快更稳的路径；显式 true 保留思考语义）
       useThinking: ai?.commentary?.useThinking === true
+    },
+    // 语义评估思考开关（R15）：默认关（`=== true`，与 commentary.useThinking
+    // 同款方向）——评估是短 JSON 判定任务，直出模式更快更稳
+    evaluation: {
+      useThinking: ai?.evaluation?.useThinking === true
     }
   }
+}
+
+/**
+ * 数值区间清洗（R15，semanticUndecidedTimeoutMin 用）：非法（非数字/NaN/
+ * Infinity）回 fallback，否则钳到 [min,max] 后取整。
+ */
+function clampRange(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.round(Math.min(max, Math.max(min, value)))
 }
 
 function sanitizeAiBaseUrl(value: string | undefined): string {

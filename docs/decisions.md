@@ -296,3 +296,24 @@ electron-builder Windows 文档（macOS 交叉构建）、electron-builder#4853�
 - **追加裁定（同日第二轮）：语义命中理由进 Telegram + 相似降噪可观测性**：用户反馈两连问——①语义通过为何不推（答案：被相似降噪闸拦下，测试台已如实展示，且推送之后回测同帖会与已推送的它自己相似，属正常）；②Telegram 语义推送「🎯 命中：」后面是空的看不懂。裁定：
   - **telegram formatHitMessage 增第五参 semanticReason**：matchedKeywords 为空且理由非空时「🎯 命中」行改 `🎯 语义命中: {理由}`（截 120 字符 + 转义；无理由仅 `🎯 语义命中`），与 bark/ntfy 的既有口径对齐——语义推送不再出现空白命中行。关键词非空（literal）与规则命中行为不变。
   - **similarity.ts 增 findSimilarTo（isSimilarToAny 改为其布尔投影，单一判定口径）**：返回 `{title, score}` 命中明细。引擎相似闸的日志与处置流水 detail、测试台的拦截明细都带上「与哪条已推标题相似、相似度多少」，用户不用再猜"为什么被拦"。
+
+---
+
+# 第十五轮决策（2026-09-21，R15：语义评估「待判堆积 → 漏推」四连修）
+
+线上事故（2026-09-21）：本地网关 → SiliconFlow `Qwen/Qwen3.8-Flash` 账户余额不足（HTTP 429 + code 1113「余额不足或无可用资源包」），单日 1395 次评估失败、882 条「语义待判」处置；叠加快轮询（30s）下的「5 轮未决上限」，两天 97 条语义候选在**中位 2.3 分钟**内被降级收口——matchMode='both' 时降级字面必然 miss（能字面命中的帖早推了），97/97 全部静默丢弃、0 补推。四项裁定（D20）：
+
+- **未决收口从「5 轮」改「时间窗」**：轮数口径与轮询频率耦合（30s × 5 = 2.5 分钟，上游闪断 3 分钟就够丢光在途帖）。`semanticUndecidedRounds` 轮次计数 → `semanticUndecidedSince` 首判时刻；窗口 `ai.semanticUndecidedTimeoutMin`（默认 30，钳 [1,1440]，加法字段不 bump schemaVersion）内持续重评，超窗降级字面收口（原语义保留）。裁决落定/轮末滚出首页的清理生命周期不变。
+- **AI 故障告警（漏推显性化）**：故障期（首败起算）持续 ≥ 10 分钟 → `notifier.sendRaw` 推「⚠️ 语义评估已连续失败」（含 lastAiError 与超窗口径），恢复时补「✅ 已恢复（持续 N 分钟）」。每故障期最多 1+1 条（`aiOutageAlertSent` 先置位再发送：通道故障不逐轮重试告警，防告警自身刷屏）；通知关闭/无就绪通道跳过发送但仍标记已发（不对陈旧故障期补发）。核心动机：余额耗尽这类用户侧问题，应用修不了，但必须让用户**知道**。
+- **退避曲线采纳上游 retry_after**：provider 429 解析的 `parameters.retry_after` 从错误消息升级为 `AiProviderError.retryAfterSec` 字段，engine 冷却取 `max(自身曲线, retry_after)`（指数封顶 10min 可能短于上游要求）。另修批循环 bug：`evaluateSemantic` 批间不查冷却——同轮多批时第一批失败后第二批立即重试，退避连升数级、白烧调用；冷却检查移入循环内（i=0 时等价旧函数头检查）。
+- **评估调用提速（治超时）**：15s 超时放宽到 30s（线上 12 帖批量经网关到推理型模型常超 15s，是当日 180 次失败的来源；PollScheduler 防重叠，30s 只拉长本轮不叠加并发）；评估请求默认附思考禁用参数（`ai.evaluation.useThinking` 显式 true 才保留——与 `ai.commentary.useThinking` 同款形态，评估是短 JSON 判定任务，思考 token 拖延迟且吃 max_tokens 预算）。
+
+---
+
+# 第十六轮决策（2026-09-21，R16：思考禁用多方言 + 400 自愈——「任何模型」可用）
+
+R15 把评估默认改成禁思考后，`thinking:{type:"disabled"}` 只对智谱 GLM 系方言生效——SiliconFlow/DashScope 的 Qwen3 系认 `enable_thinking:false`、vLLM/SGLang 认 `chat_template_kwargs:{enable_thinking:false}`，且用户网关（127.0.0.1:3051）用的正是 Qwen3 系。用户要求「填入的任何模型，语义评估时都能禁思考」。裁定（D21）：
+
+- **三方言一次全发**：`req.disableThinking=true` 时请求体同时附 `thinking:{type:"disabled"}` + `enable_thinking:false` + `chat_template_kwargs:{enable_thinking:false}`（THINKING_DISABLE_FIELDS 单一事实源）。端点各取所认；宽松端点静默忽略不认识的字段，互不冲突。
+- **400 去参重试自愈**：严格校验未知参数的端点（OpenAI 官方对未知字段回 400「Unrecognized request argument」）会因此整批失败。带思考参数遇 400 → 记住该端点（按 `baseUrl|model|apiKey` 签名）并**去参原样重试一次**；同端点后续调用直接不带思考参数（不反复探测），换 provider 配置自动复位重学。重试仍 400（真实坏请求）照常上抛——兜底只吸收「参数不被认识」，不掩盖真错误。进程内存态：重启后第一次调用重新探测，代价至多一次多余 400。
+- **实现在 provider 层**：语义评估（evaluator 直出模式默认）与锐评直出模式（R12）两条调用路径自动同享；请求方接口（ChatRequest.disableThinking）不变。

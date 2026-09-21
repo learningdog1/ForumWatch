@@ -533,6 +533,34 @@ describe('sanitizeConfig', () => {
     expect(thrOf('0.9' as unknown as number)).toBe(0)
   })
 
+  it('ai.semanticUndecidedTimeoutMin（R15）：缺失/非法回 30，钳到 [1,1440] 并取整', () => {
+    const minOf = (t: unknown) =>
+      sanitizeConfig(cfg({ ai: { ...cfg().ai, semanticUndecidedTimeoutMin: t as number } })).ai
+        .semanticUndecidedTimeoutMin
+    expect(minOf(undefined)).toBe(30) // 旧配置缺失 → 默认 30 分钟
+    expect(minOf(5)).toBe(5) // 合法值保留
+    expect(minOf(0.4)).toBe(1) // < 1 钳到下限
+    expect(minOf(0)).toBe(1)
+    expect(minOf(-10)).toBe(1)
+    expect(minOf(9999)).toBe(1440) // 超上限钳到 1440
+    expect(minOf(12.7)).toBe(13) // 取整
+    expect(minOf(Number.NaN)).toBe(30)
+    expect(minOf('20' as unknown as number)).toBe(30) // 字符串等非法 → 默认
+  })
+
+  it('ai.evaluation.useThinking（R15）：**默认关**的布尔——缺失/非法 → false（直出模式），仅显式 true 保留', () => {
+    const thinkingOf = (c: unknown) =>
+      sanitizeConfig(
+        cfg({ ai: { ...cfg().ai, evaluation: c as unknown as AppConfig['ai']['evaluation'] } })
+      ).ai.evaluation.useThinking
+    expect(thinkingOf(undefined)).toBe(false) // 旧配置缺失 → 直出（新默认行为）
+    expect(thinkingOf(null)).toBe(false) // 段整体为 null
+    expect(thinkingOf({})).toBe(false) // 段在但缺 useThinking
+    expect(thinkingOf('true')).toBe(false) // 字符串等非法值 → false
+    expect(thinkingOf({ useThinking: false })).toBe(false) // 显式 false 保留
+    expect(thinkingOf({ useThinking: true })).toBe(true) // 唯一开启方式：显式布尔 true
+  })
+
   it('similarity.enabled：默认开的布尔——缺失（旧配置）→ true，显式 false 保留，非法 → true', () => {
     const enabledOf = (c: unknown) => sanitizeConfig(cfg({ similarity: c as never })).similarity.enabled
     expect(enabledOf(undefined)).toBe(true) // 旧配置缺失 similarity 段 → 默认开
@@ -1405,6 +1433,8 @@ describe('ConfigStore', () => {
     )
     const loaded = new ConfigStore(configPath).load()
     expect(loaded.ai.commentary).toEqual({ enabled: true, useThinking: false }) // 新增字段缺失 → 默认开 + 直出模式
+    expect(loaded.ai.semanticUndecidedTimeoutMin).toBe(30) // R15 新增字段缺失 → 默认 30 分钟
+    expect(loaded.ai.evaluation).toEqual({ useThinking: false }) // R15 新增字段缺失 → 直出模式
     expect(loaded.ai.matchMode).toBe('semantic')
     expect(loaded.ai.provider.model).toBe('m')
   })

@@ -489,6 +489,10 @@ export function Settings(props: {
           threshold: d.similarityThreshold
         },
         ai: {
+          // 本页未管理的 ai 子字段（R15 的 semanticUndecidedTimeoutMin /
+          // evaluation.useThinking 等）保留已保存值——sanitize 会兜底默认，但
+          // 显式透传防"保存其它设置把这些值抹回默认"
+          ...saved.ai,
           provider: {
             baseUrl: d.aiBaseUrl.trim(),
             apiKey: d.aiApiKey.trim(),

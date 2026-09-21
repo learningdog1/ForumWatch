@@ -208,6 +208,14 @@ export interface AiConfig {
    * 默认 0 = 行为不变（不过滤）；取值 [0,1]，sanitize 非法回 0、越界钳制。
    */
   semanticThreshold: number
+  /**
+   * 语义未决时间窗（分钟，R15）：评估失败/未决的帖子在该窗口内持续重评；
+   * 超窗仍无裁决 → 降级字面判定收口（防无限重评，也防"轮数上限在快轮询下
+   * 过激"——30s 轮询 × 5 轮 = 2.5 分钟就把语义候选静默丢弃的旧事故）。
+   * 加法字段不 bump schemaVersion（commentary.enabled 先例），旧配置缺失 → 30，
+   * sanitize 钳到 [1,1440]。
+   */
+  semanticUndecidedTimeoutMin: number
   /** AI 每日总结 */
   dailyReport: {
     enabled: boolean
@@ -230,6 +238,16 @@ export interface AiConfig {
      * （commentary.enabled 先例），旧配置缺失 → false（新默认行为）。
      * 仅对支持思考参数的服务（智谱 GLM 系）生效，其余供应商该参数不下发。
      */
+    useThinking: boolean
+  }
+  /**
+   * 语义评估调用选项（R15，对齐 commentary 的形态）：useThinking **默认 false
+   * = 直出模式**——评估是短 JSON 判定任务，请求附 thinking 禁用参数（推理型
+   * 模型的思考 token 与正文共用产出预算且显著拉长延迟，是批量评估超时的
+   * 主因之一）。仅对支持思考参数的服务生效，其余供应商该参数不下发/忽略。
+   * 加法字段不 bump schemaVersion，旧配置缺失 → false（新默认行为）。
+   */
+  evaluation: {
     useThinking: boolean
   }
 }
@@ -517,8 +535,10 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     matchMode: 'literal',
     interests: [],
     semanticThreshold: 0,
+    semanticUndecidedTimeoutMin: 30,
     dailyReport: { enabled: false, timeHHMM: '22:00' },
-    commentary: { enabled: true, useThinking: false }
+    commentary: { enabled: true, useThinking: false },
+    evaluation: { useThinking: false }
   }
 }
 

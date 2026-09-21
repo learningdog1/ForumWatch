@@ -14,6 +14,9 @@
  * - 超时：req.timeoutMs ?? 30000 写入 init.timeoutMs 传给 post（HttpClient 会转成
  *   AbortSignal.timeout）；AbortError/TimeoutError（name 或 message 含 timeout/abort）
  *   归类 timeout，其余 fetch 异常归类 network。
+ * - 思考禁用（R12 引入、R16 扩多方言）：req.disableThinking=true 时请求体附
+ *   THINKING_DISABLE_FIELDS 三方言参数组；带参遇 400 → 去参重试一次并按
+ *   provider 签名记住该端点（换配置自动复位重学），严格端点自愈不破功能。
  */
 
 import type { FetchLike, HttpRequestInit, HttpResponse } from '../net/http-types'
@@ -30,12 +33,20 @@ export type AiProviderErrorKind =
   | 'bad-json'
 
 export class AiProviderError extends Error {
+  /**
+   * 上游明示的等待秒数（429 的 parameters.retry_after；R15）：调用方可取
+   * max(自身退避, retry_after) 决定冷却。其余错误类型恒 undefined。
+   */
+  readonly retryAfterSec?: number
+
   constructor(
     message: string,
-    public readonly kind: AiProviderErrorKind
+    public readonly kind: AiProviderErrorKind,
+    retryAfterSec?: number
   ) {
     super(message)
     this.name = 'AiProviderError'
+    if (retryAfterSec !== undefined) this.retryAfterSec = retryAfterSec
   }
 }
 
@@ -56,10 +67,12 @@ export interface ChatRequest {
   /** 可选 max_tokens 上限 */
   maxTokens?: number
   /**
-   * true 时请求体附 thinking:{type:'disabled'}（智谱 GLM 系推理模型的思考开关，
-   * R12）：思考 token 与正文共用 max_tokens 产出预算，短文本任务禁思考更快更稳。
-   * **仅显式要求时下发**——OpenAI 官方端点对未知字段会 400，未声明支持的
-   * 供应商不该被动收到这个参数。
+   * true 时请求体附**多方言**思考禁用参数组（R16）：智谱 GLM/OpenRouter 的
+   * `thinking`、SiliconFlow/DashScope（Qwen3 系）的 `enable_thinking`、
+   * vLLM/SGLang 的 `chat_template_kwargs`——一次全发，端点各取所认、互不
+   * 冲突；宽松端点忽略不认识的，严格端点（OpenAI 官方等对未知参数 400）由
+   * chat 内的去参重试兜底（见 THINKING_REJECT_LEARN 说明）。
+   * **仅显式要求时下发**（语义评估/锐评直出模式默认 true）。
    */
   disableThinking?: boolean
 }
@@ -73,6 +86,20 @@ export interface AiProviderDeps {
 
 const DEFAULT_TIMEOUT_MS = 30000
 const BODY_EXCERPT_LEN = 200
+
+/**
+ * 思考禁用参数组（R16 多方言）：三种主流方言一次全发——
+ * - `thinking: {"type":"disabled"}`：智谱 GLM 系 / OpenRouter 风格；
+ * - `enable_thinking: false`：SiliconFlow / DashScope（Qwen3 系混合思考模型）；
+ * - `chat_template_kwargs: {"enable_thinking": false}`：vLLM / SGLang 自托管。
+ * 端点各取所认：认识哪个按哪个禁，不认识的多数字段被静默忽略；严格校验
+ * 未知参数的端点会 400，由 chat 的去参重试兜底（自愈后本进程不再发这些参数）。
+ */
+const THINKING_DISABLE_FIELDS: Readonly<Record<string, unknown>> = {
+  thinking: { type: 'disabled' },
+  enable_thinking: false,
+  chat_template_kwargs: { enable_thinking: false }
+}
 
 /**
  * 把文本中出现的密钥明文整体替换为 ***（密钥为空串时原样返回；本模块保证密钥非空）。
@@ -124,6 +151,14 @@ function extractContent(data: unknown): string | undefined {
 export class AiProvider {
   private readonly post: FetchLike
   private readonly getConfig: () => AiProviderConfig
+  /**
+   * 「该端点对思考禁用参数回 400」的记忆（R16）：值 = 学习时的 provider 配置
+   * 签名（`baseUrl|model|apiKey`）。带思考参数遇 400 → 去参重试一次并记下
+   * 签名——同端点的后续调用直接不带思考参数（不再反复 400）；换端点/模型/
+   * 密钥（签名变化）自动复位重学。进程内存态：重启后第一次调用重新探测，
+   * 代价至多一次多余的 400。null = 尚未学到任何拒绝。
+   */
+  private thinkingRejectedSignature: string | null = null
 
   constructor(deps: AiProviderDeps) {
     this.post = deps.post
@@ -140,7 +175,7 @@ export class AiProvider {
       throw new AiProviderError('AI provider not configured', 'unconfigured')
     }
 
-    const payload: Record<string, unknown> = {
+    const basePayload: Record<string, unknown> = {
       model,
       messages: [
         { role: 'system', content: req.system },
@@ -149,30 +184,47 @@ export class AiProvider {
       temperature: 0,
       stream: false
     }
-    if (req.jsonMode === true) payload.response_format = { type: 'json_object' }
-    if (req.maxTokens !== undefined) payload.max_tokens = req.maxTokens
-    if (req.disableThinking === true) payload.thinking = { type: 'disabled' }
+    if (req.jsonMode === true) basePayload.response_format = { type: 'json_object' }
+    if (req.maxTokens !== undefined) basePayload.max_tokens = req.maxTokens
+
+    // R16：带思考禁用参数组（多方言）当且仅当调用方要求且该端点未学到拒绝
+    const providerSignature = `${baseUrl}|${model}|${apiKey}`
+    const sendThinkingDisable =
+      req.disableThinking === true && this.thinkingRejectedSignature !== providerSignature
 
     const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    const init: HttpRequestInit = {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload),
-      timeoutMs
+    const postOnce = async (payload: Record<string, unknown>): Promise<HttpResponse> => {
+      const init: HttpRequestInit = {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        timeoutMs
+      }
+      try {
+        return await this.post(`${baseUrl}/chat/completions`, init)
+      } catch (err) {
+        if (isAbortLike(err)) {
+          throw new AiProviderError(`AI provider request timed out after ${timeoutMs}ms`, 'timeout')
+        }
+        const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+        throw new AiProviderError(`AI provider network error: ${scrubSecret(detail, apiKey)}`, 'network')
+      }
     }
 
-    let res: HttpResponse
-    try {
-      res = await this.post(`${baseUrl}/chat/completions`, init)
-    } catch (err) {
-      if (isAbortLike(err)) {
-        throw new AiProviderError(`AI provider request timed out after ${timeoutMs}ms`, 'timeout')
-      }
-      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
-      throw new AiProviderError(`AI provider network error: ${scrubSecret(detail, apiKey)}`, 'network')
+    let payload: Record<string, unknown> = { ...basePayload }
+    if (sendThinkingDisable) Object.assign(payload, THINKING_DISABLE_FIELDS)
+    let res = await postOnce(payload)
+
+    // R16 自愈兜底：带了思考参数却 400——多半是端点严格校验未知参数（OpenAI
+    // 官方等）。记住该端点并去参原样重试一次：宽松端点各取所认、严格端点自愈，
+    // 「任何模型」都能用。重试仍 400（真实坏请求）则照常走错误分类上抛——
+    // 兜底只吸收"参数不被认识"这一种情形，不掩盖真错误。
+    if (res.status === 400 && sendThinkingDisable) {
+      this.thinkingRejectedSignature = providerSignature
+      res = await postOnce({ ...basePayload })
     }
 
     if (res.status === 401 || res.status === 403) {
@@ -186,7 +238,8 @@ export class AiProvider {
       const hint = retryAfter !== undefined ? `, retry_after=${retryAfter}s` : ''
       throw new AiProviderError(
         `AI provider rate limited (HTTP 429${hint}): ${excerptBody(res.body, apiKey)}`,
-        'rate-limit'
+        'rate-limit',
+        retryAfter
       )
     }
     if (res.status < 200 || res.status >= 300) {

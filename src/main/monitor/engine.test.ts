@@ -20,6 +20,7 @@ import { FileEngineState } from './state'
 import { ChallengeError, type SourceAdapter } from './types'
 import type { SemanticEvaluator, SemanticVerdict } from '../ai/evaluator'
 import { CommentGenerator } from '../ai/commentary'
+import { AiProviderError } from '../ai/provider'
 import type { ChatRequest } from '../ai/provider'
 import { TelegramError } from '../notify/telegram'
 import type { HitMessageInput } from '../notify/types'
@@ -226,7 +227,9 @@ function aiSemanticConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['
     interests: ['自建主机'],
     dailyReport: { enabled: false, timeHHMM: '22:00' },
     commentary: { enabled: false, useThinking: false },
+    evaluation: { useThinking: false },
     semanticThreshold: 0,
+    semanticUndecidedTimeoutMin: 30,
     ...overrides
   }
 }
@@ -984,7 +987,9 @@ describe('语义评估管线（D4）', () => {
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false, useThinking: false },
+      evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
+      semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1266,7 +1271,9 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false, useThinking: false },
+      evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
+      semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1416,7 +1423,9 @@ describe('语义置信度阈值（R5-P2b：ai.semanticThreshold）', () => {
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false, useThinking: false },
+      evaluation: { useThinking: false },
       semanticThreshold: 0,
+      semanticUndecidedTimeoutMin: 30,
       ...overrides
     }
   }
@@ -1574,7 +1583,9 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
       interests: ['自建主机'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false, useThinking: false },
+      evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
+      semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1920,7 +1931,9 @@ describe('AI 锐评集成（第三轮）', () => {
       interests: [],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false, useThinking: false },
+      evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
+      semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
       ...overrides
     }
   }
@@ -2421,7 +2434,9 @@ describe('per-source 匹配覆盖（R13：matching 覆盖五字段，未覆盖�
       interests: ['全局兴趣'],
       dailyReport: { enabled: false, timeHHMM: '22:00' },
       commentary: { enabled: false, useThinking: false },
+      evaluation: { useThinking: false },
       semanticThreshold: 0,
+      semanticUndecidedTimeoutMin: 30,
       ...overrides
     }
   }
@@ -2826,15 +2841,16 @@ describe('语义评估节流与降级（R13-3：退避 + 未决轮次上限）',
     expect(evaluate).toHaveBeenCalledTimes(3)
   })
 
-  it('未决轮次上限：连续 5 轮拿不到裁决 → 降级字面判定收口（含词帖 literal 推送、无词帖入 seen），不再无限重评', async () => {
-    // 恒返回空 Map = 全部未决（不算评估失败，不触发退避——隔离地测轮次上限）
+  it('未决时间窗（R15）：窗口内持续重评不收口；超窗 → 降级字面判定收口（含词帖 literal 推送、无词帖入 seen），不再无限重评', async () => {
+    // 恒返回空 Map = 全部未决（不算评估失败，不触发退避——隔离地测时间窗）；
+    // 窗口设 5 分钟（默认 30 分钟等太久）
     const evaluate = vi.fn(async () => new Map())
     const h = build({
       impl: async () => [topic('1')],
       evaluator: { evaluate },
       config: {
         includeKeywords: ['羊毛'], // build 默认全局词：降级字面判定的输入
-        ai: aiSemanticConfig(),
+        ai: aiSemanticConfig({ semanticUndecidedTimeoutMin: 5 }),
         sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }]
       }
     })
@@ -2844,22 +2860,153 @@ describe('语义评估节流与降级（R13-3：退避 + 未决轮次上限）',
       topic('3', { title: 'plain chatter no keyword' }), // 降级时字面不中
       topic('1')
     ])
-    for (let round = 1; round <= 4; round++) {
-      await h.engine.pollOnce()
-      expect(evaluate).toHaveBeenCalledTimes(round)
-      expect(h.sendHit).not.toHaveBeenCalled() // 前 4 轮全部未决挂起
-    }
-    await h.engine.pollOnce() // 第 5 轮：达到上限，降级收口
-    expect(evaluate).toHaveBeenCalledTimes(5)
+    // 第 1 轮：未决记时起点
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    expect(h.sendHit).not.toHaveBeenCalled()
+    // 窗口内（+4min）：继续重评、不收口（旧行为按轮数在第 5 轮就丢了）
+    advanceMs(4 * 60_000)
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(2)
+    expect(h.sendHit).not.toHaveBeenCalled()
+    expect(h.seen.has('nodeseek:2')).toBe(false)
+    expect(h.seen.has('nodeseek:3')).toBe(false)
+    // 超窗（累计 6min ≥ 5min）：降级收口
+    advanceMs(2 * 60_000)
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(3)
     expect(h.sendHit).toHaveBeenCalledTimes(1) // 羊毛帖按 literal 推送
     expect(h.engine.getRecentHits()[0]!).toMatchObject({
       matchedBy: 'literal',
       matchedKeywords: ['羊毛']
     })
     expect(h.seen.has('nodeseek:3')).toBe(true) // 无词帖入 seen 收口（不再重评）
-    // 第 6 轮：两帖均已收口，不再进 AI 批
+    // 两帖均已收口，不再进 AI 批
     await h.engine.pollOnce()
-    expect(evaluate).toHaveBeenCalledTimes(5)
+    expect(evaluate).toHaveBeenCalledTimes(3)
+  })
+
+  it('同轮多批：第一批失败进冷却后，剩余批次不再打上游（R15 修批循环不查冷却）', async () => {
+    const evaluate = vi.fn(async () => {
+      throw new Error('upstream down')
+    })
+    const h = build({
+      impl: async () => [topic('1')],
+      evaluator: { evaluate },
+      config: {
+        ai: aiSemanticConfig(),
+        sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }]
+      }
+    })
+    await h.engine.pollOnce() // 基线
+    // 13 条新帖 = 2 批（12 + 1）
+    h.fetchLatest.mockImplementation(async () => [
+      ...Array.from({ length: 13 }, (_, i) => topic(String(20 + i))),
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+    // 旧实现：第二批立即重试 → 再失败 → 退避连升两级、evaluate 2 次
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    // 全部 13 帖未决挂起（不入 seen）
+    for (let i = 0; i < 13; i++) expect(h.seen.has(`nodeseek:${20 + i}`)).toBe(false)
+    // 冷却期内（30s）再轮：零调用
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1)
+  })
+
+  it('429 retry_after 采纳（R15）：冷却取 max(自身曲线, retry_after)，短于 retry_after 的轮次零调用', async () => {
+    const evaluate = vi.fn(async () => {
+      throw new AiProviderError('AI provider rate limited (HTTP 429, retry_after=120s)', 'rate-limit', 120)
+    })
+    const h = build({
+      impl: async () => [topic('1')],
+      evaluator: { evaluate },
+      config: {
+        ai: aiSemanticConfig(),
+        sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }]
+      }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: 'some post' }), topic('1')])
+    await h.engine.pollOnce() // 失败：自身曲线 30s，retry_after 120s → 冷却 120s
+    expect(evaluate).toHaveBeenCalledTimes(1)
+    advanceMs(60_000) // 超过自身曲线 30s、仍在上游要求的 120s 内
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(1) // 冷却中零调用
+    advanceMs(61_000) // 跨过 120s
+    await h.engine.pollOnce()
+    expect(evaluate).toHaveBeenCalledTimes(2)
+  })
+
+  it('AI 故障告警（R15）：故障持续 ≥10 分钟 → sendRaw 告警一次（防刷屏）；恢复 → 补发恢复通知', async () => {
+    let fail = true
+    const evaluate = vi.fn(async (topics: Topic[]) => {
+      if (fail) throw new Error('余额不足或无可用资源包')
+      const m = new Map<string, { hit: boolean; score: number; reason: null }>()
+      for (const t of topics) m.set(`nodeseek:${t.id}`, { hit: false, score: 1, reason: null })
+      return m
+    })
+    const h = build({
+      impl: async () => [topic('1')],
+      evaluator: { evaluate },
+      config: {
+        ai: aiSemanticConfig(),
+        sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }]
+      }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: 'new post' }), topic('1')])
+    await h.engine.pollOnce() // 首败：故障期起算（冷却 30s）
+    expect(h.sendRaw).not.toHaveBeenCalled()
+    // 跨过冷却再败（streak ~31s，仍 < 10min）：不告警
+    advanceMs(31_000)
+    await h.engine.pollOnce()
+    expect(h.sendRaw).not.toHaveBeenCalled()
+    // 跨到 11 分钟再败：告警一条
+    advanceMs(10 * 60_000)
+    await h.engine.pollOnce()
+    expect(h.sendRaw).toHaveBeenCalledTimes(1)
+    expect(String(h.sendRaw.mock.calls[0]![0])).toContain('语义评估已连续失败')
+    // 继续失败：不重复告警（每故障期最多 1 条）
+    advanceMs(120_000)
+    await h.engine.pollOnce()
+    expect(h.sendRaw).toHaveBeenCalledTimes(1)
+    // 恢复：跨过第 4 败的 240s 冷却 → 评估成功 → 补发恢复通知（含持续时长）
+    advanceMs(5 * 60_000)
+    fail = false
+    await h.engine.pollOnce()
+    expect(h.sendRaw).toHaveBeenCalledTimes(2)
+    expect(String(h.sendRaw.mock.calls[1]![0])).toContain('已恢复')
+    // 健康期的普通评估不再发通知
+    h.fetchLatest.mockImplementation(async () => [topic('3', { title: 'another' }), topic('2'), topic('1')])
+    await h.engine.pollOnce()
+    expect(h.sendRaw).toHaveBeenCalledTimes(2)
+  })
+
+  it('AI 短暂故障（<10 分钟即恢复）：不发告警、恢复后不补发（噪音控制）', async () => {
+    let fail = true
+    const evaluate = vi.fn(async (topics: Topic[]) => {
+      if (fail) throw new Error('timeout')
+      const m = new Map<string, { hit: boolean; score: number; reason: null }>()
+      for (const t of topics) m.set(`nodeseek:${t.id}`, { hit: false, score: 1, reason: null })
+      return m
+    })
+    const h = build({
+      impl: async () => [topic('1')],
+      evaluator: { evaluate },
+      config: {
+        ai: aiSemanticConfig(),
+        sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }]
+      }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: 'new post' }), topic('1')])
+    await h.engine.pollOnce() // 首败
+    advanceMs(31_000)
+    fail = false
+    await h.engine.pollOnce() // 恢复（streak 31s < 10min）
+    expect(h.sendRaw).not.toHaveBeenCalled()
+    expect(h.seen.has('nodeseek:2')).toBe(true) // 未决帖裁决 miss 入 seen
   })
 })
 

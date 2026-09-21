@@ -99,7 +99,9 @@ describe('AiProvider.chat', () => {
     expect(body.stream).toBe(false)
     expect(body.response_format).toBeUndefined() // 非 jsonMode 不带
     expect(body.max_tokens).toBeUndefined() // 未给 maxTokens 不带
-    expect(body.thinking).toBeUndefined() // 未给 disableThinking 不带（R12：未知供应商不被动收参）
+    expect(body.thinking).toBeUndefined() // 未给 disableThinking 不带（R16：三方言字段都不带）
+    expect(body.enable_thinking).toBeUndefined()
+    expect(body.chat_template_kwargs).toBeUndefined()
   })
 
   it('jsonMode/maxTokens/timeoutMs：response_format、max_tokens、超时透传', async () => {
@@ -111,14 +113,68 @@ describe('AiProvider.chat', () => {
     expect(h.calls[0]?.init?.timeoutMs).toBe(5000)
   })
 
-  it('disableThinking（R12）：true 时请求体附 thinking:{type:"disabled"}，false 不带', async () => {
+  it('disableThinking（R16 多方言）：true 时请求体附三方言思考禁用字段，false 不带', async () => {
     const h1 = makeHarness(() => okRes)
     await h1.provider.chat({ system: 's', user: 'u', disableThinking: true })
-    expect(JSON.parse(h1.calls[0]!.init!.body as string).thinking).toEqual({ type: 'disabled' })
+    const body1 = JSON.parse(h1.calls[0]!.init!.body as string) as Record<string, unknown>
+    expect(body1.thinking).toEqual({ type: 'disabled' }) // 智谱 GLM / OpenRouter 方言
+    expect(body1.enable_thinking).toBe(false) // SiliconFlow / DashScope（Qwen3 系）方言
+    expect(body1.chat_template_kwargs).toEqual({ enable_thinking: false }) // vLLM / SGLang 方言
 
     const h2 = makeHarness(() => okRes)
     await h2.provider.chat({ system: 's', user: 'u', disableThinking: false })
-    expect(JSON.parse(h2.calls[0]!.init!.body as string).thinking).toBeUndefined()
+    const body2 = JSON.parse(h2.calls[0]!.init!.body as string) as Record<string, unknown>
+    expect(body2.thinking).toBeUndefined()
+    expect(body2.enable_thinking).toBeUndefined()
+    expect(body2.chat_template_kwargs).toBeUndefined()
+  })
+
+  it('R16 自愈：带思考参数遇 400 → 去参重试一次成功；该端点被记住（后续调用不再带参）', async () => {
+    const badRequest: HttpResponse = { status: 400, headers: {}, body: '{"error":{"message":"Unrecognized request argument supplied: thinking"}}' }
+    const h = makeHarness((idx) => (idx === 0 ? badRequest : okRes))
+    const content = await h.provider.chat({ system: 's', user: 'u', disableThinking: true })
+    expect(content).toBe('{"hit":true}')
+    expect(h.calls.length).toBe(2) // 第二次 = 去参重试
+    const retryBody = JSON.parse(h.calls[1]!.init!.body as string) as Record<string, unknown>
+    expect(retryBody.thinking).toBeUndefined()
+    expect(retryBody.enable_thinking).toBeUndefined()
+    expect(retryBody.chat_template_kwargs).toBeUndefined()
+    expect(retryBody.model).toBe('deepseek-chat') // 其余请求体原样保留
+
+    // 同端点后续调用：直接不带思考参数（不再反复 400 探测）
+    await h.provider.chat({ system: 's', user: 'u', disableThinking: true })
+    expect(h.calls.length).toBe(3)
+    const body3 = JSON.parse(h.calls[2]!.init!.body as string) as Record<string, unknown>
+    expect(body3.thinking).toBeUndefined()
+  })
+
+  it('R16 自愈：真实坏请求（去参重试仍 400）→ http 错误照常上抛，不掩盖', async () => {
+    const badRequest: HttpResponse = { status: 400, headers: {}, body: '{"error":{"message":"invalid model"}}' }
+    const h = makeHarness(() => badRequest)
+    const err = await expectReject(
+      h.provider.chat({ system: 's', user: 'u', disableThinking: true }),
+      'http'
+    )
+    expect(err.message).toContain('400')
+    expect(h.calls.length).toBe(2) // 探测重试发生一次，之后签名已记（不会再三连发）
+  })
+
+  it('R16 记忆按端点隔离：换 provider 配置（baseUrl/model/apiKey 任一变化）→ 复位重学', async () => {
+    const badRequest: HttpResponse = { status: 400, headers: {}, body: 'unknown param thinking' }
+    // 端点 A：学习拒绝
+    const hA = makeHarness((idx) => (idx === 0 ? badRequest : okRes))
+    await hA.provider.chat({ system: 's', user: 'u', disableThinking: true })
+    expect(hA.calls.length).toBe(2)
+    // 换到端点 B：重新带参探测（B 认识 thinking，一次成功）
+    hA.setConfig({ ...defaultConfig, baseUrl: 'https://open.bigmodel.cn/api/paas/v4' })
+    await hA.provider.chat({ system: 's', user: 'u', disableThinking: true })
+    expect(hA.calls.length).toBe(3)
+    const bodyB = JSON.parse(hA.calls[2]!.init!.body as string) as Record<string, unknown>
+    expect(bodyB.thinking).toEqual({ type: 'disabled' })
+    // 换模型 / 换密钥同样视为新端点
+    hA.setConfig({ ...defaultConfig, model: 'glm-4-flash' })
+    await hA.provider.chat({ system: 's', user: 'u', disableThinking: true })
+    expect(JSON.parse(hA.calls[3]!.init!.body as string).thinking).toEqual({ type: 'disabled' })
   })
 
   it('baseUrl 规范化：尾斜杠/空白/多斜杠等价，统一拼 /chat/completions', async () => {
@@ -171,7 +227,7 @@ describe('AiProvider.chat', () => {
     }
   })
 
-  it('429 带 parameters.retry_after → rate-limit，消息含秒数', async () => {
+  it('429 带 parameters.retry_after → rate-limit，消息含秒数 + retryAfterSec（R15）', async () => {
     const h = makeHarness(() => ({
       status: 429,
       headers: {},
@@ -179,12 +235,14 @@ describe('AiProvider.chat', () => {
     }))
     const err = await expectReject(h.provider.chat({ system: 's', user: 'u' }), 'rate-limit')
     expect(err.message).toContain('retry_after=7s')
+    expect(err.retryAfterSec).toBe(7)
   })
 
-  it('429 无 retry_after → rate-limit，不附秒数', async () => {
+  it('429 无 retry_after → rate-limit，不附秒数，retryAfterSec undefined', async () => {
     const h = makeHarness(() => ({ status: 429, headers: {}, body: 'too many requests' }))
     const err = await expectReject(h.provider.chat({ system: 's', user: 'u' }), 'rate-limit')
     expect(err.message).not.toContain('retry_after=')
+    expect(err.retryAfterSec).toBeUndefined()
   })
 
   it('500 → http，消息含 status 与 body 摘录', async () => {

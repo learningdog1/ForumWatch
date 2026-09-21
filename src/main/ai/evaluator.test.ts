@@ -72,12 +72,16 @@ describe('SemanticEvaluator.evaluate', () => {
       jsonMode?: boolean
       timeoutMs?: number
       maxTokens?: number
+      disableThinking?: boolean
     }
     expect(req.system).toContain('论坛帖子筛选器')
     expect(req.system).toContain('宁可漏报不要误报')
     expect(req.jsonMode).toBe(true)
-    expect(req.timeoutMs).toBe(15000)
+    // R15：超时 15s → 30s（线上 12 帖批量经网关常超 15s）
+    expect(req.timeoutMs).toBe(30000)
     expect(req.maxTokens).toBe(2000)
+    // R15：默认直出模式（评估是短 JSON 判定任务，禁思考更快更稳）
+    expect(req.disableThinking).toBe(true)
     expect(JSON.parse(req.user)).toEqual({
       interests: ['自建主机', 'NAS'],
       topics: [
@@ -85,6 +89,13 @@ describe('SemanticEvaluator.evaluate', () => {
         { key: 'nodeseek:2', title: 'title-2', category: '交易' }
       ]
     })
+  })
+
+  it('useThinking 透传（R15）：opts.useThinking=true 不下发思考禁用参数', async () => {
+    const h = makeHarness(() => '{"verdicts":[{"key":"nodeseek:1","hit":false}]}')
+    await h.evaluator.evaluate([topic('1')], ['x'], { useThinking: true })
+    const req = h.chat.mock.calls[0]![0] as { disableThinking?: boolean }
+    expect(req.disableThinking).toBe(false)
   })
 
   it('verdict 项缺 key 或 hit 非布尔 → 跳过该项（视为未决），其余照常', async () => {

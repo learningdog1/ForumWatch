@@ -34,8 +34,12 @@ import { AiProviderError, type AiProvider } from './provider'
 /** 单次评估的帖子上限（D4 cap 12；engine 切片，这里防御性断言） */
 export const MAX_SEMANTIC_BATCH = 12
 
-/** 评估请求超时（D4：pollOnce 内联 await，30s 级别里取 15s） */
-const EVALUATE_TIMEOUT_MS = 15000
+/**
+ * 评估请求超时（R15 从 15s 放宽到 30s：线上实测 12 帖批量经网关到推理型
+ * 模型常超 15s——15s 掐断是语义评估失败的第二大来源；pollOnce 内联 await，
+ * PollScheduler 防重叠，30s 只会拉长本轮、不会叠加并发）
+ */
+const EVALUATE_TIMEOUT_MS = 30000
 /** 评估请求 max_tokens（12 帖 × 每条一句理由的规模） */
 const EVALUATE_MAX_TOKENS = 2000
 
@@ -172,8 +176,17 @@ export class SemanticEvaluator {
    * 只有"AI 明确给了裁决"的帖子在 Map 里（verdict.hit=false 也是已裁决）；
    * 整体失败（网络/超时/JSON 解析不出）抛 AiProviderError——调用方把该批
    * 全部视为未决。
+   *
+   * opts.useThinking（R15，由 engine 从 cfg.ai.evaluation 透传）：缺省/false =
+   * 直出模式——请求附 thinking 禁用参数（评估是短 JSON 判定任务，推理型模型
+   * 的思考 token 拖长延迟且吃 max_tokens 预算，是超时主因之一；与
+   * commentary 的直出模式同款）；true = 保留模型默认思考行为（旧语义）。
    */
-  async evaluate(topics: Topic[], interests: string[]): Promise<Map<string, SemanticVerdict>> {
+  async evaluate(
+    topics: Topic[],
+    interests: string[],
+    opts: { useThinking?: boolean } = {}
+  ): Promise<Map<string, SemanticVerdict>> {
     // 空兴趣 = 永不命中：不调 API，全量判 hit:false（镜像字面档防风暴规则）
     if (interests.length === 0) {
       const all = new Map<string, SemanticVerdict>()
@@ -200,7 +213,8 @@ export class SemanticEvaluator {
       user,
       jsonMode: true,
       timeoutMs: EVALUATE_TIMEOUT_MS,
-      maxTokens: EVALUATE_MAX_TOKENS
+      maxTokens: EVALUATE_MAX_TOKENS,
+      disableThinking: opts.useThinking !== true
     })
 
     const parsed = parseVerdictResponse(content)
