@@ -12,6 +12,7 @@ README 是快速上手；本文是每一项行为的具体语义：界面元素�
 - [推送细节](#推送细节)
 - [AI 语义监控与每日总结](#ai-语义监控与每日总结)
 - [headless 模式](#headless-模式)
+- [Docker 部署](#docker-部署)
 - [故障排查矩阵](#故障排查矩阵)
 
 ## 界面导览
@@ -90,7 +91,7 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 
 ### 来源状态（per-source）
 
-`EngineStatus.sources` 里每个来源独立维护 `health / lastSuccessAt / lastError / consecutiveFailures / cooldownUntil`，各自走同一条退避曲线。聚合字段是全局汇总，监控台的**来源状态块**展示每来源明细（退避中显示剩余倒计时）。调度器下一轮时刻 = max(配置间隔, 最差来源剩余退避)——一个来源长时间退避会拉长全局轮询周期（其余来源跟着变慢，但不中断）。`SourceStatus` 另含 `page2Fetches`（引擎发起"补抓第 2 页"请求的累计次数，内存态、重启清零；当前 UI 未展示）——上一轮有效新帖 ≥ 40 且来源健康时下一轮会请求 2 页，2026-09 复测该补抓对 NodeSeek 实际无效（服务端忽略页码或 403，同页内容自动去重、无害）。
+`EngineStatus.sources` 里每个来源独立维护 `health / lastSuccessAt / lastError / consecutiveFailures / cooldownUntil`，各自走同一条退避曲线。聚合字段是全局汇总，监控台的**来源状态块**展示每来源明细（退避中显示剩余倒计时）。调度器间隔恒为配置值——某来源退避/被拦时**只拖慢它自己**（轮询轮内跳过该来源，冷却结束后的下一轮重试），其余来源照常按配置间隔轮询，互不影响。`SourceStatus` 另含 `page2Fetches`（引擎发起"补抓第 2 页"请求的累计次数，内存态、重启清零；当前 UI 未展示）——上一轮有效新帖 ≥ 40 且来源健康时下一轮会请求 2 页，2026-09 复测该补抓对 NodeSeek 实际无效（服务端忽略页码或 403，同页内容自动去重、无害）。
 
 ### AI 运行态（AiRuntimeStatus）
 
@@ -379,8 +380,61 @@ npm run engine:headless -- --duration 600 --interval 30    # 跑 10 分钟，30 
 | `--once` | 跑一轮后退出，打印 `fetched / fresh / hits / notified / failed / muted-or-unconfigured` 统计；多来源下 `fetched` / `fresh` 为**全来源聚合求和**（单来源时与旧口径一致），去重键与 engine 同口径 `${来源id}:${帖子id}`。**退出码：仅抓取失败（退避/挑战）为 1**；无就绪推送通道或推送失败均为 0 |
 | `--duration <sec>` | 运行指定秒数后优雅退出（默认直到 Ctrl-C / SIGTERM） |
 | `--interval <sec>` | 临时覆盖轮询间隔（钳到 ≥15s），**不写回配置**；优先级最高——配置热重载改了盘上的 `pollIntervalSec` 也压不过它（启动参数意图，每次读取配置时重新叠加） |
+| `--web [port]` | 起 **Web 管理界面**（Docker 部署的 UI 面；缺省端口 8787，`FW_WEB_PORT` 同效）。托管渲染层构建产物（`FW_WEB_ROOT`，缺省 `./out/renderer`）——与桌面版**同一套界面**（监控台 / 今日回顾 / 设置 / 流水），浏览器打开即用。`--once` 单轮模式不起 |
 
 环境变量：`NSM_BOT_TOKEN` / `NSM_CHAT_ID` 注入 Telegram 凭据——只进内存、不落盘，**覆盖配置里第一个 telegram 通道**的对应字段（对应环境变量非空才覆盖，否则保留盘上值；通道 enabled 不动——用户显式关掉的通道不会被环境变量唤醒）。多 telegram 通道时只覆盖首个。注入是常量叠加层，配置热重载后照常生效。
+
+## Docker 部署
+
+官方镜像 `cashewchickengazgazgood/forumwatch`（amd64 / arm64 双架构）：无头内核 + **与桌面版完全相同的网页管理界面**——渲染层是同一份构建产物，浏览器里由 web-shim（`src/renderer/src/lib/web-shim.ts`）把桌面的 preload IPC 桥到 HTTP（`POST /api/invoke`）+ SSE（`GET /api/events`），UI 代码零改动。
+
+### 快速开始
+
+```bash
+docker run -d --name forumwatch \
+  -p 8787:8787 -v fw-data:/data \
+  -e TZ=Asia/Shanghai \
+  -e FW_WEB_TOKEN=换成强口令 \
+  cashewchickengazgazgood/forumwatch
+```
+
+浏览器打开 `http://<主机>:8787`——首次会提示输入访问令牌（即 `FW_WEB_TOKEN`，存 localStorage，之后不再问）。设置 → 关键词 / 来源 / 推送通道 / AI 与桌面版用法完全一致；网页保存配置后约半秒热重载生效（headless 配置 watch 语义，无需重启容器）。
+
+### 环境变量与端口
+
+| 变量 | 说明 |
+| --- | --- |
+| `TZ` | 时区（如 `Asia/Shanghai`）。日报 / 命中 / 日志全按本地自然日分桶，**务必设置** |
+| `FW_WEB_TOKEN` | 管理界面访问令牌。设置后全部 `/api/*` 需携带（Bearer 头或 `?token=`）；**公网可达时必须设置**——配置面含 Telegram / AI 凭据且可全量改写。纯内网可留空（日志会 warn） |
+| `FW_WEB_PORT` | 容器内监听端口（缺省 8787；一般不用改，宿主侧映射换端口即可） |
+| `NSM_BOT_TOKEN` / `NSM_CHAT_ID` | 快速注入 Telegram 凭据（只进内存不落盘，优先级高于 config.json，语义同 headless） |
+
+### 数据与升级
+
+数据全部在 `/data` 卷：`config.json / seen.json / state.json / hits/ / pipeline/ / reports/ / logs/ / feedback.json`。升级：
+
+```bash
+docker pull cashewchickengazgazgood/forumwatch
+docker rm -f forumwatch && docker run -d ...（原参数，建议用 docker compose up -d）
+```
+
+升级不丢数据；桌面版凭据密文（`enc:v1:`）在容器里按未配置处理（PlainSecretBox 语义，见故障排查矩阵）——从桌面迁到 Docker 时在网页设置里重填一次凭据即可，或用备份导出 / 导入（网页「数据」卡：导出为浏览器下载的 JSON，导入选文件上传；导入成功后容器会自动暂停监控，**重启容器生效**，`restart: unless-stopped` 下即 `docker restart forumwatch`）。
+
+### 与桌面版的差异
+
+功能面完全一致（监控 / 匹配 / 推送 / AI / 日报 / 遥控 / 流水 / 统计 / 测试台），差异仅三处：
+
+1. **RSS 挑战无 B 计划**：桌面端被 Cloudflare 挑战后可换 Chromium 网络栈重发，容器内没有浏览器内核，被拦即按退避曲线自愈（与桌面 B 计划仍被拦后的行为一致）；
+2. **更新检查指向 GitHub Releases**：Docker 升级靠换镜像，「关于」卡看到的"有新版"只是版本信息，不对应容器内自动更新；
+3. **看门狗不在**：headless 装配无桌面端 30s 看门狗（桌面专属自愈）。
+
+### 镜像构建与发布（维护者）
+
+- 镜像由 `.github/workflows/docker.yml` 在 **tag `v*` 推送时自动构建并推送**（`latest` + 版本号双 tag；手动 dispatch 可重跑）；凭据在 repo secrets `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`。本机构建走 `npm run docker:build`（tag 0.7.x 从 package.json 读）。
+- Dockerfile 两阶段：构建阶段 `npm ci` → 渲染层 vite 构建 → esbuild 把 `scripts/headless.ts` 打成单文件 `server.js`（`--packages=external`，cheerio / undici / fetch-socks 由运行阶段 `npm ci --omit=dev` 提供）；运行阶段 `node:22-alpine` + server.js + web 静态产物，入口 `node server.js --config /data --web 8787`。
+- 本地不带 Docker 也能验证服务器：`npm run build && npx esbuild scripts/headless.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/server.js && node dist/server.js --config /tmp/fw --web 18787`。
+
+
 
 AI 能力（语义监控、每日总结、反馈注入）在 headless 下与桌面版同款接线，读同一份 `config.json` 的 `ai` 段——在 headless 数据目录手工编辑配置即可启用（保存后热重载生效，见下）。反馈闭环无 UI 入口但内核同款：语义评估同样读该目录的 `feedback.json` 注入提示词，可手工编辑该文件（启动加载时超限收编到各方向 100 条）；处置流水同样写 `<dir>/pipeline/`。多通道推送装配（channels / notify / routing）同样与桌面版同款：为就绪通道构造发送器并包 CompositeNotifier 做路由扇出，telegram 通道恒走代理、bark/ntfy/webhook 随 proxyScope（`telegram-only` 直连）。
 

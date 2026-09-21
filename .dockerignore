@@ -1,0 +1,12 @@
+node_modules
+out
+dist
+data
+.git
+.github
+design
+docs
+*.md
+.DS_Store
+*.log
+coverage

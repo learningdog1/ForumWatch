@@ -1,7 +1,7 @@
 {
   "name": "forumwatch",
   "productName": "ForumWatch",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "ForumWatch - multi-forum new topic monitor with keyword & AI semantic matching, Telegram push and AI daily digest",
   "author": "colmidad",
   "license": "MIT",
@@ -16,7 +16,10 @@
     "icons": "tsx scripts/gen-icons.ts",
     "dist": "electron-vite build && electron-builder",
     "dist:mac": "electron-vite build && electron-builder --mac",
-    "dist:win": "electron-vite build && electron-builder --win nsis --x64"
+    "dist:win": "electron-vite build && electron-builder --win nsis --x64",
+    "docker:build": "docker build -t cashewchickengazgazgood/forumwatch:latest -t cashewchickengazgazgood/forumwatch:$npm_package_version .",
+    "docker:push": "docker push cashewchickengazgazgood/forumwatch:latest && docker push cashewchickengazgazgood/forumwatch:$npm_package_version",
+    "docker:release": "npm run docker:build && npm run docker:push"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

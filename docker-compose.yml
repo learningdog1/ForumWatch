@@ -1,0 +1,25 @@
+# ForumWatch Docker 部署示例 —— `docker compose up -d`
+#
+# 首次启动会写入默认配置到 /data/config.json;更省事的路径是直接打开
+# http://localhost:8787 在网页里配好关键词与 Telegram(与桌面版同一套界面)。
+# 数据(配置/去重集/命中/日志)全部在命名卷 fw-data 里,升级换镜像不丢。
+
+services:
+  forumwatch:
+    image: cashewchickengazgazgood/forumwatch:latest
+    container_name: forumwatch
+    restart: unless-stopped
+    ports:
+      - "8787:8787" # 管理界面(宿主侧可改,容器侧保持 8787 或同步 FW_WEB_PORT)
+    environment:
+      TZ: Asia/Shanghai # 日报/命中按本地日分桶,务必设置时区
+      # 公网可达时必须设置访问令牌(浏览器首次访问会提示输入):
+      # FW_WEB_TOKEN: change-me-to-a-strong-secret
+      # 也可用环境变量快速注入 Telegram 凭据(不落盘,优先级高于配置文件):
+      # NSM_BOT_TOKEN: "123456:ABC..."
+      # NSM_CHAT_ID: "10086"
+    volumes:
+      - fw-data:/data
+
+volumes:
+  fw-data:

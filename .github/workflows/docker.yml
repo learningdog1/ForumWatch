@@ -1,0 +1,57 @@
+name: Docker
+
+# Docker 镜像构建与推送(Docker Hub: cashewchickengazgazgood/forumwatch)。
+# 触发:发版 tag(v*)或手动 dispatch——与 Release 工作流同步,桌面版发版的
+# 同时镜像也更新(latest + 版本号双 tag)。secrets:DOCKERHUB_USERNAME /
+# DOCKERHUB_TOKEN(PAT,repo 级 secret)。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 版本号:tag v0.7.1 → 0.7.1(dispatch 时从 package.json 读)
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(node -p "require('./package.json').version")"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (arm64)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            cashewchickengazgazgood/forumwatch:latest
+            cashewchickengazgazgood/forumwatch:${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -27,6 +27,15 @@
  * [60s, 30min]，复用 nextCheckAt）；`--once` 模式跳过日报（单轮冒烟不产文件、
  * 不推送）。
  *
+ * Web 管理界面（Docker 部署，src/main/server/）：常驻模式 `--web [port]`
+ * （缺省 8787；FW_WEB_PORT 同效）起 HTTP 服务器——托管渲染层构建产物
+ * （FW_WEB_ROOT，缺省 ./out/renderer）+ /api/invoke（DesktopApi invoke 面，
+ * api.ts 处理器表）+ /api/events（SSE 事件流）+ 备份导出/导入路由。事件源
+ * （engine onStatus/onHit、logger.onLog、日报 onGenerated）经 webBroadcast
+ * 槽位转发，无 Web 客户端时零开销。FW_WEB_TOKEN 设置后全部 /api/* 需令牌
+ * （公网部署必须）。备份导入成功 → pendingRestart 置位 + 引擎暂停 +
+ * shutdown 跳过 seen.flush（防内存旧集覆盖导入件），容器重启后生效。
+ *
  * 配置热重载（R8-C）：配置消费全部是 **store 访问器**风格（对齐桌面 runtime：
  * getEffective = store.get() + env 合并 + --interval 临时覆盖，每次现读），
  * 常驻模式用 watchConfigDir 监听 <dir>（去抖 500ms）——config.json 变化后
@@ -67,20 +76,29 @@ import { CompositeNotifier } from '../src/main/notify/composite'
 import { BotCommandController } from '../src/main/notify/bot-commands'
 import { isChannelReady, telegramCredentialsOf, type Notifier } from '../src/main/notify/types'
 import { createLogger } from '../src/main/logger'
+import { createInvokeHandlers, type WebApiContext } from '../src/main/server/api'
+import { createWebServer, type WebServer } from '../src/main/server/web'
+import { IPC } from '../src/shared/ipc'
 import type { AppConfig, EngineStatus, HitRecord, ChannelConfig, SourceConfig } from '../src/shared/types'
 
-const USAGE = `usage: npm run engine:headless -- [--config <dir>] [--once] [--duration <sec>] [--interval <sec>]
+const USAGE = `usage: npm run engine:headless -- [--config <dir>] [--once] [--duration <sec>] [--interval <sec>] [--web [port]]
   --config <dir>     数据目录（config/seen/state/logs），默认 ./data/headless
   --once             跑一轮后退出（打印本轮统计；抓取失败才退出码 1）
   --duration <sec>   运行指定秒数后优雅退出（默认直到 Ctrl-C）
   --interval <sec>   临时覆盖轮询间隔（钳到 >=15s），不写回配置；热重载后仍最高优先
-env: NSM_BOT_TOKEN / NSM_CHAT_ID  注入 telegram 凭据（不落盘）`
+  --web [port]       起 Web 管理界面（缺省端口 8787；FW_WEB_PORT 同效）
+env: NSM_BOT_TOKEN / NSM_CHAT_ID  注入 telegram 凭据（不落盘）
+     FW_WEB_PORT   Web 端口（--web 不带值时也用它）
+     FW_WEB_TOKEN  Web 访问令牌（设置后 /api/* 需 Bearer/查询参数携带）
+     FW_WEB_ROOT   渲染层静态目录（缺省 ./out/renderer；Docker 内 /app/web）`
 
 interface CliArgs {
   configDir: string
   once: boolean
   durationSec: number | null
   intervalSec: number | null
+  /** Web 管理界面端口;null = 不起(--once 恒 null) */
+  webPort: number | null
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -88,8 +106,10 @@ function parseArgs(argv: string[]): CliArgs {
     configDir: './data/headless',
     once: false,
     durationSec: null,
-    intervalSec: null
+    intervalSec: null,
+    webPort: null
   }
+  const envWebPort = Number((process.env['FW_WEB_PORT'] ?? '').trim())
   const needValue = (flag: string, i: number): string => {
     const v = argv[i + 1]
     if (v === undefined || v.startsWith('--')) {
@@ -100,7 +120,7 @@ function parseArgs(argv: string[]): CliArgs {
   }
   const needNumber = (flag: string, raw: string): number => {
     const n = Number(raw)
-    if (!Number.isFinite(n) || n <= 0) {
+    if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
       console.error(`invalid value for ${flag}: ${raw}\n${USAGE}`)
       process.exit(2)
     }
@@ -113,11 +133,21 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--duration') args.durationSec = needNumber(a, needValue(a, i++))
     else if (a === '--interval')
       args.intervalSec = needNumber(a, needValue(a, i++))
-    else {
+    else if (a === '--web') {
+      // 可选值:下一个参数是数字则作为端口;否则用 FW_WEB_PORT 或 8787
+      const next = argv[i + 1]
+      if (next !== undefined && /^\d+$/.test(next)) {
+        args.webPort = needNumber(a, next)
+        i++
+      } else {
+        args.webPort = Number.isFinite(envWebPort) && envWebPort > 0 ? envWebPort : 8787
+      }
+    } else {
       console.error(`unknown argument: ${a}\n${USAGE}`)
       process.exit(2)
     }
   }
+  if (args.once) args.webPort = null // 单轮冒烟无 Web
   return args
 }
 
@@ -155,13 +185,18 @@ async function main(): Promise<number | null> {
   mkdirSync(logsDir, { recursive: true })
 
   const logger = createLogger({ fileDir: logsDir })
-  // console 全量镜像（带时间戳）：info→log / warn→warn / error→error
+  // console 全量镜像（带时间戳）：info→log / warn→warn / error→error；
+  // --web 时同帧转发给 SSE 客户端（evLog 事件流,桌面版同款语义）
+  let webBroadcast: ((channel: string, payload: unknown) => void) | null = null
   logger.onLog((e) => {
     const line = `${e.ts} [${e.level}] ${e.msg}`
     if (e.level === 'error') console.error(line)
     else if (e.level === 'warn') console.warn(line)
     else console.log(line)
+    webBroadcast?.(IPC.evLog, e)
   })
+  /** 备份导入后的待重启窗口（web.ts onBackupImported 置位）：shutdown 跳过 seen.flush */
+  let pendingRestart = false
 
   // ---- 配置：磁盘 + 环境变量合并（env 不落盘）+ --interval 临时覆盖 ----------
   // R8-C：不再做"启动时 effective 快照"——getEffective() 每次现读 store 并叠加
@@ -442,7 +477,9 @@ async function main(): Promise<number | null> {
     notifier: { sendRaw: (text) => notifier.sendRaw(text) },
     getConfig: () => getEffective(),
     logger,
-    reportsDir: join(dir, 'reports')
+    reportsDir: join(dir, 'reports'),
+    // --web：生成完成的 SSE 广播（无 Web 时槽位为 null，零开销）
+    onGenerated: (info) => webBroadcast?.(IPC.evDailyReport, info)
   })
 
   const seen = new FileSeenStore(
@@ -564,8 +601,15 @@ async function main(): Promise<number | null> {
     commentaryGenerator,
     hitsStore,
     dispositions,
-    onStatus: printStatus,
-    ...(args.once ? { onHit: (h: HitRecord) => onceHits.push(h) } : {})
+    onStatus: (s: EngineStatus) => {
+      printStatus(s)
+      webBroadcast?.(IPC.evStatus, s)
+    },
+    // 命中事件：--once 计入统计；--web 广播给 SSE 客户端（evHit）
+    onHit: (h: HitRecord) => {
+      if (args.once) onceHits.push(h)
+      webBroadcast?.(IPC.evHit, h)
+    }
   })
 
   // ---- --once：单轮后打印统计并退出（跳过日报；不起 watch：单轮语义） -----------
@@ -631,6 +675,55 @@ async function main(): Promise<number | null> {
   }
   alignRemoteControl(getEffective())
 
+  // ---- Web 管理界面（--web，Docker 部署的 UI 面） ------------------------------
+  // 静态目录（渲染层构建产物）可被 FW_WEB_ROOT 覆盖；缺失不致命——API/SSE 照常
+  // （curl 仍可管理），仅浏览器打开无页面，log warn 提示先 npm run build。
+  let webServer: WebServer | null = null
+  if (args.webPort !== null) {
+    const webRoot = resolve(process.env['FW_WEB_ROOT'] ?? './out/renderer')
+    const webToken = (process.env['FW_WEB_TOKEN'] ?? '').trim()
+    const webCtx: WebApiContext = {
+      dataDir: dir,
+      logger,
+      store,
+      engine,
+      aiProvider,
+      semanticEvaluator: evaluator,
+      reportService,
+      hitsStore,
+      dispositions,
+      feedbackStore,
+      isPendingRestart: () => pendingRestart
+    }
+    webServer = createWebServer({
+      port: args.webPort,
+      webRoot,
+      ...(webToken !== '' ? { token: webToken } : {}),
+      handlers: createInvokeHandlers(webCtx),
+      backupCtx: webCtx,
+      onBackupImported: () => {
+        // 对齐桌面 beginPendingRestart 要点：置位（禁反馈/禁 seen flush）+
+        // 暂停引擎（停轮询）+ config 内存重读（防旧内存写回）；seen/state
+        // 不热换——容器重启后生效（needsRestart 语义 = restart container）。
+        pendingRestart = true
+        engine.pause()
+        try {
+          store.load()
+        } catch {
+          /* load 自带损坏容错 */
+        }
+      },
+      logger
+    })
+    webBroadcast = webServer.broadcast
+    if (!existsSync(join(webRoot, 'index.html'))) {
+      logger.warn(`web root has no index.html (${webRoot}) — run "npm run build" first; API still served`)
+    }
+    if (webToken === '') {
+      logger.warn('web ui has NO token (FW_WEB_TOKEN unset) — do not expose it to the public internet')
+    }
+  }
+
   // 配置热重载 watch（R8-C）：监听 <dir>（macOS rename 换 inode，盯目录才不丢），
   // 500ms 去抖；回调内自行 diff，seen/state 等无关写入不触发重载动作。
   const watcher: ConfigDirWatcher = watchConfigDir(dir, onConfigDirChanged)
@@ -673,8 +766,12 @@ async function main(): Promise<number | null> {
     engine.pause()
     void (async () => {
       try {
-        await seen.flush()
+        // 备份导入后的待重启窗口：seen.json 已被导入件覆盖，内存旧集 flush 会
+        // 冲掉它——跳过（桌面 beginPendingRestart 同款语义），重启后空集/导入件生效
+        if (!pendingRestart) await seen.flush()
       } finally {
+        webBroadcast = null
+        void webServer?.close()
         clients.site.close()
         clients.tg.close()
         clients.ai.close()

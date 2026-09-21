@@ -45,6 +45,21 @@
 | --- | --- | --- |
 | macOS (Apple Silicon / Intel) | `.dmg` | 未签名：首次打开请**右键 → 打开**（只做一次）。仍提示"已损坏"时执行 `xattr -cr /Applications/ForumWatch.app` |
 | Windows | `.exe` (NSIS) | 未签名：SmartScreen 提示时点"更多信息 → 仍要运行" |
+| Docker (NAS / VPS / 群晖) | `cashewchickengazgazgood/forumwatch` | 无头内核 + **同一套网页管理界面**，详见 [Docker 部署](#-docker-部署) |
+
+## 🐳 Docker 部署
+
+不想开电脑跑桌面版？官方镜像内置监控内核与**和桌面版完全相同的网页管理界面**（监控台 / 今日回顾 / 设置都在浏览器里用）：
+
+```bash
+docker run -d --name forumwatch \
+  -p 8787:8787 -v fw-data:/data \
+  -e TZ=Asia/Shanghai \
+  -e FW_WEB_TOKEN=换成强口令 \
+  cashewchickengazgazgood/forumwatch
+```
+
+浏览器打开 `http://<主机>:8787`，首次会提示输入访问令牌（即 `FW_WEB_TOKEN`，纯内网可不设）。数据全部落在 `/data` 卷，升级只需 `docker pull` 换镜像。多平台镜像（amd64 / arm64），发版 tag 推送时自动构建。完整说明（compose 模板、环境变量、备份导入导出、与桌面版数据互导）见 [深度文档](docs/usage.md#docker-部署)。
 
 ## 🚀 上手
 
