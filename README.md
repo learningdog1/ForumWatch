@@ -23,7 +23,7 @@
 
 ## ✨ 它做什么
 
-- **盯住任何论坛**：内置 NodeSeek 与 V2EX；任意提供 RSS 2.0 / Atom 的论坛填地址即可接入，设置页有 Linux.do、LowEndTalk 一键预设。每个来源独立健康状态，一个被拦不拖累其他。
+- **盯住任何论坛**：内置 NodeSeek 与 V2EX；任意提供 RSS 2.0 / Atom 的论坛填地址即可接入，设置页有 Linux.do、LowEndTalk（全站）、LowEndTalk Offers（只推优惠帖，feed 相同 + 分类白名单过滤）一键预设。每个来源还能单独覆盖关键词 / 匹配模式 / AI 兴趣（该行「匹配」面板，留空跟全局）。每个来源独立健康状态，一个被拦不拖累其他。
 - **三种方式决定"什么算值得推送"**，可叠加：
   - **关键词**：包含词任一命中即推，排除词一票否决，大小写不敏感。
   - **价格规则**：从标题提取「周期 / 价格 / 流量」（如"年付 ¥99、500G 流量"），按你的条件（如"年付 + ≤¥100 + ≥500G"）精确比对——找 VPS 羊毛的利器，确定性命中、零成本。
@@ -35,7 +35,7 @@
 
 ## 🗺 工作原理
 
-<img src="docs/assets/how-it-works.png" width="100%" alt="ForumWatch 工作原理" />
+<img src="docs/assets/how-it-works-light.png" width="100%" alt="ForumWatch 工作原理" />
 
 ## 📦 安装
 
@@ -50,7 +50,7 @@
 
 1. **装好启动**。首次启动只把首页现有帖子记为已读、不推送，不会被历史帖刷屏。
 2. **给关键词**：设置 → 关键词，加入你关心的词（如 `VPS`、`白嫖`），保存。⚠️ 包含关键词为空 = 不推送任何帖子，这是防误设计。
-3. **接来源**（可选）：设置 → 来源，一键添加 V2EX / Linux.do / LowEndTalk 预设，或填任意论坛的 RSS / Atom 地址。
+3. **接来源**（可选）：设置 → 来源，一键添加 V2EX / Linux.do / LowEndTalk / LowEndTalk Offers 预设，或填任意论坛的 RSS / Atom 地址。
 4. **接推送**：设置 → 推送通道，配 Telegram：
    - 找 [@BotFather](https://t.me/BotFather) 发 `/newbot` 拿到 **Bot Token**；
    - **给这个 bot 发一条消息**（不然它无法主动找你）；
