@@ -28,10 +28,12 @@ import type { MonitorEngine } from '../monitor/engine'
 import type { AiProvider } from '../ai/provider'
 import type { SemanticEvaluator } from '../ai/evaluator'
 import type { DailyReportService } from '../ai/daily-report'
+import type { CategoryReportService } from '../ai/category-report'
+import { periodFor } from '../ai/category-report'
 import type { FileFeedbackStore } from '../ai/feedback'
 import type { HitsStore } from '../monitor/hits-store'
 import type { DispositionStore } from '../monitor/dispositions'
-import type { EngineControlResult, SaveConfigResult, OpenExternalResult, AiTestResult, DailyReportListResult, HitQueryOptions, HitQueryResult, MatchTestRequest, MatchTestResult, StatsResult, HitFeedbackResult, UpdateCheckStatus } from '../../shared/ipc'
+import type { EngineControlResult, SaveConfigResult, OpenExternalResult, AiTestResult, DailyReportListResult, HitQueryOptions, HitQueryResult, MatchTestRequest, MatchTestResult, StatsResult, HitFeedbackResult, UpdateCheckStatus, CategoryReportInfo, CategoryReportKind, CategoryReportListResult, CategoryReportGenerateResult } from '../../shared/ipc'
 import { allowedExternalDomains, isHostAllowed } from '../monitor/sources/registry'
 import { formatLocalDate } from '../monitor/hits-store'
 import { resolveSourceMatching } from '../monitor/matching'
@@ -51,6 +53,8 @@ export interface WebApiContext {
   aiProvider: AiProvider
   semanticEvaluator: SemanticEvaluator
   reportService: DailyReportService
+  /** 分类阶段报告（R17）：三档查询/手动生成（与桌面 rt.categoryReportService 同源） */
+  categoryReportService: CategoryReportService
   hitsStore: HitsStore
   dispositions: DispositionStore
   feedbackStore: FileFeedbackStore
@@ -63,6 +67,13 @@ export type InvokeHandler = (args: unknown[]) => Promise<unknown> | unknown
 
 /** 'YYYY-MM-DD' 形状锚定（与桌面 ipc.ts 同款；日期会拼进文件读路径，防穿越） */
 const DATE_SHAPE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** monthly 期键形状（与桌面 ipc.ts 同款；category-report:get 的期键校验） */
+const MONTH_SHAPE_RE = /^\d{4}-\d{2}$/
+
+/** 分类报告 kind 白名单（与桌面 ipc.ts 同款；渲染层传 unknown） */
+const isCategoryKind = (v: unknown): v is CategoryReportKind =>
+  v === 'daily' || v === 'weekly' || v === 'monthly'
 
 /** openExternal 的静态白名单（更新检查下载页；与桌面 ipc.ts 同款合并口径） */
 const STATIC_EXTERNAL_DOMAINS = ['github.com'] as const
@@ -247,6 +258,51 @@ export function createInvokeHandlers(ctx: WebApiContext): Map<string, InvokeHand
     ],
 
     [IPC.listDailyReports, (): DailyReportListResult => ({ dates: ctx.reportService.listReportDays() })],
+
+    // ---- 分类阶段报告（R17，与桌面 ipc.ts 同口径） ---------------------------
+
+    [
+      IPC.getCategoryReport,
+      async (args): Promise<CategoryReportInfo> => {
+        const kind = isCategoryKind(args[0]) ? args[0] : 'daily'
+        const shape = kind === 'monthly' ? MONTH_SHAPE_RE : DATE_SHAPE_RE
+        const raw = args[1]
+        const explicit = typeof raw === 'string' && shape.test(raw) ? raw : undefined
+        const periods = ctx.categoryReportService.listPeriods(kind)
+        const periodKey = explicit ?? periods[0] ?? periodFor(kind).periodKey
+        return {
+          kind,
+          periodKey,
+          markdown: await ctx.categoryReportService.loadReport(kind, periodKey)
+        }
+      }
+    ],
+
+    [
+      IPC.generateCategoryReport,
+      async (args): Promise<CategoryReportGenerateResult> => {
+        const kind = args[0]
+        if (!isCategoryKind(kind)) {
+          return { ok: false, error: `unknown report kind: ${String(kind)}` }
+        }
+        // 期键在调用 generate 之前算好：生成耗时跨本地午夜时返回值不漂移
+        // （与桌面 ipc.ts 同源同口径；与 SSE 广播的期键一致）
+        const periodKey = periodFor(kind).periodKey
+        try {
+          const markdown = await ctx.categoryReportService.generate(kind)
+          return { ok: true, periodKey, markdown }
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) }
+        }
+      }
+    ],
+
+    [
+      IPC.listCategoryReports,
+      (args): CategoryReportListResult => ({
+        periods: ctx.categoryReportService.listPeriods(isCategoryKind(args[0]) ? args[0] : 'daily')
+      })
+    ],
 
     [IPC.dispositionsRecent, () => ctx.dispositions.recent(200)],
 

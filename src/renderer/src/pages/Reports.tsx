@@ -1,26 +1,36 @@
 /**
- * 日报页（R10 阶段 4，reports.md 详稿）：
+ * 报告页（R10 阶段 4 reports.md + R17 分类阶段报告）：
+ * 页头下的档位 tab 切换四个数据面——「命中日报」（首档，现状零改动）与
+ * 分类·日 / 分类·周 / 分类·月（R17 新增，CategoryReportService 数据面）。
+ *
+ * 命中日报（HitsReportPane，逻辑与 R10 定稿一致）：
  * - 日期栏（zone A）：「今天」恒置顶 + **全部**历史日期（「展开更早（N）」，不再
  *   截断 14 天）+「跳到日期」月历（无日报日也可选，临时插入描边行区分）；
  * - 双数据面独立错误（zone B2）：listDailyReports（日期栏备料）与 getDailyReport
  *   （正文）各自 ErrorBar + 重试 + 请求序号守卫——失败绝不落入「该日没有日报」
  *   空态，错误与空态严格互斥；切日期时旧正文保留 + 压暗（§3.1）；
- * - 页头（zone Z0）：PageHeader「日报」（TASTE-UPGRADE §B-2 页头契约——五页一个
- *   范式，h1 是「日报」而非日期）；「更新于」为本会话内首次成功读取/重新生成该
- *   日报的时刻（组件 state 自记，切日期即重置；DailyReportInfo 无生成时刻字段，
- *   渲染层拿不到历史日的生成时间，无会话记录时传 null 不渲染更新行）；
- * - 卡头（zone B1）：两级标题（日题 22/700 display 档 + 生成模式/完整性元信息行，
- *   元信息从 markdown 尽力解析，解析不到走静态副题）+ 操作组（重新生成/复制全文/命中明细→）；
- * - 正文（zone B3）：ReportDoc 渲染器（行内语法/模板行结构化/分组 chips/截断提示）；
- * - 重新生成：全应用唯一行内确认场景（覆盖重写 + 再推送，不可逆层）——行内确认条
- *   非模态，Esc / 点击条外取消；生成成功文案诚实化：渲染层无法证实是否推送，不说；
- * - 文档版活列表（§3.2）：阅读中（滚动离开顶部）新版到达不替换正文，角标
- *   「已生成新版本 · 点击查看」承接，点击或回滚到顶部才载入；
- * - 键盘（§4.2）：←/→ 逐日切换、T 回今天、Esc 取消确认（IME 组合期不触发）；
- * - 零命中日报是已生成的日报：正文正常渲染，不走 EmptyState 大组件。
+ * - 页头（zone Z0）：PageHeader「日报」（TASTE-UPGRADE §B-2 页头契约）；「更新于」
+ *   为本会话内首次成功读取/重新生成该日报的时刻（DailyReportInfo 无生成时刻
+ *   字段，渲染层拿不到历史日的生成时间，无会话记录时传 null 不渲染更新行）；
+ * - 卡头（zone B1）：两级标题（日题 22/700 display 档 + 生成模式/完整性元信息行）
+ *   + 操作组（重新生成/复制全文/命中明细→）；重新生成是全应用唯一行内确认场景
+ *   （覆盖重写 + 再推送，不可逆层）；
+ * - 正文（zone B3）：ReportDoc 渲染器；文档版活列表（§3.2）：阅读中（滚动离开
+ *   顶部）新版到达不替换正文，角标「已生成新版本 · 点击查看」承接；
+ * - 键盘（§4.2）：←/→ 逐日切换、T 回今天、Esc 取消确认（IME 组合期不触发）。
+ *
+ * 分类报告（CategoryReportPane，R17）：
+ * - 档期栏：periods（新→旧）——日档=日期、周档=『MM-DD ~ MM-DD』（期键=周日）、
+ *   月档=YYYY-MM；选中「最新一期」（未显式选择）时排在首位；
+ * - 正文：getCategoryReport + ReportDoc；onCategoryReport 事件实时并入当前期；
+ * - 「立即生成/重新生成」恒对**当前期**（主进程 periodFor 口径，渲染端不重复实现
+ *   周期算术——成功返回带生成的期键，选中随之跳转）；
+ * - 数据底座与命中日报完全独立（topics/ 全量存档 vs hits/ 命中），空态/错误态
+ *   与错误互斥的语义对齐首档。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { CategoryReportEvent, CategoryReportInfo, CategoryReportKind } from '@shared/ipc'
 import type { DailyReportInfo } from '@shared/types'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorBar } from '../components/ErrorBar'
@@ -52,7 +62,82 @@ function shiftDay(date: string, delta: number, today: string): string {
   return delta > 0 && next > today ? date : next
 }
 
+// ---- 档位 tab（R17）------------------------------------------------------------
+
+/** 页内档位：首档命中日报 + 分类三档（kind 与 IPC CategoryReportKind 同名） */
+type ReportTab = 'hits' | CategoryReportKind
+
+const REPORT_TABS: ReadonlyArray<{ key: ReportTab; label: string }> = [
+  { key: 'hits', label: '命中日报' },
+  { key: 'daily', label: '分类·日' },
+  { key: 'weekly', label: '分类·周' },
+  { key: 'monthly', label: '分类·月' }
+]
+
+/** 分类档页题（PageHeader title；命中日报档维持「日报」） */
+const CATEGORY_KIND_TITLE: Record<CategoryReportKind, string> = {
+  daily: '分类日报',
+  weekly: '分类周报',
+  monthly: '分类月报'
+}
+
+/** 分类档档期栏标题 */
+const CATEGORY_KIND_RAIL: Record<CategoryReportKind, string> = {
+  daily: '日期',
+  weekly: '周',
+  monthly: '月'
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0')
+
+/** 周档期键（周日 'YYYY-MM-DD'）→『MM-DD ~ MM-DD』（周一~周日）；无效原样返回 */
+function weeklyPeriodLabel(periodKey: string): string {
+  const end = new Date(`${periodKey}T00:00:00`)
+  if (Number.isNaN(end.getTime())) return periodKey
+  const start = new Date(end)
+  start.setDate(start.getDate() - 6)
+  return `${pad2(start.getMonth() + 1)}-${pad2(start.getDate())} ~ ${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`
+}
+
+/** 分类档期键 → 栏行/卡头展示标签（日档由调用方走 formatDayLabel 的相对日语义） */
+function periodLabelOf(kind: CategoryReportKind, periodKey: string, today: string): string {
+  if (kind === 'daily') return formatDayLabel(periodKey, today)
+  if (kind === 'weekly') return weeklyPeriodLabel(periodKey)
+  return periodKey
+}
+
 export function Reports(props: { onGoHistory?: (date: string) => void }) {
+  const [tab, setTab] = useState<ReportTab>('hits')
+  return (
+    <div className="page page-reports">
+      {/* 档位 tab（R17）：页头下的分段选择行，横跨两列；首档=命中日报（现状零改动） */}
+      <div className="quick report-tabs" role="tablist" aria-label="报告档位">
+        {REPORT_TABS.map((t) => (
+          <button
+            type="button"
+            key={t.key}
+            role="tab"
+            aria-selected={tab === t.key}
+            className={`btn${tab === t.key ? ' active' : ''}`}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {/* key 保证档间切换是重挂载（档内状态不跨档泄漏；键盘/订阅随组件生命周期归位） */}
+      {tab === 'hits' ? (
+        <HitsReportPane onGoHistory={props.onGoHistory} />
+      ) : (
+        <CategoryReportPane key={tab} kind={tab} />
+      )}
+    </div>
+  )
+}
+
+// ---- 首档 · 命中日报（R10 定稿，逻辑零改动） -------------------------------------
+
+function HitsReportPane(props: { onGoHistory?: (date: string) => void }) {
   const today = localDate()
   const [dates, setDates] = useState<string[]>([])
   /** 日期栏数据面（listDailyReports）的失败原因；null=正常 */
@@ -83,7 +168,6 @@ export function Reports(props: { onGoHistory?: (date: string) => void }) {
   generatingRef.current = generating
   /** 当前正文是否为选中日期的已渲染日报（活列表判据） */
   const docCurrentRef = useRef(false)
-
   /** 请求序号守卫：慢响应不得覆盖更新的日期状态（History 同范式） */
   const reqSeq = useRef(0)
   const bodyRef = useRef<HTMLDivElement | null>(null)
@@ -338,7 +422,7 @@ export function Reports(props: { onGoHistory?: (date: string) => void }) {
   const dimBody = (loading || reportError != null) && hasReport
 
   return (
-    <div className="page page-reports">
+    <>
       {/* Z0 · 页头（§B-2 页头契约）：页题 = 侧栏 label「日报」；日报是每日快照，
           stale 判定整页关闭（90s 口径是监控台的事件节奏，不适用本页） */}
       <PageHeader
@@ -592,6 +676,378 @@ export function Reports(props: { onGoHistory?: (date: string) => void }) {
           )}
         </div>
       </section>
-    </div>
+    </>
+  )
+}
+
+// ---- 分类报告档（R17：日/周/月三档，数据面 reports/category/*.md） ----------------
+
+function CategoryReportPane(props: { kind: CategoryReportKind }) {
+  const kind = props.kind
+  const today = localDate()
+  const [periods, setPeriods] = useState<string[]>([])
+  /** 档期栏数据面（listCategoryReports）的失败原因；null=正常 */
+  const [listError, setListError] = useState<string | null>(null)
+  /** 列表请求是否已结算（未结算前正文区保持加载态，防「一期都没有」误闪） */
+  const [listDone, setListDone] = useState(false)
+  /** 显式选中的期键；null=最新一期（跟随 periods[0]） */
+  const [selected, setSelected] = useState<string | null>(null)
+  const [info, setInfo] = useState<CategoryReportInfo | null>(null)
+  /** 正文数据面（getCategoryReport）的失败原因；null=正常（旧正文保留压暗） */
+  const [bodyError, setBodyError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [generating, setGenerating] = useState(false)
+  const [genMsg, setGenMsg] = useState<Msg | null>(null)
+  /** 重新生成行内确认条（覆盖当前期 + 按配置再推送，不可逆——对齐首档语义） */
+  const [confirming, setConfirming] = useState(false)
+  const [copyMsg, setCopyMsg] = useState<'ok' | 'err' | null>(null)
+  /** 页头「更新于」：本会话内首次成功读取/重新生成该期的时刻 */
+  const [loadedAt, setLoadedAt] = useState<string | null>(null)
+
+  /** 当前查看的期键：显式选择 ?? 最新一期；一期都没有 = null */
+  const currentPeriod = selected ?? periods[0] ?? null
+
+  // 事件订阅闭包读最新 currentPeriod（订阅只挂一次/档）
+  const currentPeriodRef = useRef<string | null>(currentPeriod)
+  currentPeriodRef.current = currentPeriod
+  /** 请求序号守卫：慢响应不得覆盖更新的期状态（首档同范式） */
+  const reqSeq = useRef(0)
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  const copyTimerRef = useRef<number | null>(null)
+
+  const hasReport =
+    info != null && info.markdown != null && info.markdown.trim() !== '' && info.periodKey === currentPeriod
+
+  const refreshPeriods = useCallback((): void => {
+    void window.api
+      .listCategoryReports(kind)
+      .then((r) => {
+        setPeriods(r.periods)
+        setListError(null)
+      })
+      .catch((e: unknown) => setListError(errText(e)))
+  }, [kind])
+
+  // 挂载：档期栏备料 + 订阅生成事件（定时/手动生成完成 → 并入期列表与正文）
+  useEffect(() => {
+    void window.api
+      .listCategoryReports(kind)
+      .then((r) => {
+        setPeriods(r.periods)
+        setListError(null)
+        setListDone(true)
+      })
+      .catch((e: unknown) => {
+        setListError(errText(e))
+        setListDone(true)
+      })
+    return window.api.onCategoryReport((r: CategoryReportEvent) => {
+      if (r.kind !== kind) return
+      setPeriods((prev) =>
+        prev.includes(r.periodKey) ? prev : [r.periodKey, ...prev].sort().reverse()
+      )
+      // 正看着该期 → 直接并入（阅读位置不动的轻量路径；本档不做活列表角标）
+      if (currentPeriodRef.current === r.periodKey) {
+        setInfo({ kind: r.kind, periodKey: r.periodKey, markdown: r.markdown })
+        setBodyError(null)
+        setLoading(false)
+        setLoadedAt(new Date().toISOString())
+      }
+    })
+  }, [kind])
+
+  // 切期：正文拉取（守卫防慢响应错配）；列表未结算前保持加载态
+  useEffect(() => {
+    if (!listDone) return
+    if (currentPeriod == null) {
+      setInfo(null)
+      setLoading(false)
+      return
+    }
+    const seq = ++reqSeq.current
+    setLoading(true)
+    void window.api
+      .getCategoryReport(kind, currentPeriod)
+      .then((r) => {
+        if (seq !== reqSeq.current) return
+        setInfo(r)
+        setBodyError(null)
+        setLoading(false)
+        setLoadedAt(new Date().toISOString())
+      })
+      .catch((e: unknown) => {
+        if (seq !== reqSeq.current) return
+        setBodyError(errText(e))
+        setLoading(false)
+      })
+  }, [listDone, kind, currentPeriod])
+
+  // 切期时清生成反馈/确认条（首档切日同款）——清在「用户点档期行」处而非
+  // currentPeriod 效应：generate 成功也会切 currentPeriod，那里要保留 ok 反馈。
+  // 复制反馈定时器清理
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current)
+    },
+    []
+  )
+
+  /**
+   * 手动生成本档**当前期**（主进程 periodFor 口径，渲染端不重复实现周期算术）：
+   * 成功返回带生成的期键——选中跳到该期、期列表并入；正文经事件/效应双路径并入。
+   */
+  async function generate(): Promise<void> {
+    if (generating) return
+    setGenerating(true)
+    setConfirming(false)
+    setGenMsg({ kind: 'pending', text: '正在总结当前期的分类帖子…（AI 生成最长约 60 秒）' })
+    try {
+      const r = await window.api.generateCategoryReport(kind)
+      if (r.ok) {
+        setPeriods((prev) =>
+          prev.includes(r.periodKey) ? prev : [r.periodKey, ...prev].sort().reverse()
+        )
+        setSelected(r.periodKey)
+        setGenMsg({ kind: 'ok', text: '报告已生成' })
+        // 诚实化（对齐首档 §2.3）：是否推送由主进程按配置判定，渲染层不声称。
+        setInfo({ kind, periodKey: r.periodKey, markdown: r.markdown })
+        setBodyError(null)
+        setLoading(false)
+        setLoadedAt(new Date().toISOString())
+      } else {
+        setGenMsg({ kind: 'err', text: `生成失败：${r.error}`, retry: true })
+      }
+    } catch (e) {
+      setGenMsg({ kind: 'err', text: `生成失败：${errText(e)}`, retry: true })
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  function copyAll(): void {
+    const md = info?.markdown
+    if (md == null) return
+    void navigator.clipboard
+      .writeText(md)
+      .then(() => setCopyMsg('ok'))
+      .catch(() => setCopyMsg('err'))
+      .finally(() => {
+        if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = window.setTimeout(() => {
+          setCopyMsg(null)
+          copyTimerRef.current = null
+        }, COPY_FEEDBACK_MS)
+      })
+  }
+
+  /** 重新生成按钮：已显示报告时给（覆盖重生成走行内确认；当前期无报告=空态直达生成） */
+  const canRegen = hasReport
+  /** 出错/加载中且有旧正文 → 保留旧数据 + 压暗（对齐首档 §3.1） */
+  const dimBody = (loading || bodyError != null) && hasReport
+
+  return (
+    <>
+      <PageHeader
+        title={CATEGORY_KIND_TITLE[kind]}
+        subtitle="按分类对全量话题存档的阶段性总结，支持手动生成与推送"
+        updatedAt={loadedAt}
+        stale={false}
+        updatedTitle="本会话内首次读取或重新生成该期报告的时间"
+      />
+      <aside className="report-rail">
+        <div className="report-rail-title">{CATEGORY_KIND_RAIL[kind]}</div>
+        {listError != null ? (
+          <ErrorBar message="期列表加载失败" detail={listError} onRetry={refreshPeriods} />
+        ) : (
+          <nav className="report-rail-list" aria-label={`${CATEGORY_KIND_TITLE[kind]}档期`}>
+            {periods.map((p) => (
+              <button
+                type="button"
+                key={p}
+                className={`report-date${currentPeriod === p ? ' active' : ''}`}
+                onClick={() => {
+                  setSelected(p)
+                  setGenMsg(null)
+                  setConfirming(false)
+                }}
+                aria-current={currentPeriod === p ? 'date' : undefined}
+              >
+                <span className="label">{periodLabelOf(kind, p, today)}</span>
+              </button>
+            ))}
+            {listDone && periods.length === 0 && (
+              <div className="report-rail-empty">还没有报告</div>
+            )}
+          </nav>
+        )}
+      </aside>
+
+      <section className="card card-grow report-card">
+        <div className="report-head">
+          <div className="report-head-main">
+            <div className="report-title-row">
+              <h2 className="report-title">
+                {currentPeriod == null ? CATEGORY_KIND_TITLE[kind] : periodLabelOf(kind, currentPeriod, today)}
+              </h2>
+              {loading && hasReport && <IconRefresh size={12} className="report-busy" />}
+            </div>
+            {confirming ? (
+              <div className="report-confirm" role="alert">
+                <span>重新生成会覆盖当前期报告，并按配置再推送一次。确定？</span>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  disabled={generating}
+                  onClick={() => void generate()}
+                >
+                  确认重新生成
+                </button>
+                <button type="button" className="btn" onClick={() => setConfirming(false)}>
+                  取消
+                </button>
+              </div>
+            ) : (
+              <div className="report-meta">分类阶段总结 · AI 不可用时自动降级为统计模板</div>
+            )}
+          </div>
+          <div className="report-actions">
+            {canRegen ? (
+              <button
+                type="button"
+                className="btn"
+                disabled={generating}
+                onClick={() => setConfirming((v) => !v)}
+              >
+                <IconRefresh size={14} />
+                重新生成
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={`btn${generating ? ' busy' : ''}`}
+                disabled={generating}
+                title="生成本档当前期（覆盖已有报告并按配置推送）；一期都没有时即首份报告"
+                onClick={() => void generate()}
+              >
+                <IconRefresh size={14} />
+                立即生成
+              </button>
+            )}
+            {hasReport && (
+              <button type="button" className="btn" onClick={copyAll}>
+                <IconCopy size={14} />
+                复制全文
+              </button>
+            )}
+            {copyMsg === 'ok' && (
+              <span className="feedback ok" role="status">
+                <IconCheck size={12} />
+                已复制
+              </span>
+            )}
+            {copyMsg === 'err' && (
+              <span className="feedback err" role="alert">
+                <IconX size={12} />
+                复制失败
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* 错误条：读失败 ≠ 没有（旧正文在下方保留并压暗） */}
+        {bodyError != null && (
+          <ErrorBar
+            message="报告加载失败"
+            detail={bodyError}
+            onRetry={() => {
+              if (currentPeriod != null) {
+                const seq = ++reqSeq.current
+                setLoading(true)
+                void window.api
+                  .getCategoryReport(kind, currentPeriod)
+                  .then((r) => {
+                    if (seq !== reqSeq.current) return
+                    setInfo(r)
+                    setBodyError(null)
+                    setLoading(false)
+                    setLoadedAt(new Date().toISOString())
+                  })
+                  .catch((e: unknown) => {
+                    if (seq !== reqSeq.current) return
+                    setBodyError(errText(e))
+                    setLoading(false)
+                  })
+              }
+            }}
+          />
+        )}
+
+        {/* 生成反馈（行内三态；成功 status / 失败 alert） */}
+        {genMsg != null && (
+          <div
+            className={`report-feedback feedback ${genMsg.kind}`}
+            role={genMsg.kind === 'err' ? 'alert' : 'status'}
+          >
+            {genMsg.kind === 'ok' && <IconCheck size={12} />}
+            {genMsg.kind === 'err' && <IconX size={12} />}
+            {genMsg.text}
+            {genMsg.retry === true && (
+              <button
+                type="button"
+                className="btn"
+                disabled={generating}
+                onClick={() => void generate()}
+              >
+                重试
+              </button>
+            )}
+          </div>
+        )}
+
+        <div
+          className={`report-body${dimBody ? ' list-dim' : ''}`}
+          ref={bodyRef}
+          tabIndex={0}
+          aria-busy={loading ? true : undefined}
+          aria-label="分类报告正文"
+        >
+          {!loading && bodyError == null && !hasReport ? (
+            currentPeriod == null ? (
+              <EmptyState
+                title="本档还没有报告"
+                hint="到了设置里的生成时刻会自动生成；也可以现在就总结当前期的分类帖子"
+                action={
+                  <button
+                    type="button"
+                    className={`btn btn-primary${generating ? ' busy' : ''}`}
+                    disabled={generating}
+                    onClick={() => void generate()}
+                  >
+                    {generating ? null : <IconRefresh size={14} />}
+                    立即生成
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState
+                title="该期报告不存在"
+                hint="报告文件可能已被移动或删除；重新生成可恢复该期"
+              />
+            )
+          ) : hasReport ? (
+            <ReportDoc markdown={info!.markdown!} />
+          ) : (
+            <div className="empty disp-loading">
+              {loading && (
+                <>
+                  <IconRefresh size={12} />
+                  正在加载报告…
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+    </>
   )
 }

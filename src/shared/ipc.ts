@@ -4,9 +4,9 @@
  * UI 阶段只认这个文件与 ./types.ts。
  *
  * 语义约定（实现与 UI 都必须遵守）：
- * - 事件推送（evStatus / evHit / evLog / evDailyReport）由主进程广播给所有存活窗口；
- *   渲染进程启动时先用 invoke 拉全量（getStatus / getHits / getLogs），
- *   事件只用于增量。
+ * - 事件推送（evStatus / evHit / evLog / evDailyReport / evCategoryReport）由主进程
+ *   广播给所有存活窗口；渲染进程启动时先用 invoke 拉全量（getStatus / getHits /
+ *   getLogs），事件只用于增量。
  * - pause 只改 desired 不动 health；pause 后 nextPollAt 保留旧值
  *   （排程器已停但字段不清空）——UI 一律按 desired=paused 派生展示，
  *   此时忽略 nextPollAt，不要拿它判断"是否在轮询"。
@@ -166,6 +166,21 @@ export const IPC = {
    * config 段内存重读（防导入后在设置页保存把旧配置写回）。
    */
   importBackup: 'backup:import',
+  /**
+   * invoke(kind, periodKey?) → CategoryReportInfo（R17 分类阶段报告）：
+   * periodKey 缺省/形状非法（含路径穿越串）= 该档最新一期；一期都没有时
+   * periodKey=当前期、markdown=null。kind 非法按 'daily' 处理（查询面不抛）。
+   */
+  getCategoryReport: 'category-report:get',
+  /**
+   * invoke(kind) → CategoryReportGenerateResult（R17）：手动生成该档**当前期**
+   * 报告——跳过 desired 与 attempts、覆盖重生成（generateDailyReport 同语义），
+   * 推送条件在 generate 内部按配置判定。成功带生成的期键与全文（渲染端直接
+   * 并入正文，不依赖事件时序）；kind 非法/生成失败返回 {ok:false}。
+   */
+  generateCategoryReport: 'category-report:generate',
+  /** invoke(kind) → { periods: string[] }：某档已有报告的期键列表（新→旧） */
+  listCategoryReports: 'category-report:list',
   /** 主进程 push EngineStatus */
   evStatus: 'event:status',
   /** 主进程 push HitRecord */
@@ -173,7 +188,9 @@ export const IPC = {
   /** 主进程 push LogEntry */
   evLog: 'event:log',
   /** 主进程 push DailyReportInfo（日报生成完成时） */
-  evDailyReport: 'event:report'
+  evDailyReport: 'event:report',
+  /** 主进程 push CategoryReportEvent（分类报告生成完成时，R17 三档共用） */
+  evCategoryReport: 'event:category-report'
 } as const
 
 /** 引擎控制命令：pause/resume 改 desired；runNow 补一轮（paused 时 no-op）；sendTest 发测试消息 */
@@ -193,6 +210,41 @@ export type AiTestResult = { ok: true } | { ok: false; error: string }
 
 /** listDailyReports 返回 */
 export type DailyReportListResult = { dates: string[] }
+
+/**
+ * 分类阶段报告档位（R17）：'daily' 日（当天）/'weekly' 周（上一完整周，期键=周日
+ * 日期）/'monthly' 月（上一自然月，期键 'YYYY-MM'）。与内核
+ * src/main/ai/category-report.ts 的同名类型同集合——composite 边界不允许 shared
+ * 反向 type-import src/main，此处独立声明；两边漂移由 handler 的 kind 白名单兜住。
+ */
+export type CategoryReportKind = 'daily' | 'weekly' | 'monthly'
+
+/**
+ * getCategoryReport 返回：某档某期报告的查询面形状。
+ * markdown 为该期全文（含附录）；请求的期没有报告 / 期键形状非法时为 null。
+ */
+export interface CategoryReportInfo {
+  kind: CategoryReportKind
+  /** daily/weekly='YYYY-MM-DD'（weekly=周日），monthly='YYYY-MM'；缺省请求时=解析出的期键 */
+  periodKey: string
+  /** 报告 markdown 全文；没有该期报告时为 null */
+  markdown: string | null
+}
+
+/** generateCategoryReport 返回：成功带生成的期键与全文；失败带错误消息 */
+export type CategoryReportGenerateResult =
+  | { ok: true; periodKey: string; markdown: string }
+  | { ok: false; error: string }
+
+/** listCategoryReports 返回：某档已有报告的期键列表，新→旧 */
+export type CategoryReportListResult = { periods: string[] }
+
+/** evCategoryReport 载荷：分类报告生成完成即推送（markdown=全文含附录） */
+export interface CategoryReportEvent {
+  kind: CategoryReportKind
+  periodKey: string
+  markdown: string
+}
 
 /**
  * 匹配测试台（R5-P2c）的结果契约。类型定义在契约层是因为 tsconfig.web 的
@@ -407,10 +459,26 @@ export interface DesktopApi {
    * 成功恒 needsRestart:true（重启生效）。取消/验包失败返回 {ok:false}；永不 reject。
    */
   importBackup(): Promise<BackupImportResult>
+  /**
+   * 分类阶段报告（R17）：某档某期查询；periodKey 缺省=该档最新一期。
+   * 查询面不抛：无报告/形状非法 → markdown:null（期键照常回显）。
+   */
+  getCategoryReport(
+    kind: CategoryReportKind,
+    periodKey?: string
+  ): Promise<CategoryReportInfo>
+  /**
+   * 分类阶段报告（R17）：手动生成该档当前期（覆盖重生成 + 按配置推送）；
+   * 成功带生成的期键与全文。
+   */
+  generateCategoryReport(kind: CategoryReportKind): Promise<CategoryReportGenerateResult>
+  /** 分类阶段报告（R17）：某档已有期键列表（新→旧）；不抛，失败由 UI 错误面承接 */
+  listCategoryReports(kind: CategoryReportKind): Promise<CategoryReportListResult>
   onStatus(callback: (s: EngineStatus) => void): () => void
   onHit(callback: (h: HitRecord) => void): () => void
   onLog(callback: (e: LogEntry) => void): () => void
   onDailyReport(callback: (r: DailyReportInfo) => void): () => void
+  onCategoryReport(callback: (r: CategoryReportEvent) => void): () => void
 }
 
 /**

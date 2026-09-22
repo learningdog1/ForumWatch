@@ -21,17 +21,43 @@
   display: grid;
   /* R12 呼吸档：日期栏 148→172（12 圆角行内距后日期文案不再挤） */
   grid-template-columns: 172px minmax(0, 1fr);
-  /* 行轨两行：页头行自然高 + 内容行吃满剩余（页头契约 §B-2 补页头后加轨） */
-  grid-template-rows: auto 1fr;
+  /* 行轨三行（R17 加档位 tab）：页头行 + tab 行自然高 + 内容行吃满剩余 */
+  grid-template-rows: auto auto 1fr;
   gap: var(--space-xl);
   align-items: stretch;
   min-height: 100%;
   width: 100%;
   margin: 0 auto;
 }
-/* 页级页头横跨两列（§B-2）：日报页页题是「日报」，日期归卡头 */
+/* 页级页头横跨两列（§B-2）：日报页页题是「日报」，日期归卡头。
+   grid-row:1 显式锚定页头在 tab 行之上（tab 在 DOM 里先于各 pane 的 PageHeader
+   出现，自动放置会把 tab 排到页头上方——显式行号同时修正窄屏单列堆叠序） */
 .page-reports .pagehead {
   grid-column: 1 / -1;
+  grid-row: 1;
+}
+/* 档位 tab 行（R17 分类阶段报告）：横跨两列的页级分段选择（.quick 共享
+   wash 选中档），容器吃第三表面浮条与页头同族 */
+.report-tabs {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  align-self: start;
+  padding: var(--space-xs);
+  background: var(--raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-sm);
+}
+.report-tabs .btn {
+  min-height: 32px; /* 回 md 档：页级分段比 quick 预设行重一档 */
+  padding: 6px 14px;
+  font-size: var(--fs-13);
+}
+/* 档期栏空态（一期都没有）：弱化占位行，非可点 */
+.report-rail-empty {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--fs-12);
+  color: var(--text-3);
 }
 
 /* Zone A · 日期栏：今天恒置顶 + 全部历史（展开后栏内自身滚动）+ 跳到日期。
@@ -547,6 +573,9 @@ button.report-meta:hover {
     grid-template-columns: minmax(0, 1fr);
     /* 单列堆叠后显式行轨失效，日期栏/卡片各归自然行 */
     grid-template-rows: none;
+  }
+  .report-tabs {
+    flex-wrap: wrap; /* 四档 tab 窄屏折行，不横向溢出 */
   }
   .report-rail {
     flex-direction: row;

@@ -10,24 +10,29 @@
  *   NotifierShell 供 engine/日报/ipc 持有，通道集合变化时热替换）→ AiProvider /
  *   SemanticEvaluator（R7-W4 起构造注入 FileFeedbackStore 的 recentForPrompt，
  *   DEC-5 反馈进 system prompt）/ CommentGenerator / DailyReportService
- *   （reportsDir= <userData>/reports）→ FileSeenStore / FileEngineState /
- *   HitsStore（<userData>/hits）/ DispositionStore（<userData>/pipeline，
- *   R7-W1 处置流水）/ FileFeedbackStore（<userData>/feedback.json，R7-W4）→
- *   PollScheduler（onTick 绑 engine.pollOnce、onScheduled 绑 engine.noteScheduled，
- *   不绑则 nextPollAt 恒 null）→ MonitorEngine（deps 注入 evaluator +
- *   commentaryGenerator + hitsStore + dispositions）。
+ *   （reportsDir= <userData>/reports）/ CategoryReportService（R17，
+ *   reportsDir=<userData>/reports/category；读 TopicArchiveStore）→
+ *   FileSeenStore / FileEngineState / HitsStore（<userData>/hits）/
+ *   DispositionStore（<userData>/pipeline，R7-W1 处置流水）/ TopicArchiveStore
+ *   （<userData>/topics，R17 全量存档）/ FileFeedbackStore（<userData>/
+ *   feedback.json，R7-W4）→ PollScheduler（onTick 绑 engine.pollOnce、
+ *   onScheduled 绑 engine.noteScheduled，不绑则 nextPollAt 恒 null）→
+ *   MonitorEngine（deps 注入 evaluator + commentaryGenerator + hitsStore +
+ *   dispositions + topicArchive）。
  *
  * 配置热更新：engine 每轮 pollOnce 调 getConfig()（→ store.get()），IPC saveConfig
  * 落盘后 store 内存值即换新；网络副作用由 applyConfigSideEffects 同步（三个
  * client 的 setProxy——仅代理值变化时调用，避免无谓中断在途请求——+ 开机自启）。
  *
- * 日报定时器（D5）：startup() 起一个自循环 setTimeout——每轮 sleep =
- * clamp(nextCheckAt - now, 60s, 30min)（下限保证跨天/补做及时，上限防休眠期
- * 漂移后空转密集唤醒）；到点调 reportSvc.tick(desired)。app quit（shutdown）
+ * 报告定时器（D5；R17 起双服务）：startup() 起一个自循环 setTimeout——每轮
+ * sleep = clamp(min(日报 nextCheckAt, 分类报告 nextCheckAt) - now, 60s, 30min)
+ * （下限保证跨天/补做及时，上限防休眠期漂移后空转密集唤醒）；到点依次
+ * reportSvc.tick + categoryReportSvc.tick(desired)。app quit（shutdown）
  * 清理。powerMonitor resume 时 onPowerResume() 补一轮 tick（睡眠跨过触发时刻
  * 的补偿路径，D5「启动/resume 时检查」）；用户手动 resume（IPC/托盘）也补——
  * emitStatus 里检测 desired paused→running 翻转即 void runReportTick()（F6，
- * 暂停跨过 timeHHMM 的补偿路径）。
+ * 暂停跨过 timeHHMM 的补偿路径）。分类报告全关时其 nextCheckAt=Infinity，
+ * min 退化为日报单服务节奏（R17）。
  *
  * 生命周期：startup() = engine.start()（launch 即开始监控，desired 默认 running）+
  * 起 watchdog；shutdown() 在 app 的 before-quit 与 will-quit 之间调用（退出路径统一
@@ -65,10 +70,12 @@ import { SemanticEvaluator } from '../ai/evaluator'
 import { FileFeedbackStore } from '../ai/feedback'
 import { CommentGenerator } from '../ai/commentary'
 import { DailyReportService } from '../ai/daily-report'
+import { CategoryReportService } from '../ai/category-report'
 import { FileSeenStore, seenCapacityForSources } from '../monitor/dedup'
 import { MonitorEngine } from '../monitor/engine'
 import { DispositionStore, PIPELINE_DIR_NAME } from '../monitor/dispositions'
 import { HitsStore, HITS_DIR_NAME } from '../monitor/hits-store'
+import { TopicArchiveStore, TOPICS_DIR_NAME } from '../monitor/topics-store'
 import { PollScheduler } from '../monitor/poller'
 import { FileEngineState } from '../monitor/state'
 import { HtmlSourceAdapter } from '../monitor/sources/html'
@@ -121,6 +128,17 @@ export class DesktopRuntime {
   readonly hitsStore: HitsStore
   /** 处置流水存储（R7-W1）：engine 各分支出口上报 + ipc 查询（recent/readDay） */
   readonly dispositions: DispositionStore
+  /**
+   * 全量话题存档（R17）：engine unseen 循环顶部落档（topics/<date>.jsonl，
+   * 35 天保留，无条件写）；分类报告（categoryReportService）的读数面。
+   */
+  readonly topicArchive: TopicArchiveStore
+  /**
+   * 分类阶段报告（R17）：日/周/月三档分类行情总结（reports/category/*.md）。
+   * 与 reportService（命中日报）并存——数据底座/开关/文件独立；定时器共享
+   * 下方的报告自循环（sleep 取两服务 nextCheckAt 的 min）。
+   */
+  readonly categoryReportService: CategoryReportService
   private readonly siteClient: HttpClient
   private readonly tgClient: HttpClient
   private readonly aiClient: HttpClient
@@ -306,6 +324,21 @@ export class DesktopRuntime {
       reportsDir: join(this.userDataDir, 'reports'),
       onGenerated: (info) => broadcaster.report(info)
     })
+    // 分类阶段报告（R17）：存档读数 + reports/category/ 落文件；推送走同一稳定壳
+    // （sendRaw）；生成完成经 onGenerated → broadcaster.categoryReport 广播给渲染端
+    // （与上方日报 report(info) 同款接线）。
+    this.topicArchive = new TopicArchiveStore({
+      dataDir: join(this.userDataDir, TOPICS_DIR_NAME)
+    })
+    this.categoryReportService = new CategoryReportService({
+      provider: this.aiProvider,
+      archive: this.topicArchive,
+      notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+      getConfig: () => this.store.get(),
+      logger: this.logger,
+      reportsDir: join(this.userDataDir, 'reports', 'category'),
+      onGenerated: (info) => broadcaster.categoryReport(info)
+    })
 
     // seen 容量随来源数扩容（ultrabrain 坑12：1000 + 500×(n-1)，防容量淘汰先于
     // 时间淘汰击穿）。容量构造期定死：配置增删来源后不自动跟随，下次重启生效
@@ -347,6 +380,8 @@ export class DesktopRuntime {
       commentaryGenerator,
       hitsStore,
       dispositions: this.dispositions,
+      // R17：全量话题存档（unseen 循环顶部落档；基线/升级初始化轮早退不落）
+      topicArchive: this.topicArchive,
       onStatus: (s) => this.emitStatus(s),
       onHit: (h) => this.emitHit(h)
     })
@@ -573,6 +608,15 @@ export class DesktopRuntime {
       // flush 不再向上抛（失败返回 false）——退出路径只补一条日志
       console.error('[runtime] seen flush failed during shutdown')
     }
+    // R17 评审修复：话题存档的串行写队列也排空——append 队列尾部丢失 = 该帖
+    // 永久丢（去重键已入集挡住重录）。flush 永不 reject，防御性兜底只 log，
+    // 不阻塞退出（备份导入的 pendingRestart 不影响它：topics 是追加型队列，
+    // 不存在 seen 那种"内存集覆盖导入件"的冲写问题）。
+    try {
+      await this.topicArchive.flush()
+    } catch (err) {
+      console.error(`[runtime] topics archive flush failed during shutdown: ${describe(err)}`)
+    }
     this.siteClient.close()
     this.tgClient.close()
     this.aiClient.close()
@@ -658,7 +702,11 @@ export class DesktopRuntime {
     return out
   }
 
-  /** 日报自循环定时器（D5）：执行后按 nextCheckAt 重排；sleep ∈ [60s, 30min] */
+  /**
+   * 报告自循环定时器（D5 + R17 双服务）：执行后按 min(日报, 分类报告) 的
+   * nextCheckAt 重排；sleep ∈ [60s, 30min]。分类报告全关时其 nextCheckAt 为
+   * Infinity，min 自然退化为日报单服务节奏。
+   */
   private startReportTimer(): void {
     if (this.reportTimer !== null || this.shutdownStarted) return
     const schedule = (): void => {
@@ -669,14 +717,20 @@ export class DesktopRuntime {
       }
       const sleep = Math.min(
         REPORT_TIMER_MAX_SLEEP_MS,
-        Math.max(REPORT_TIMER_MIN_SLEEP_MS, this.reportService.nextCheckAt() - Date.now())
+        Math.max(
+          REPORT_TIMER_MIN_SLEEP_MS,
+          Math.min(
+            this.reportService.nextCheckAt(),
+            this.categoryReportService.nextCheckAt()
+          ) - Date.now()
+        )
       )
       this.reportTimer = setTimeout(() => {
         void this.runReportTick().finally(schedule)
       }, sleep)
     }
     schedule()
-    this.logger.info('daily report timer started')
+    this.logger.info('report timer started (daily hits + category reports)')
   }
 
   private stopReportTimer(): void {
@@ -686,7 +740,10 @@ export class DesktopRuntime {
     }
   }
 
-  /** 单次 tick（desired 从 engine 实时快照取；tick 自身条件不满足时是 no-op） */
+  /**
+   * 单次 tick（desired 从 engine 实时快照取；tick 自身条件不满足时是 no-op）。
+   * 依次 await 两个服务（日报在前）；单服务失败只 log，不影响另一个。
+   */
   private async runReportTick(): Promise<void> {
     const desiredRunning = this.engine.getStatus().desired === 'running'
     try {
@@ -695,6 +752,13 @@ export class DesktopRuntime {
     } catch (err) {
       // generate 失败（文件写失败等）：attempts 上限兜底，定时器继续跑
       this.logger.error(`daily report tick failed: ${describe(err)}`)
+    }
+    try {
+      const ran = await this.categoryReportService.tick(desiredRunning)
+      if (ran) this.logger.info('category report generated by timer tick')
+    } catch (err) {
+      // 单档失败不拖累其他档（tick 内逐档独立判定；文件写失败向上抛到这里消化）
+      this.logger.error(`category report tick failed: ${describe(err)}`)
     }
   }
 

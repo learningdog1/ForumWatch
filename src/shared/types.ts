@@ -77,6 +77,17 @@
  * - 未决帖轮次上限（引擎常量 5 轮）：超限按「降级字面判定」收口（镜像
  *   Provider 未配置的整体降级语义）——命中即推、未中入 seen，防未决帖
  *   无限重评与滚出首页静默丢失。
+ *
+ * R17 变更（2026-09-21，分类阶段报告 Stage A）：
+ * - 新增 TopicRecord（全量话题存档行，<userData>/topics/YYYY-MM-DD.jsonl）：
+ *   engine 在 unseen 循环顶部把每个观察到的新帖（不论命中/被滤/置顶/被排除）
+ *   落档一次——分类报告的数据底座，与 HitRecord（仅命中）/disposition（仅 7 天
+ *   观测）互补。**加法类型，不改既有形状**。
+ * - AiConfig 增加 categoryReport: CategoryReportConfig（分类日/周/月报开关，
+ *   **enabled 一律默认 false**——对齐 dailyReport 先例，老用户升级不突增推送；
+ *   周报固定周一生成上一完整周、月报固定 1 日生成上一自然月，不设 weekday
+ *   配置）。**加法字段，不 bump schemaVersion**（R13 先例）：盘上兼容由
+ *   load 的 merge DEFAULT + sanitize 兜底，migrations.ts 零改动。
  */
 
 /** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
@@ -198,6 +209,52 @@ export interface AiProviderConfig {
 /** 匹配模式：仅字面 / 仅语义 / 两者叠加（literal OR semantic） */
 export type MatchMode = 'literal' | 'semantic' | 'both'
 
+/**
+ * 分类阶段报告配置（R17）：按分类（默认情报/交易/测评）对**全量话题存档**
+ * （topics/*.jsonl，见 TopicRecord）做日/周/月三档 AI 总结。
+ *
+ * - 与 ai.dailyReport **并存不替代**：日报=命中监控报告（数据面 hits/，监控
+ *   视角）；本报告=分类行情报告（数据面 topics/ 存档，行情视角）。开关、
+ *   文件、数据底座全部独立。
+ * - enabled 一律 `=== true` 才开（默认全关）——对齐 dailyReport 先例，老用户
+ *   升级不突增推送；timeHHMM 默认错峰（22:30 / 08:00 / 08:30）避免与现有
+ *   日报 22:00 同刻争 LLM。
+ * - 周报固定**周一**生成上一完整周（周一~周日）；月报固定**每月 1 日**生成
+ *   上一自然月——生成期恒为"刚结束的那个完整周期"，不设 weekday 配置
+ *   （无语义增益只增边界）。
+ * - 目标时刻过后的当期内补做语义：文件缺失且 attempts 未耗尽仍触发（睡过头
+ *   的机器次日凌晨仍补做上月月报），见 category-report.ts 的 tick。
+ */
+export interface CategoryReportConfig {
+  /** 功能总开关（三档总闸；false 时到点不生成不消耗 attempts） */
+  enabled: boolean
+  /**
+   * 参与统计的来源 id（须存在于 sources，悬挂由 sanitize 剔除）。
+   * **空 = 不按来源过滤（全部来源）**——sanitize 不回退 nodeseek（对只配
+   * RSS/V2EX 的用户，回退是悬挂 id，报告恒零帖）；查询侧同样把空当不过滤。
+   */
+  sourceIds: string[]
+  /** 参与统计的分类（匹配显示名或 slug，大小写不敏感；上限 10） */
+  categories: string[]
+  /** 报告文件是否附「附录·全量帖子清单」（推送恒不带附录，防月报刷屏） */
+  appendix: boolean
+  daily: {
+    enabled: boolean
+    /** 'HH:MM' 本地时区（生成当天报告的目标时刻） */
+    timeHHMM: string
+  }
+  weekly: {
+    enabled: boolean
+    /** 'HH:MM' 本地时区（周一生成上一完整周的目标时刻） */
+    timeHHMM: string
+  }
+  monthly: {
+    enabled: boolean
+    /** 'HH:MM' 本地时区（每月 1 日生成上一自然月的目标时刻） */
+    timeHHMM: string
+  }
+}
+
 export interface AiConfig {
   provider: AiProviderConfig
   matchMode: MatchMode
@@ -250,6 +307,11 @@ export interface AiConfig {
   evaluation: {
     useThinking: boolean
   }
+  /**
+   * 分类阶段报告（R17）：见 CategoryReportConfig。加法字段不 bump
+   * schemaVersion（R13 先例）；旧配置缺失 → sanitize 补全默认段（全关）。
+   */
+  categoryReport: CategoryReportConfig
 }
 
 /** 价格周期 */
@@ -302,6 +364,49 @@ export interface Topic {
    * （telegram 的 📄 摘要行）按缺省省略。
    */
   excerpt?: string
+}
+
+/**
+ * 全量话题存档行（R17 分类报告的数据底座）：engine 在 unseen 处理链（W3 旧帖
+ * 判定之后）把每个观察到的新帖（命中/未中/被滤/置顶/被排除**全部**；被 id 阈值
+ * 吞并的回复顶起旧帖除外——unseen ≠ 新发帖）落档一次，存
+ * `<userData>/topics/YYYY-MM-DD.jsonl`（本地时区日分桶，35 天保留）。
+ *
+ * 与 Topic 的关系：Topic 是**单轮页面快照**（每轮重复出现），TopicRecord 是
+ * **首次观察的存档事实**（键 `${sourceId}:${topicId}` 进程内/跨重启只落一行，
+ * 读侧再按 key 去重首见优先兜底 seen 环淘汰后的重档）。lastActiveAt/excerpt
+ * 等 Topic 可选/可空字段在此保持同款形态；firstSeenAt 是存档时刻（ISO），
+ * 报告附录的 HH:MM 展示以它为准（lastActiveAt 是最后回复时间，非观察时刻）。
+ */
+export interface TopicRecord {
+  /** 全局去重键 `${sourceId}:${topicId}`（engine seenKeyFor 同口径） */
+  key: string
+  sourceId: string
+  topicId: string
+  title: string
+  url: string
+  author: string
+  /** 分类显示名（如 "交易"）；来源解析失败时可能为空串 */
+  category: string
+  /** 分类 slug（如 "trade"） */
+  categorySlug: string
+  /** 置顶标记（置顶=旧帖，随档落存；报告侧默认排除并注明） */
+  pinned: boolean
+  /** 最近活跃时间（ISO，来自页面；可能为 null——沿用 Topic 的可空语义） */
+  lastActiveAt: string | null
+  /** 摘要（可选：RSS/V2EX 来源有，nodeseek 列表页没有；与 Topic.excerpt 同款约定） */
+  excerpt?: string
+  /** 首次被引擎观察到的时刻（ISO，存档写入时刻） */
+  firstSeenAt: string
+  /**
+   * 归属本地日 'YYYY-MM-DD'（R17 评审修复：**写入时刻已固化的本地时区日**，
+   * formatLocalDate 口径）。**可选**：早期行没有此字段，消费方必须容忍缺失
+   * （等价"按 firstSeenAt 重算"，与 matchedRule 等可选字段同款约定）；新写入
+   * 的记录一律给值。读取/统计侧优先用本字段（dayOfRecord）——写入后系统改
+   * 时区时，历史记录不会按新时区重算进别的日桶（日桶文件名按写入时 TZ 定，
+   * 统计若按读取时 TZ 重算会与之漂移）。
+   */
+  day?: string
 }
 
 /** 命中记录：一个新帖命中（字面、语义、价格规则或来源级全匹配）并（尝试）推送 */
@@ -538,7 +643,17 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     semanticUndecidedTimeoutMin: 30,
     dailyReport: { enabled: false, timeHHMM: '22:00' },
     commentary: { enabled: true, useThinking: false },
-    evaluation: { useThinking: false }
+    evaluation: { useThinking: false },
+    // R17 分类阶段报告：全关（老用户升级不突增推送），时刻错峰避让日报 22:00
+    categoryReport: {
+      enabled: false,
+      sourceIds: ['nodeseek'],
+      categories: ['情报', '交易', '测评'],
+      appendix: true,
+      daily: { enabled: false, timeHHMM: '22:30' },
+      weekly: { enabled: false, timeHHMM: '08:00' },
+      monthly: { enabled: false, timeHHMM: '08:30' }
+    }
   }
 }
 

@@ -1182,6 +1182,115 @@ describe('sanitizeConfig', () => {
       dailyReport: { enabled: false, timeHHMM: '22:00' }
     })
   })
+
+  it('ai.categoryReport 缺失/段损坏：sanitize 回全默认段（enabled 全关，无损升级兜底）', () => {
+    // R17 前的 v4 配置：ai 段没有 categoryReport 字段
+    const legacyAi = {
+      provider: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk', model: 'm' },
+      matchMode: 'literal',
+      interests: [],
+      dailyReport: { enabled: false, timeHHMM: '22:00' }
+    }
+    const out = sanitizeConfig(cfg({ ai: legacyAi as unknown as AppConfig['ai'] }))
+    expect(out.ai.categoryReport).toEqual(DEFAULT_APP_CONFIG.ai.categoryReport)
+    // 段在但非对象：同样回默认
+    const broken = sanitizeConfig(
+      cfg({ ai: { ...cfg().ai, categoryReport: 'junk' as unknown as never } })
+    )
+    expect(broken.ai.categoryReport).toEqual(DEFAULT_APP_CONFIG.ai.categoryReport)
+  })
+
+  it('ai.categoryReport：enabled 强制布尔；sourceIds 悬挂剔除/去重；清洗后空 = 不过滤（不回退 nodeseek）', () => {
+    const base = cfg({
+      sources: [
+        { id: 'nodeseek', type: 'nodeseek', enabled: true },
+        { id: 'v2ex', type: 'v2ex', enabled: true }
+      ]
+    })
+    const out = sanitizeConfig(
+      cfg({
+        ...base,
+        ai: {
+          ...base.ai,
+          categoryReport: {
+            enabled: 1 as unknown as boolean,
+            sourceIds: ['nodeseek', 'v2ex', 'ghost', 'nodeseek', ' ', 42 as unknown as string],
+            categories: ['情报', '交易', '测评']
+          } as unknown as AppConfig['ai']['categoryReport']
+        }
+      })
+    )
+    const cr = out.ai.categoryReport
+    expect(cr.enabled).toBe(false) // === true 才开
+    expect(cr.sourceIds).toEqual(['nodeseek', 'v2ex']) // 悬挂 ghost 剔除、去重、空/非串剔除
+    // 全部悬挂 → 清洗后为空：空 = 不按来源过滤（全部来源）——不再回退 ['nodeseek']
+    //（对只配 RSS/V2EX 的用户，回退是悬挂 id，报告恒零帖；查询侧同口径把空当不过滤）
+    const emptied = sanitizeConfig(
+      cfg({
+        ...base,
+        ai: {
+          ...base.ai,
+          categoryReport: { sourceIds: ['ghost1', 'ghost2'] } as unknown as AppConfig['ai']['categoryReport']
+        }
+      })
+    )
+    expect(emptied.ai.categoryReport.sourceIds).toEqual([])
+    // 显式空数组同样保持空
+    const explicitEmpty = sanitizeConfig(
+      cfg({
+        ...base,
+        ai: {
+          ...base.ai,
+          categoryReport: { sourceIds: [] } as unknown as AppConfig['ai']['categoryReport']
+        }
+      })
+    )
+    expect(explicitEmpty.ai.categoryReport.sourceIds).toEqual([])
+  })
+
+  it('ai.categoryReport：categories trim/去重/上限 10、空回默认三分类；appendix 缺省 true', () => {
+    const mk = (categories: unknown) =>
+      sanitizeConfig(
+        cfg({ ai: { ...cfg().ai, categoryReport: { categories } as never } })
+      ).ai.categoryReport
+    expect(mk([' 情报 ', '交易', '交易', '', '测评', 'new1']).categories).toEqual([
+      '情报',
+      '交易',
+      '测评',
+      'new1'
+    ])
+    // 空（全空串/非数组）→ 默认三分类
+    expect(mk(['  ', '']).categories).toEqual(['情报', '交易', '测评'])
+    expect(mk(undefined).categories).toEqual(['情报', '交易', '测评'])
+    // 超上限截断到 10
+    expect(mk(Array.from({ length: 15 }, (_, i) => `c${i}`)).categories).toHaveLength(10)
+    // appendix：缺省 true、显式 false 保留、非法（字符串）回 true
+    const t = (appendix: unknown) =>
+      sanitizeConfig(
+        cfg({ ai: { ...cfg().ai, categoryReport: { appendix } as never } })
+      ).ai.categoryReport.appendix
+    expect(t(undefined)).toBe(true)
+    expect(t(false)).toBe(false)
+    expect(t('no' as unknown as boolean)).toBe(true)
+  })
+
+  it('ai.categoryReport：三档 enabled 强制布尔；timeHHMM 非法分别回档默认（22:30/08:00/08:30）', () => {
+    const out = sanitizeConfig(
+      cfg({
+        ai: {
+          ...cfg().ai,
+          categoryReport: {
+            daily: { enabled: true, timeHHMM: '24:00' },
+            weekly: { enabled: 1 as unknown as boolean, timeHHMM: 'ok' },
+            monthly: { enabled: true, timeHHMM: '08:30' }
+          } as unknown as AppConfig['ai']['categoryReport']
+        }
+      })
+    ).ai.categoryReport
+    expect(out.daily).toEqual({ enabled: true, timeHHMM: '22:30' })
+    expect(out.weekly).toEqual({ enabled: false, timeHHMM: '08:00' })
+    expect(out.monthly).toEqual({ enabled: true, timeHHMM: '08:30' }) // 合法保留
+  })
 })
 
 describe('ConfigStore', () => {
@@ -1437,6 +1546,42 @@ describe('ConfigStore', () => {
     expect(loaded.ai.evaluation).toEqual({ useThinking: false }) // R15 新增字段缺失 → 直出模式
     expect(loaded.ai.matchMode).toBe('semantic')
     expect(loaded.ai.provider.model).toBe('m')
+  })
+
+  it('盘上 v4 config（ai 段无 categoryReport，R17 前）：load 后补全默认段（无损升级）', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 4,
+        config: {
+          pollIntervalSec: 45,
+          ai: {
+            provider: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk', model: 'm' },
+            matchMode: 'literal',
+            interests: [],
+            semanticThreshold: 0,
+            semanticUndecidedTimeoutMin: 30,
+            dailyReport: { enabled: true, timeHHMM: '09:30' },
+            commentary: { enabled: true, useThinking: false },
+            evaluation: { useThinking: false }
+          }
+        }
+      }),
+      'utf-8'
+    )
+    const loaded = new ConfigStore(configPath).load()
+    // R17 新增段缺失 → 全默认（enabled 全关，老用户升级不突增推送）
+    expect(loaded.ai.categoryReport).toEqual(DEFAULT_APP_CONFIG.ai.categoryReport)
+    expect(loaded.ai.categoryReport.enabled).toBe(false)
+    // 既有字段不受影响
+    expect(loaded.pollIntervalSec).toBe(45)
+    expect(loaded.ai.dailyReport).toEqual({ enabled: true, timeHHMM: '09:30' })
+    // save 后落盘持久化（下次 load 直接读到完整段）
+    const store = new ConfigStore(configPath)
+    store.load()
+    store.save(store.get())
+    const raw = JSON.parse(await readFile(configPath, 'utf-8'))
+    expect(raw.config.ai.categoryReport).toEqual(DEFAULT_APP_CONFIG.ai.categoryReport)
   })
 
   it('旧 v3 盘上 config（无第五轮新字段）：load 后补默认——priceRules=[]、similarity 默认开、semanticThreshold=0', async () => {

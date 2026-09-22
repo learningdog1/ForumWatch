@@ -1,11 +1,12 @@
 /**
  * 主进程侧 IPC（契约见 src/shared/ipc.ts）：
- * - createBroadcaster：主→渲染事件推送（evStatus / evHit / evLog / evDailyReport），
- *   面向所有存活 webContents 广播，destroyed 的窗口跳过；日志逐条推（内核日志低频，
- *   每轮轮询 1-2 条，无需批量节流），历史用 logs:get 拉全量。
+ * - createBroadcaster：主→渲染事件推送（evStatus / evHit / evLog / evDailyReport /
+ *   evCategoryReport），面向所有存活 webContents 广播，destroyed 的窗口跳过；日志逐条推
+ *   （内核日志低频，每轮轮询 1-2 条，无需批量节流），历史用 logs:get 拉全量。
  * - registerIpcHandlers：invoke handler 注册（getConfig / saveConfig / getStatus /
  *   getHits / getLogs / engineControl / openExternal / testAiProvider /
- *   getDailyReport / generateDailyReport / listDailyReports / dispositionsRecent /
+ *   getDailyReport / generateDailyReport / listDailyReports / getCategoryReport /
+ *   generateCategoryReport / listCategoryReports / dispositionsRecent /
  *   dispositionsDay / queryHits / getStats / hitFeedback / checkUpdate /
  *   getUpdateStatus / exportBackup / importBackup），失败一律收敛为返回值，
  *   绝不向渲染进程抛异常。
@@ -38,6 +39,10 @@ import {
   type AiTestResult,
   type BackupExportResult,
   type BackupImportResult,
+  type CategoryReportGenerateResult,
+  type CategoryReportInfo,
+  type CategoryReportKind,
+  type CategoryReportListResult,
   type DailyReportListResult,
   type EngineControlResult,
   type HitFeedbackResult,
@@ -65,9 +70,11 @@ import { resolveSourceMatching } from '../monitor/matching'
 import { computeStats } from '../monitor/stats'
 import { normalizeTitle } from '../monitor/similarity'
 import { runMatchTest, type SemanticTestInput } from '../monitor/testbench'
+import { periodFor } from '../ai/category-report'
 import { UpdateChecker, UPDATE_REPO } from './update-check'
 import { packBackup, restorePlan, unpackBackup } from '../backup'
 import type { FetchLike } from '../net/http-types'
+import type { CategoryReportEvent } from '../../shared/ipc'
 
 /** 主→渲染事件推送接口（runtime 把 engine onStatus/onHit / 日报广播转发给它） */
 export interface EventBroadcaster {
@@ -76,6 +83,8 @@ export interface EventBroadcaster {
   log(e: LogEntry): void
   /** 日报生成完成时推送（DailyReportInfo） */
   report(r: DailyReportInfo): void
+  /** 分类阶段报告生成完成时推送（CategoryReportEvent，R17 三档共用） */
+  categoryReport(r: CategoryReportEvent): void
 }
 
 export function createBroadcaster(): EventBroadcaster {
@@ -98,7 +107,8 @@ export function createBroadcaster(): EventBroadcaster {
     status: (s) => broadcast(IPC.evStatus, s),
     hit: (h) => broadcast(IPC.evHit, h),
     log: (e) => broadcast(IPC.evLog, e),
-    report: (r) => broadcast(IPC.evDailyReport, r)
+    report: (r) => broadcast(IPC.evDailyReport, r),
+    categoryReport: (r) => broadcast(IPC.evCategoryReport, r)
   }
 }
 
@@ -240,6 +250,66 @@ export function registerIpcHandlers(rt: DesktopRuntime, bc: EventBroadcaster): v
   /** invoke() → { dates: string[] }：已有日报的日期列表（新→旧，读 reports/ 目录） */
   ipcMain.handle(IPC.listDailyReports, (): DailyReportListResult => ({
     dates: rt.reportService.listReportDays()
+  }))
+
+  // ---- 分类阶段报告（R17：日/周/月三档分类行情总结） --------------------------
+
+  /**
+   * 分类报告 kind 白名单（渲染层传 unknown；closed enum 不认默认值之外的串）。
+   * 与内核 CATEGORY_REPORT_KINDS 同集合——shared 的 CategoryReportKind 不能被
+   * shared 反向 import 内核类型，运行时校验在此处收口。
+   */
+  const isCategoryKind = (v: unknown): v is CategoryReportKind =>
+    v === 'daily' || v === 'weekly' || v === 'monthly'
+
+  /** monthly 期键形状（'YYYY-MM'；getCategoryReport 的期键校验，防路径穿越） */
+  const MONTH_SHAPE_RE = /^\d{4}-\d{2}$/
+
+  /**
+   * invoke(kind, periodKey?) → CategoryReportInfo：periodKey 缺省/形状非法
+   * （daily/weekly 锚定 'YYYY-MM-DD'、monthly 锚定 'YYYY-MM'——periodKey 会拼进
+   * reports/category/ 读路径，不锚定即放行穿越）= 该档最新一期；一期都没有时
+   * periodKey=当前期（periodFor）、markdown=null。kind 非法按 'daily'（查询面不抛）。
+   */
+  ipcMain.handle(
+    IPC.getCategoryReport,
+    async (_event, kindArg: unknown, periodKeyArg?: unknown): Promise<CategoryReportInfo> => {
+      const kind = isCategoryKind(kindArg) ? kindArg : 'daily'
+      const shape = kind === 'monthly' ? MONTH_SHAPE_RE : DATE_SHAPE_RE
+      const explicit =
+        typeof periodKeyArg === 'string' && shape.test(periodKeyArg) ? periodKeyArg : undefined
+      const periods = rt.categoryReportService.listPeriods(kind)
+      const periodKey = explicit ?? periods[0] ?? periodFor(kind).periodKey
+      return { kind, periodKey, markdown: await rt.categoryReportService.loadReport(kind, periodKey) }
+    }
+  )
+
+  /**
+   * invoke(kind) → CategoryReportGenerateResult：手动生成该档当前期（跳过
+   * desired/attempts、覆盖重生成——generateDailyReport 同语义；推送条件在
+   * generate 内部按配置判定）。成功带期键与全文：期键在**调用 generate 之前**
+   * 按当前时刻算好（generate 内部读存档/调 LLM 可能耗时——恰跨本地午夜时，
+   * 返回值仍是发起时的期，与 onGenerated 广播的期键一致，不再事后重算漂移）。
+   */
+  ipcMain.handle(
+    IPC.generateCategoryReport,
+    async (_event, kindArg: unknown): Promise<CategoryReportGenerateResult> => {
+      if (!isCategoryKind(kindArg)) {
+        return { ok: false, error: `unknown report kind: ${String(kindArg)}` }
+      }
+      const periodKey = periodFor(kindArg).periodKey
+      try {
+        const markdown = await rt.categoryReportService.generate(kindArg)
+        return { ok: true, periodKey, markdown }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
+  /** invoke(kind) → { periods: string[] }：某档已有报告的期键列表（新→旧）；kind 非法按 'daily' */
+  ipcMain.handle(IPC.listCategoryReports, (_event, kindArg: unknown): CategoryReportListResult => ({
+    periods: rt.categoryReportService.listPeriods(isCategoryKind(kindArg) ? kindArg : 'daily')
   }))
 
   // ---- 处置流水（R7-W1"为什么没推送"观测面） -------------------------------

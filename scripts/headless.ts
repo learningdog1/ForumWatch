@@ -8,10 +8,10 @@
  *   npm run engine:headless -- --config ./data/headless         # 常驻直到 Ctrl-C
  *   npm run engine:headless -- --duration 600 --interval 30     # 跑 10 分钟，30s 一轮
  *
- * 目录结构 `<dir>/{config.json, seen.json, state.json, hits/, pipeline/, reports/,
- * logs/, feedback.json}`；首次运行生成默认 config.json（chmod 600 由 ConfigStore
- * 保证）并提示填写关键词与 telegram。环境变量 `NSM_BOT_TOKEN` / `NSM_CHAT_ID`
- * 可快速注入 telegram 凭据（只进内存不落盘）。
+ * 目录结构 `<dir>/{config.json, seen.json, state.json, hits/, pipeline/, topics/,
+ * reports/, logs/, feedback.json}`；首次运行生成默认 config.json（chmod 600 由
+ * ConfigStore 保证）并提示填写关键词与 telegram。环境变量 `NSM_BOT_TOKEN` /
+ * `NSM_CHAT_ID` 可快速注入 telegram 凭据（只进内存不落盘）。
  *
  * Telegram 遥控（R9-W1，DEC-6）：常驻模式且 notify.remoteControl.enabled 时起
  * BotCommandController（getUpdates 长轮询接收 /status /pause /resume /poll /
@@ -22,17 +22,18 @@
  * （defaultTimeoutMs 30s，proxyScope='all' 时走代理）→ AiProvider /
  * SemanticEvaluator（R7-W4 起构造注入 FileFeedbackStore 的 recentForPrompt，
  * DEC-5 反馈进 system prompt）/ CommentGenerator / HitsStore /
- * DailyReportService（reportsDir=<dir>/reports）；engine deps 注入 evaluator +
- * commentaryGenerator + hitsStore。常驻模式起日报自循环定时器（sleep ∈
- * [60s, 30min]，复用 nextCheckAt）；`--once` 模式跳过日报（单轮冒烟不产文件、
- * 不推送）。
+ * DailyReportService（reportsDir=<dir>/reports）/ CategoryReportService（R17，
+ * reportsDir=<dir>/reports/category，读 TopicArchiveStore=<dir>/topics）；
+ * engine deps 注入 evaluator + commentaryGenerator + hitsStore + topicArchive。
+ * 常驻模式起报告自循环定时器（sleep ∈ [60s, 30min]，取日报与分类报告
+ * nextCheckAt 的 min）；`--once` 模式跳过两类报告（单轮冒烟不产文件、不推送）。
  *
  * Web 管理界面（Docker 部署，src/main/server/）：常驻模式 `--web [port]`
  * （缺省 8787；FW_WEB_PORT 同效）起 HTTP 服务器——托管渲染层构建产物
  * （FW_WEB_ROOT，缺省 ./out/renderer）+ /api/invoke（DesktopApi invoke 面，
  * api.ts 处理器表）+ /api/events（SSE 事件流）+ 备份导出/导入路由。事件源
- * （engine onStatus/onHit、logger.onLog、日报 onGenerated）经 webBroadcast
- * 槽位转发，无 Web 客户端时零开销。FW_WEB_TOKEN 设置后全部 /api/* 需令牌
+ * （engine onStatus/onHit、logger.onLog、日报/分类报告 onGenerated）经
+ * webBroadcast 槽位转发，无 Web 客户端时零开销。FW_WEB_TOKEN 设置后全部 /api/* 需令牌
  * （公网部署必须）。备份导入成功 → pendingRestart 置位 + 引擎暂停 +
  * shutdown 跳过 seen.flush（防内存旧集覆盖导入件），容器重启后生效。
  *
@@ -58,10 +59,12 @@ import { SemanticEvaluator } from '../src/main/ai/evaluator'
 import { FileFeedbackStore } from '../src/main/ai/feedback'
 import { CommentGenerator } from '../src/main/ai/commentary'
 import { DailyReportService } from '../src/main/ai/daily-report'
+import { CategoryReportService } from '../src/main/ai/category-report'
 import { FileSeenStore, seenCapacityForSources } from '../src/main/monitor/dedup'
 import { MonitorEngine } from '../src/main/monitor/engine'
 import { DispositionStore, PIPELINE_DIR_NAME } from '../src/main/monitor/dispositions'
 import { HitsStore, HITS_DIR_NAME } from '../src/main/monitor/hits-store'
+import { TopicArchiveStore, TOPICS_DIR_NAME } from '../src/main/monitor/topics-store'
 import { PollScheduler } from '../src/main/monitor/poller'
 import { HtmlSourceAdapter } from '../src/main/monitor/sources/html'
 import { RssSourceAdapter } from '../src/main/monitor/sources/rss'
@@ -481,6 +484,20 @@ async function main(): Promise<number | null> {
     // --web：生成完成的 SSE 广播（无 Web 时槽位为 null，零开销）
     onGenerated: (info) => webBroadcast?.(IPC.evDailyReport, info)
   })
+  // 分类阶段报告（R17，与桌面 runtime 同款）：全量存档读数 +
+  // <dir>/reports/category/ 落文件；推送走同一稳定壳；生成完成经
+  // onGenerated → webBroadcast 发 SSE 事件（与上方日报 evDailyReport 同款）
+  const topicArchive = new TopicArchiveStore({ dataDir: join(dir, TOPICS_DIR_NAME) })
+  const categoryReportService = new CategoryReportService({
+    provider: aiProvider,
+    archive: topicArchive,
+    notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+    getConfig: () => getEffective(),
+    logger,
+    reportsDir: join(dir, 'reports', 'category'),
+    // --web：生成完成的 SSE 广播（无 Web 时槽位为 null，零开销）
+    onGenerated: (info) => webBroadcast?.(IPC.evCategoryReport, info)
+  })
 
   const seen = new FileSeenStore(
     join(dir, 'seen.json'),
@@ -601,6 +618,8 @@ async function main(): Promise<number | null> {
     commentaryGenerator,
     hitsStore,
     dispositions,
+    // R17：全量话题存档（unseen 循环顶部落档；--once 基线轮不落）
+    topicArchive,
     onStatus: (s: EngineStatus) => {
       printStatus(s)
       webBroadcast?.(IPC.evStatus, s)
@@ -690,6 +709,7 @@ async function main(): Promise<number | null> {
       aiProvider,
       semanticEvaluator: evaluator,
       reportService,
+      categoryReportService,
       hitsStore,
       dispositions,
       feedbackStore,
@@ -729,31 +749,51 @@ async function main(): Promise<number | null> {
   const watcher: ConfigDirWatcher = watchConfigDir(dir, onConfigDirChanged)
   logger.info(`config watch started (dir=${dir}, edit ${configPath} to hot-reload)`)
 
-  // 日报自循环定时器（D5，与桌面 runtime 同款）：sleep = clamp(nextCheckAt-now, 60s, 30min)
+  // 报告自循环定时器（D5 + R17 双服务，与桌面 runtime 同款）：
+  // sleep = clamp(min(日报, 分类报告).nextCheckAt - now, 60s, 30min)；
+  // 到点依次 await 两个 service.tick；分类报告全关时其 nextCheckAt=Infinity，
+  // min 退化为日报单服务节奏。--once 单轮冒烟不走到这里（早退）。
   let reportTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
   const scheduleReportTimer = (): void => {
     if (stopped) return
     const sleep = Math.min(
       30 * 60_000,
-      Math.max(60_000, reportService.nextCheckAt() - Date.now())
+      Math.max(
+        60_000,
+        Math.min(reportService.nextCheckAt(), categoryReportService.nextCheckAt()) - Date.now()
+      )
     )
     reportTimer = setTimeout(() => {
+      const desiredRunning = engine.getStatus().desired === 'running'
       void reportService
-        .tick(engine.getStatus().desired === 'running')
+        .tick(desiredRunning)
         .then((ran) => {
           if (ran) logger.info('daily report generated by timer tick')
         })
         .catch((err: unknown) => {
           logger.error(`daily report tick failed: ${err instanceof Error ? err.message : String(err)}`)
         })
+        .then(() => categoryReportService.tick(desiredRunning))
+        .then((ran) => {
+          if (ran) logger.info('category report generated by timer tick')
+        })
+        .catch((err: unknown) => {
+          logger.error(
+            `category report tick failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
         .finally(scheduleReportTimer)
     }, sleep)
   }
   scheduleReportTimer()
   logger.info(
-    `daily report timer started (timeHHMM=${getEffective().ai.dailyReport.timeHHMM} ` +
-      `enabled=${getEffective().ai.dailyReport.enabled})`
+    `report timer started (daily timeHHMM=${getEffective().ai.dailyReport.timeHHMM} ` +
+      `enabled=${getEffective().ai.dailyReport.enabled}; category ` +
+      `enabled=${getEffective().ai.categoryReport.enabled} daily/weekly/monthly=` +
+      `${getEffective().ai.categoryReport.daily.enabled}/` +
+      `${getEffective().ai.categoryReport.weekly.enabled}/` +
+      `${getEffective().ai.categoryReport.monthly.enabled})`
   )
 
   const shutdown = (reason: string): void => {
@@ -770,6 +810,13 @@ async function main(): Promise<number | null> {
         // 冲掉它——跳过（桌面 beginPendingRestart 同款语义），重启后空集/导入件生效
         if (!pendingRestart) await seen.flush()
       } finally {
+        // R17 评审修复：话题存档写队列也排空（追加型，不受 pendingRestart 影响；
+        // 队列尾部丢失 = 该帖永久丢——去重键已入集挡住重录）。失败只 log 不阻塞退出
+        try {
+          await topicArchive.flush()
+        } catch (err) {
+          console.error('topics archive flush failed during shutdown:', err)
+        }
         webBroadcast = null
         void webServer?.close()
         clients.site.close()

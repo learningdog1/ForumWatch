@@ -7,6 +7,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import {
   IPC,
+  type CategoryReportEvent,
+  type CategoryReportKind,
   type DesktopApi,
   type HitFeedbackRequest,
   type HitQueryOptions,
@@ -37,6 +39,12 @@ const api: DesktopApi = {
   getDailyReport: (dateLocal) => ipcRenderer.invoke(IPC.getDailyReport, dateLocal),
   generateDailyReport: () => ipcRenderer.invoke(IPC.generateDailyReport),
   listDailyReports: () => ipcRenderer.invoke(IPC.listDailyReports),
+  // 分类阶段报告（R17）：三档查询 / 手动生成当前期（覆盖重生成）/ 期键列表
+  getCategoryReport: (kind: CategoryReportKind, periodKey?: string) =>
+    ipcRenderer.invoke(IPC.getCategoryReport, kind, periodKey),
+  generateCategoryReport: (kind: CategoryReportKind) =>
+    ipcRenderer.invoke(IPC.generateCategoryReport, kind),
+  listCategoryReports: (kind: CategoryReportKind) => ipcRenderer.invoke(IPC.listCategoryReports, kind),
   // 匹配测试台（R5-P2c）：主进程按已保存配置跑判定管线，返回逐阶段 trace
   matchTest: (req: MatchTestRequest) => ipcRenderer.invoke(IPC.matchTest, req),
   // 处置流水（R7-W1）：最近 200 条内存环 / 某本地日的持久化记录（旧→新）
@@ -57,7 +65,8 @@ const api: DesktopApi = {
   onStatus: (callback) => subscribe<EngineStatus>(IPC.evStatus, callback),
   onHit: (callback) => subscribe<HitRecord>(IPC.evHit, callback),
   onLog: (callback) => subscribe<LogEntry>(IPC.evLog, callback),
-  onDailyReport: (callback) => subscribe<DailyReportInfo>(IPC.evDailyReport, callback)
+  onDailyReport: (callback) => subscribe<DailyReportInfo>(IPC.evDailyReport, callback),
+  onCategoryReport: (callback) => subscribe<CategoryReportEvent>(IPC.evCategoryReport, callback)
 }
 
 contextBridge.exposeInMainWorld('api', api)

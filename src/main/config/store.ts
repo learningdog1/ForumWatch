@@ -26,6 +26,7 @@ import {
   DEFAULT_APP_CONFIG,
   type AppConfig,
   type AiConfig,
+  type CategoryReportConfig,
   type ChannelConfig,
   type MatchMode,
   type NodeseekSourceConfig,
@@ -69,6 +70,12 @@ const AI_INTERESTS_MAX_CHARS = 500
 /** timeHHMM 非法时的回退值 */
 const DEFAULT_REPORT_TIME_HHMM = '22:00'
 const TIME_HHMM_RE = /^\d{2}:\d{2}$/
+/** 分类报告三档 timeHHMM 非法时的回退值（R17，与 DEFAULT_APP_CONFIG 对齐） */
+const DEFAULT_CATEGORY_DAILY_HHMM = '22:30'
+const DEFAULT_CATEGORY_WEEKLY_HHMM = '08:00'
+const DEFAULT_CATEGORY_MONTHLY_HHMM = '08:30'
+/** 分类报告 categories 条数上限（R17；超出截断） */
+const CATEGORY_REPORT_MAX_CATEGORIES = 10
 /** sources / priceRules 的 id 只允许 slug 字符（与去重键前缀、状态键一致），其余替换为 '-' */
 const SOURCE_ID_ILLEGAL_RE = /[^\w-]/g
 /** per-source filters 每个列表的条数上限（超出截断，对齐 includeKeywords 清洗风格） */
@@ -146,7 +153,10 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.72
  *   去空、单条 ≤500 字符截断、最多 20 条；`semanticThreshold` 非法回 0（默认 =
  *   行为不变）、钳到 [0,1]；`dailyReport.timeHHMM` 必须 HH:MM（时 0-23
  *   分 0-59）否则回 '22:00'，`enabled` 强制布尔；`commentary.enabled` 缺失/非法 →
- *   true（**默认开的布尔**之一，方向与其余布尔相反，见 sanitizeAi）。
+ *   true（**默认开的布尔**之一，方向与其余布尔相反，见 sanitizeAi）；
+ *   `categoryReport`（R17）走 sanitizeCategoryReport——旧配置缺失回全默认段
+ *   （enabled 全关）、sourceIds 悬挂剔除、categories 空/超上限处理、三档
+ *   timeHHMM 与 appendix（默认 true）清洗。
  */
 export function sanitizeConfig(cfg: AppConfig): AppConfig {
   const src = (typeof cfg === 'object' && cfg !== null ? cfg : {}) as Partial<AppConfig>
@@ -167,7 +177,7 @@ export function sanitizeConfig(cfg: AppConfig): AppConfig {
     sources,
     priceRules,
     similarity: sanitizeSimilarity(src.similarity),
-    ai: sanitizeAi(src.ai)
+    ai: sanitizeAi(src.ai, sources)
   }
 }
 
@@ -858,7 +868,7 @@ function clamp01(value: unknown, fallback: number, round2 = false): number {
   return round2 ? Math.round(clamped * 100) / 100 : clamped
 }
 
-function sanitizeAi(ai: AiConfig | undefined): AiConfig {
+function sanitizeAi(ai: AiConfig | undefined, sources: SourceConfig[]): AiConfig {
   return {
     provider: {
       baseUrl: sanitizeAiBaseUrl(ai?.provider?.baseUrl),
@@ -901,6 +911,90 @@ function sanitizeAi(ai: AiConfig | undefined): AiConfig {
     // 同款方向）——评估是短 JSON 判定任务，直出模式更快更稳
     evaluation: {
       useThinking: ai?.evaluation?.useThinking === true
+    },
+    // 分类阶段报告（R17）：加法字段，旧配置缺失 → 全默认段（全关）。
+    // sourceIds 悬挂剔除需要 sources 列表，故 sanitizeAi 多带一参
+    categoryReport: sanitizeCategoryReport(ai?.categoryReport, sources)
+  }
+}
+
+/**
+ * 分类阶段报告清洗（R17 契约，见 types.ts CategoryReportConfig）：
+ * - 非对象输入（含旧配置缺失）→ 全默认段（enabled 全关，对齐 dailyReport
+ *   先例——老用户升级不突增推送）。
+ * - enabled：`=== true`（三档各自同口径）。
+ * - sourceIds：只留存在于 sources 的 id（悬挂剔除，sanitizeRouting.when.sourceId
+ *   同先例）；trim/去空/去重；清洗后**空 = 不按来源过滤（全部来源）**——不回退
+ *   nodeseek（对只配 RSS/V2EX 的用户回退是悬挂 id，报告恒零帖；查询侧同口径
+ *   把空当不过滤）。
+ * - categories：复用 sanitizeFilterList 口径（trim、去空、大小写不敏感去重保留
+ *   首现写法）、上限 10（CATEGORY_REPORT_MAX_CATEGORIES）；清洗后空 → 回
+ *   默认三分类 ['情报','交易','测评']。
+ * - timeHHMM：复用 sanitizeTimeHHMM（daily 回 '22:30' / weekly '08:00' /
+ *   monthly '08:30'，与 DEFAULT_APP_CONFIG 对齐）。
+ * - appendix：`!== false` 默认 true（附录是防漏可验证性的核心，缺失不能静默关）。
+ */
+function sanitizeCategoryReport(
+  raw: unknown,
+  sources: SourceConfig[]
+): CategoryReportConfig {
+  // 段整体缺失/非对象 → 全默认段（enabled 全关 + sourceIds ['nodeseek'] …，
+  // 无损升级兜底）。注意与「段在但 sourceIds 清洗后为空」区分：后者是**用户
+  // 输入语义**——空 = 不过滤（全部来源），不再回退 nodeseek；段缺失则是"从没
+  // 配过"，回默认段（load 的浅合并下 ai 整段替换，缺失的子段走不到字段级清洗）。
+  if (typeof raw !== 'object' || raw === null) {
+    return structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport)
+  }
+  const cr = raw as {
+    enabled?: unknown
+    sourceIds?: unknown
+    categories?: unknown
+    appendix?: unknown
+    daily?: { enabled?: unknown; timeHHMM?: unknown }
+    weekly?: { enabled?: unknown; timeHHMM?: unknown }
+    monthly?: { enabled?: unknown; timeHHMM?: unknown }
+  }
+  const sourceIdsValid = new Set(sources.map((s) => s.id))
+  const rawSourceIds = Array.isArray(cr.sourceIds) ? cr.sourceIds : []
+  const sourceIds: string[] = []
+  for (const item of rawSourceIds) {
+    if (typeof item !== 'string') continue
+    const id = item.trim()
+    if (id.length === 0 || sourceIds.includes(id)) continue
+    if (!sourceIdsValid.has(id)) continue // 悬挂剔除
+    sourceIds.push(id)
+  }
+  const categories = sanitizeFilterList(cr.categories, CATEGORY_REPORT_MAX_CATEGORIES)
+  return {
+    enabled: cr.enabled === true,
+    // 空 = 不按来源过滤（全部来源）——**不回退 nodeseek**：对只配 RSS/V2EX 的
+    // 用户，回退是悬挂 id（查询恒零帖）；查询侧（category-report）把空当不过滤
+    sourceIds,
+    categories:
+      categories.length > 0
+        ? categories
+        : structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport.categories),
+    appendix: cr.appendix !== false,
+    daily: {
+      enabled: cr.daily?.enabled === true,
+      timeHHMM: sanitizeTimeHHMM(
+        cr.daily?.timeHHMM as string | undefined,
+        DEFAULT_CATEGORY_DAILY_HHMM
+      )
+    },
+    weekly: {
+      enabled: cr.weekly?.enabled === true,
+      timeHHMM: sanitizeTimeHHMM(
+        cr.weekly?.timeHHMM as string | undefined,
+        DEFAULT_CATEGORY_WEEKLY_HHMM
+      )
+    },
+    monthly: {
+      enabled: cr.monthly?.enabled === true,
+      timeHHMM: sanitizeTimeHHMM(
+        cr.monthly?.timeHHMM as string | undefined,
+        DEFAULT_CATEGORY_MONTHLY_HHMM
+      )
     }
   }
 }

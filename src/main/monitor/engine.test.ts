@@ -13,6 +13,7 @@ import {
   SIMILARITY_WINDOW_MS
 } from './engine'
 import { DispositionStore } from './dispositions'
+import { TopicArchiveStore } from './topics-store'
 import type { DispositionOutcome } from '../../shared/ipc'
 import { computeBackoffMs, PollScheduler } from './poller'
 import { FileSeenStore } from './dedup'
@@ -86,6 +87,8 @@ interface Harness {
   sources: SourceAdapter[]
   /** 处置流水（R7-W1）：build({dispositions: ...}) 注入时的 store 或 mock */
   dispositions?: DispositionStore | { record: Mock; prune?: Mock }
+  /** 全量话题存档（R17）：build({topicArchive: ...}) 注入时的 store 或 mock */
+  topicArchive?: TopicArchiveStore | { record: Mock }
 }
 
 function build(
@@ -113,6 +116,11 @@ function build(
      * DispositionStore（测 store 去重/迁移的集成面）；mock 对象 = 精确断言调用。
      */
     dispositions?: true | { record: Mock; prune?: Mock }
+    /**
+     * 全量话题存档（R17；缺省不注入 = 零行为）。'real' = 真 TopicArchiveStore
+     * 落本测试目录（跨轮/跨重启去重的集成面）；mock 对象 = 精确断言调用。
+     */
+    topicArchive?: 'real' | { record: Mock }
   } = {}
 ): Harness {
   const config: AppConfig = {
@@ -147,6 +155,13 @@ function build(
       : opts.dispositions === true
         ? new DispositionStore()
         : opts.dispositions
+  // R17：全量话题存档注入物（'real' = 真实 store 落 tmpdir topics/；mock = 断言面）
+  const topicArchive =
+    opts.topicArchive === undefined
+      ? undefined
+      : opts.topicArchive === 'real'
+        ? new TopicArchiveStore({ dataDir: join(dir, 'topics') })
+        : opts.topicArchive
 
   let engine!: MonitorEngine
   const scheduler = new PollScheduler({
@@ -184,7 +199,9 @@ function build(
       ? { commentaryGenerator: opts.commentaryGenerator }
       : {}),
     // R7-W1：处置流水可选注入（不注入 = 零行为）
-    ...(dispositions !== undefined ? { dispositions } : {})
+    ...(dispositions !== undefined ? { dispositions } : {}),
+    // R17：全量话题存档可选注入（不注入 = 零行为）
+    ...(topicArchive !== undefined ? { topicArchive } : {})
   })
 
   return {
@@ -202,7 +219,8 @@ function build(
     onHit,
     onStatus,
     sources,
-    ...(dispositions !== undefined ? { dispositions } : {})
+    ...(dispositions !== undefined ? { dispositions } : {}),
+    ...(topicArchive !== undefined ? { topicArchive } : {})
   }
 }
 
@@ -230,6 +248,7 @@ function aiSemanticConfig(overrides: Partial<AppConfig['ai']> = {}): AppConfig['
     evaluation: { useThinking: false },
     semanticThreshold: 0,
     semanticUndecidedTimeoutMin: 30,
+    categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
     ...overrides
   }
 }
@@ -990,6 +1009,7 @@ describe('语义评估管线（D4）', () => {
       evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
+      categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1274,6 +1294,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
       evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
+      categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1426,6 +1447,7 @@ describe('语义置信度阈值（R5-P2b：ai.semanticThreshold）', () => {
       evaluation: { useThinking: false },
       semanticThreshold: 0,
       semanticUndecidedTimeoutMin: 30,
+      categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1586,6 +1608,7 @@ describe('旧帖过滤（W3：新帖 vs 回复顶起旧帖，creationOrderedIds 
       evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
+      categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
       ...overrides
     }
   }
@@ -1934,6 +1957,7 @@ describe('AI 锐评集成（第三轮）', () => {
       evaluation: { useThinking: false },
       semanticThreshold: 0, // 第五轮新增必填字段：默认 0 = 行为不变（fixture 补齐编译）
       semanticUndecidedTimeoutMin: 30, // R15 新增必填字段：默认 30 分钟（fixture 补齐编译）
+      categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
       ...overrides
     }
   }
@@ -2437,6 +2461,7 @@ describe('per-source 匹配覆盖（R13：matching 覆盖五字段，未覆盖�
       evaluation: { useThinking: false },
       semanticThreshold: 0,
       semanticUndecidedTimeoutMin: 30,
+      categoryReport: structuredClone(DEFAULT_APP_CONFIG.ai.categoryReport), // R17 新增必填字段：默认全关（fixture 补齐编译）
       ...overrides
     }
   }
@@ -4259,5 +4284,150 @@ describe('处置流水插桩（R7-W1：dispositions record/prune 的分支出口
     const [keep2] = prune.mock.calls[1] as [Set<string>, Set<string>]
     expect(keep2.has('nodeseek:1')).toBe(true)
     expect(keep2.has('nodeseek:2')).toBe(true)
+  })
+})
+
+describe('全量话题存档（R17：deps.topicArchive 可选注入；不注入 = 零行为——上面全部用例即回归）', () => {
+  /** creationOrderedIds 来源（存量升级初始化轮用；同旧帖过滤 describe 的局部先例） */
+  function idOrderedSource(fetchLatest: Mock): SourceAdapter {
+    return { id: 'nodeseek', name: 'NodeSeek', creationOrderedIds: true, fetchLatest }
+  }
+
+  it('unseen 帖不论命中/未中/被滤/被排除/置顶均各落档一次；已 seen 的重现身不落', async () => {
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [],
+      topicArchive: { record },
+      getSourceFilters: () => ({ includeCategories: ['交易'] })
+    })
+    await h.engine.pollOnce() // 基线（空页）
+
+    // 页面最新在前；unseen 逆序处理 → record 调用序旧→新（1..5）
+    h.fetchLatest.mockImplementation(async () => [
+      topic('5', { title: '最新羊毛', category: '交易', categorySlug: 'trade' }), // literal 命中
+      topic('4', { title: '无关新帖', category: '交易', categorySlug: 'trade' }), // miss
+      topic('3', { title: '羊毛广告', category: '交易', categorySlug: 'trade' }), // 排除词否决
+      topic('2', { title: '羊毛置顶', pinned: true, category: '交易', categorySlug: 'trade' }), // 置顶
+      topic('1') // 默认「闲聊」→ per-source 过滤吞并
+    ])
+    await h.engine.pollOnce()
+    expect(record).toHaveBeenCalledTimes(5)
+    expect(record.mock.calls.map((c) => c[0].id)).toEqual(['1', '2', '3', '4', '5'])
+    // 记录形状：engine 传入已盖 sourceId 的 Topic + 当前时刻 Date
+    expect(record.mock.calls[0]![0]).toMatchObject({ id: '1', sourceId: 'nodeseek' })
+    expect(record.mock.calls[0]![1]).toBeInstanceOf(Date)
+
+    // 下一轮同页面：全部已 seen（不再进 unseen）→ 不再落
+    await h.engine.pollOnce()
+    expect(record).toHaveBeenCalledTimes(5)
+  })
+
+  it('基线轮与存量升级初始化轮不落档（首装/升级第一页旧帖不进存档）；下轮正常管线新帖落档', async () => {
+    const record = vi.fn()
+    // 基线轮：整页只入 seen
+    const h1 = build({
+      impl: async () => [topic('937071'), topic('937070')],
+      topicArchive: { record }
+    })
+    await h1.engine.pollOnce()
+    expect(record).not.toHaveBeenCalled()
+
+    // 存量升级初始化轮：baselineDone=true 且阈值 null → 循环前早退
+    const fetchLatest = vi.fn(async () => [topic('937071'), topic('937070')])
+    const h2 = build({
+      sources: [idOrderedSource(fetchLatest)],
+      preSeed: (_seen, state) => {
+        state.setFor('nodeseek', { baselineDone: true })
+      },
+      topicArchive: { record }
+    })
+    await h2.engine.pollOnce()
+    expect(record).not.toHaveBeenCalled()
+
+    // 下轮正常管线：新帖进 unseen 循环 → 落档
+    fetchLatest.mockImplementation(async () => [topic('937072'), topic('937070')])
+    await h2.engine.pollOnce()
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(record.mock.calls[0]![0].id).toBe('937072')
+  })
+
+  it('回复顶起的旧帖（id ≤ 阈值被吞并）不落档；同页新帖与被 per-source 过滤的新帖照常落档', async () => {
+    const record = vi.fn()
+    const fetchLatest = vi.fn(async () => [topic('100')] as Topic[])
+    const h = build({
+      sources: [idOrderedSource(fetchLatest)],
+      topicArchive: { record },
+      getSourceFilters: () => ({ includeCategories: ['交易'] })
+    })
+    await h.engine.pollOnce() // 基线：阈值同轮初始化为 100
+    // sources 自带 fetchLatest 时改写本地 mock（同处置流水 describe 的先例）
+
+    // 下轮混入被回复顶回首页的旧帖 80（从未入 seen、标题可命中）+ 被滤新帖 101
+    // + 命中新帖 102
+    fetchLatest.mockImplementation(async () => [
+      topic('102', { title: '羊毛新帖', category: '交易', categorySlug: 'trade' }),
+      topic('101', { title: '新帖但被滤' }), // 默认「闲聊」→ per-source 过滤吞并
+      topic('80', { title: '羊毛旧帖被顶起', category: '交易', categorySlug: 'trade' })
+    ])
+    await h.engine.pollOnce()
+
+    // 旧帖 80 走的是吞并分支（入 seen 不推送），不是没进 unseen——但**不落档**
+    expect(h.seen.has('nodeseek:80')).toBe(true)
+    expect(h.sendHit).toHaveBeenCalledTimes(1) // 仅 102 命中推送
+    expect(h.sendHit.mock.calls[0]![0].topic.id).toBe('102')
+    // 落档的只有两条新帖（逆序处理 → 旧→新）；被滤新帖 101 仍落档（推送过滤
+    // 与报告口径互不影响），被顶起旧帖 80 不在其中
+    expect(record).toHaveBeenCalledTimes(2)
+    expect(record.mock.calls.map((c) => c[0].id)).toEqual(['101', '102'])
+  })
+
+  it('挂起帖重入（deferred-skip 分支）不重复落档：首轮进入 unseen 时已落', async () => {
+    vi.setSystemTime(new Date(2026, 8, 10, 23, 30, 0, 0)) // 免打扰窗内
+    const record = vi.fn()
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { notify: quietOn() },
+      topicArchive: { record }
+    })
+    await h.engine.pollOnce() // 基线
+
+    h.fetchLatest.mockImplementation(async () => [topic('2', { title: '羊毛' }), topic('1')])
+    await h.engine.pollOnce() // 命中挂起（unseen 循环顶部已落一次）
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(record.mock.calls[0]![0].id).toBe('2')
+
+    await h.engine.pollOnce() // 仍在挂起队列：deferred-skip 在 record 之前 continue
+    expect(record).toHaveBeenCalledTimes(1)
+  })
+
+  it('语义未决多轮重评不重复落档（真 TopicArchiveStore：同键只落一行）', async () => {
+    const evaluate = vi.fn(async () => new Map<string, SemanticVerdict>()) // 恒未决
+    const h = build({
+      impl: async () => [],
+      evaluator: { evaluate },
+      config: { ai: aiSemanticConfig() },
+      topicArchive: 'real'
+    })
+    await h.engine.pollOnce() // 基线（空页）
+
+    h.fetchLatest.mockImplementation(async () => [topic('2')])
+    await h.engine.pollOnce() // 首评未决：不入 seen，已落档
+    h.fetchLatest.mockImplementation(async () => [topic('2')])
+    await h.engine.pollOnce() // 重评仍未决：引擎再次调 record，store 键集挡住
+
+    const store = h.topicArchive as TopicArchiveStore
+    await store.flush()
+    const days = store.listDays()
+    expect(days).toHaveLength(1)
+    const lines = (await store.readDay(days[0]!)).filter((r) => r.key === 'nodeseek:2')
+    expect(lines).toHaveLength(1) // 重评轮不重落
+    expect(lines[0]).toMatchObject({
+      key: 'nodeseek:2',
+      sourceId: 'nodeseek',
+      topicId: '2',
+      title: 'title-2',
+      category: '闲聊',
+      pinned: false
+    })
   })
 })

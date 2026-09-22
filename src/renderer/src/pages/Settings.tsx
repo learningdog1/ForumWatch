@@ -12,8 +12,9 @@
  * ChannelsCard 内）、onDirtyChange 上报（App 的 leavebar/dirty-dot 依赖）。
  *
  * 本阶段升级项：
- * - dirty 从整份 JSON.stringify 比较改为 **12 段配置分别比较**（§5.1，段表见
- *   SEGMENTS）：段 → 组映射驱动子导航圆点；段计数 = 「有 N 处未保存修改」的 N；
+ * - dirty 从整份 JSON.stringify 比较改为 **13 段配置分别比较**（§5.1 的 12 段
+ *   + R17 分类总结报告独立成段，段表见 SEGMENTS）：段 → 组映射驱动子导航圆
+ *   点；段计数 = 「有 N 处未保存修改」的 N；
  * - **L1 待删除态显式数据源**（5b，§3.5/§5.3）：M 项待删除不再由「saved 有而
  *   draft 无」推导，改为显式 pendingDel 标记集——已保存过的行删除转待删除
  *   （不弹确认，保存后生效、放弃修改可还原），未保存过的新行直接移除；
@@ -37,6 +38,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type {
   AppConfig,
+  CategoryReportConfig,
   ChannelConfig,
   MatchMode,
   NotifyConfig,
@@ -47,6 +49,7 @@ import type {
 } from '@shared/types'
 import { AboutCard } from '../components/AboutCard'
 import { AiModelCard } from '../components/AiModelCard'
+import { CategoryReportCard } from '../components/CategoryReportCard'
 import { ChannelsCard } from '../components/ChannelsCard'
 import { isChannelReadyUi } from '../components/ChannelsCard'
 import { DataCard } from '../components/DataCard'
@@ -86,6 +89,7 @@ export type SettingsAnchor =
   | 'price-rules'
   | 'ai-model'
   | 'match-mode'
+  | 'category-report'
   | 'similarity'
   | 'push-channels'
   | 'push-policy'
@@ -152,6 +156,11 @@ interface Draft {
   interests: string[]
   dailyEnabled: boolean
   dailyTime: string
+  /**
+   * 分类总结报告（R17）：整段持有（ai.categoryReport 的深拷贝），编辑由
+   * CategoryReportCard 以新段对象回写；保存全量透传，清洗在主进程 sanitize。
+   */
+  categoryReport: CategoryReportConfig
   commentaryEnabled: boolean
   /** 锐评思考开关（R12，「AI 模型」卡；仅锐评开启时呈现） */
   commentaryUseThinking: boolean
@@ -201,6 +210,15 @@ function toDraft(c: AppConfig): Draft {
     interests: [...c.ai.interests],
     dailyEnabled: c.ai.dailyReport.enabled,
     dailyTime: c.ai.dailyReport.timeHHMM,
+    // R17 分类报告段深拷贝（嵌套 daily/weekly/monthly 与两个字符串数组独立于 saved）
+    categoryReport: {
+      ...c.ai.categoryReport,
+      sourceIds: [...c.ai.categoryReport.sourceIds],
+      categories: [...c.ai.categoryReport.categories],
+      daily: { ...c.ai.categoryReport.daily },
+      weekly: { ...c.ai.categoryReport.weekly },
+      monthly: { ...c.ai.categoryReport.monthly }
+    },
     commentaryEnabled: c.ai.commentary.enabled,
     commentaryUseThinking: c.ai.commentary.useThinking,
     priceRules: c.priceRules.map((r) => ({ ...r })),
@@ -219,6 +237,7 @@ type SegmentKey =
   | 'priceRules'
   | 'aiModel'
   | 'matchMode'
+  | 'categoryReport'
   | 'similarity'
   | 'channels'
   | 'notifyStrategy'
@@ -231,8 +250,9 @@ type SegmentKey =
 type GroupKey = 'grp-monitor' | 'grp-match' | 'grp-notify' | 'grp-run' | 'grp-data' | 'grp-about'
 
 /**
- * 12 段定义：pick 返回 JSON 可序列化的段值（draft 与 toDraft(saved) 各取一次
- * 比 stringify）。推送策略段特意排除 remoteControl（遥控独立成段）。
+ * 13 段定义（R17 起 12+1：分类总结报告独立成段）：pick 返回 JSON 可序列化的
+ * 段值（draft 与 toDraft(saved) 各取一次比 stringify）。推送策略段特意排除
+ * remoteControl（遥控独立成段）。
  */
 const SEGMENTS: ReadonlyArray<{ key: SegmentKey; group: GroupKey; pick: (d: Draft) => unknown }> = [
   { key: 'sources', group: 'grp-monitor', pick: (d) => d.sources },
@@ -240,6 +260,7 @@ const SEGMENTS: ReadonlyArray<{ key: SegmentKey; group: GroupKey; pick: (d: Draf
   { key: 'priceRules', group: 'grp-monitor', pick: (d) => d.priceRules },
   { key: 'aiModel', group: 'grp-match', pick: (d) => [d.aiBaseUrl, d.aiApiKey, d.aiModel, d.commentaryEnabled, d.commentaryUseThinking] },
   { key: 'matchMode', group: 'grp-match', pick: (d) => [d.matchMode, d.interests, d.aiSemanticThreshold] },
+  { key: 'categoryReport', group: 'grp-match', pick: (d) => d.categoryReport },
   { key: 'similarity', group: 'grp-match', pick: (d) => [d.similarityEnabled, d.similarityThreshold] },
   { key: 'channels', group: 'grp-notify', pick: (d) => d.channels },
   {
@@ -356,7 +377,7 @@ export function Settings(props: {
     }
   }, [reloadTick])
 
-  // ---- 12 段 dirty 计算（§5.1；替代原整份 JSON.stringify 比较）----
+  // ---- 13 段 dirty 计算（§5.1 + R17；替代原整份 JSON.stringify 比较）----
 
   const savedDraft = useMemo(() => (saved == null ? null : toDraft(saved)), [saved])
 
@@ -503,6 +524,8 @@ export function Settings(props: {
           // 语义置信度阈值（第五轮 / R5-P2c：「监控模式」卡的滑杆）
           semanticThreshold: d.aiSemanticThreshold,
           dailyReport: { enabled: d.dailyEnabled, timeHHMM: d.dailyTime },
+          // 分类总结报告（R17「分类总结报告」卡整段透传；清洗在主进程 sanitize）
+          categoryReport: d.categoryReport,
           // 锐评开关（「AI 模型」卡的「推送锐评」控件）；思考开关同卡（R12）
           commentary: { enabled: d.commentaryEnabled, useThinking: d.commentaryUseThinking }
         }
@@ -799,6 +822,15 @@ export function Settings(props: {
                 onModeChange={(v) => patch({ matchMode: v })}
                 onInterestsChange={(v) => patch({ interests: v })}
                 onThresholdChange={(v) => patch({ aiSemanticThreshold: v })}
+              />
+            </Slot>
+            <Slot anchor="category-report" flashId={flashId}>
+              {/* R17 分类总结报告：来源多选走生效列表（待删除来源不再可选，
+                  悬挂引用由保存时 sanitize 清理——RoutingCard 同口径） */}
+              <CategoryReportCard
+                cr={draft.categoryReport}
+                sources={effDraft?.sources ?? draft.sources}
+                onChange={(categoryReport) => patch({ categoryReport })}
               />
             </Slot>
             <Slot anchor="similarity" flashId={flashId}>

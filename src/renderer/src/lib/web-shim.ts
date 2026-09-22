@@ -7,7 +7,7 @@
  *
  * 实现映射(对端 = src/main/server/web.ts):
  * - invoke 系方法 → fetch POST /api/invoke {channel, args} → {ok, result};
- * - onStatus/onHit/onLog/onDailyReport → 单条共享 EventSource('/api/events'),
+ * - onStatus/onHit/onLog/onDailyReport/onCategoryReport → 单条共享 EventSource('/api/events'),
  *   按 message 里的 channel 分发给订阅者(EventSource 自带断线重连);
  * - openExternal → 服务端白名单校验通过后 window.open(桌面是 shell.openExternal);
  * - exportBackup → GET /api/backup/export 走 Blob 下载;importBackup → 隐藏
@@ -17,6 +17,8 @@
  * ('fw.webToken'),此后请求带 Bearer 头、SSE 带 ?token= 查询参数。
  */
 import type {
+  CategoryReportEvent,
+  CategoryReportKind,
   DesktopApi,
   Disposition,
   HitFeedbackRequest,
@@ -204,6 +206,11 @@ export function createWebApi(): DesktopApi {
     getDailyReport: (dateLocal) => call('report:get', dateLocal),
     generateDailyReport: () => call('report:generate'),
     listDailyReports: () => call('report:list'),
+    // 分类阶段报告(R17):与日报通道同级,保持 reject 语义(UI 有错误展示路径)
+    getCategoryReport: (kind: CategoryReportKind, periodKey?: string) =>
+      call('category-report:get', kind, periodKey),
+    generateCategoryReport: (kind: CategoryReportKind) => call('category-report:generate', kind),
+    listCategoryReports: (kind: CategoryReportKind) => call('category-report:list', kind),
     matchTest: (req: MatchTestRequest) =>
       safe('match:test', () => ({
         wouldPush: false,
@@ -271,7 +278,9 @@ export function createWebApi(): DesktopApi {
     onStatus: (callback: Listener<EngineStatus>) => subscribe(IPC.evStatus, callback),
     onHit: (callback: Listener<HitRecord>) => subscribe(IPC.evHit, callback),
     onLog: (callback: Listener<LogEntry>) => subscribe(IPC.evLog, callback),
-    onDailyReport: (callback: Listener<DailyReportInfo>) => subscribe(IPC.evDailyReport, callback)
+    onDailyReport: (callback: Listener<DailyReportInfo>) => subscribe(IPC.evDailyReport, callback),
+    onCategoryReport: (callback: Listener<CategoryReportEvent>) =>
+      subscribe(IPC.evCategoryReport, callback)
   }
 }
 

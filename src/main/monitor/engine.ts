@@ -117,6 +117,17 @@
  * 重记、迁移才记）与 pipeline/ JSONL 持久化在 dispositions.ts。store 的键清理与
  * pruneRetryMaps 同调用点、同 observedSources 守卫（见 pollOnce）。
  *
+ * 全量话题存档（R17 分类报告数据底座，可选 deps.topicArchive——不注入 = 零行为）：
+ * unseen 逆序循环（deferred-skip 之后、per-source 过滤之前，**W3 旧帖判定之后**）
+ * 把每个观察到的新帖落档一次（topics/<date>.jsonl，35 天保留，全量口径不受报告
+ * 开关控制）；被 id 阈值吞并的回复顶起旧帖不落档（unseen ≠ 新发帖）。
+ * 「整页吞并不落档」共**三条**早退路径，都在 unseen 循环（record 调用点）之前：
+ * ①首启基线轮（!baselineDone）；②存量升级静默初始化轮（baselineDone=true 但
+ * 阈值缺失）；③seen 损坏重建后的 re-baseline 基线轮（rebaselineIfNeeded 重置
+ * baselineDone，下一轮回到 ① 的形态）——三条路径整页只入去重集不落档（防旧帖
+ * 风暴的同款语义，报告读数不含这些轮次的旧帖）。见 topics-store.ts 与
+ * deps.topicArchive 注释。
+ *
  * 状态模型（ADR 7）：desired（用户意图，唯一可写）× health（内核观测，自动流转）正交。
  * pause 只改 desired 并 stop 排程器，health 不动；getStatus 返回实时快照。
  *
@@ -430,6 +441,20 @@ export interface EngineDeps {
       detail?: string
     ): void
     prune?(keepKeys: Set<string>, observedSources: Set<string>): void
+  }
+  /**
+   * 全量话题存档（R17 分类报告数据底座；可选——不注入 = 零行为，引擎逻辑逐字节
+   * 不变）。record 在 unseen 逆序循环顶部（deferred-skip 检查之后、per-source
+   * 过滤之前）调用：命中/未中/被滤/置顶/被排除**全部落档一次**（全量口径），
+   * pinned 随记录落（报告侧默认排除置顶）。同键重入（语义未决重评轮、推送失败
+   * 重试轮）由 store 内部的键集挡住，engine 不负责防重。**基线轮、存量升级
+   * 初始化轮与 seen 损坏重建后的 re-baseline 基线轮（三条路径）都在循环前
+   * 早退**：首装/升级/seen 重建的第一页旧帖不落档——分类报告的覆盖从
+   * 升级后开始（文档明示）。record 是同步签名（内部异步队列），无 await 不
+   * 拖慢轮询热循环。
+   */
+  topicArchive?: {
+    record(topic: Topic, now?: Date): void
   }
   /** 状态变化回调（desired/health/nextPollAt 等每次变化后发出实时快照） */
   onStatus?: (s: EngineStatus) => void
@@ -890,9 +915,29 @@ export class MonitorEngine {
         this.noteDisposition(topic, 'deferred-skip')
         continue
       }
+      // W3 旧帖判定（第 3 步的判定部分，先于下方存档求值——吞并动作仍在原位，
+      // per-source 先于 id 阈值的管线顺序不变）：首页按最后回复排序，被回复顶回
+      // 首页的旧帖满足 "unseen 且数值 id ≤ 阈值" → 入 seen 不推送。豁免：上一轮
+      // 就在 unseen 处理流里的帖子（prevUnseenKeys，含推送失败重试/语义未决——
+      // 他们不入 seen，而轮末阈值会追上其 id，不豁免会永久吞掉重试机会）。
+      // 非数字 id 不过滤（也不进阈值计算）。
+      const numericId = idFilter ? parseNumericTopicId(topic.id) : null
+      const oldBelowThreshold =
+        numericId !== null && threshold !== null && numericId <= threshold && !rt.prevUnseenKeys.has(key)
+      // 全量话题存档（R17）：W3 旧帖判定之后、其余过滤/匹配之前——命中/未中/
+      // 被滤/置顶/被排除的新帖全部落档一次（存档无条件写，不受报告开关控制；
+      // 同键重入由 TopicArchiveStore 的键集挡住）；被阈值吞并的回复顶起旧帖
+      // **不落档**——unseen ≠ 新发帖，落了会按 firstSeenAt 计入当日，系统性
+      // 抬高分类报告的日/周帖量与附录（旧帖不论后被哪道闸吞并，判定都在存档
+      // 前完成）。挂起队列成员上方已 continue：它们首轮进入 unseen 时已落档，
+      // 重入不再落。
+      if (!oldBelowThreshold) {
+        this.deps.topicArchive?.record(topic, new Date(this.now()))
+      }
       // per-source 过滤（R5-P2a 第 2 步，先于 id 阈值——ultrabrain 裁定管线顺序）：
       // 分类白/黑名单（显示名或 slug 双口径）与作者黑名单。被滤帖入 seen 不推送
-      // 不评估（与旧帖阈值同款语义）。
+      // 不评估（与旧帖阈值同款语义）。被滤帖若是新帖，上方已照常落档（分类
+      // 报告与推送过滤是两套口径，报告侧按自己的分类集筛档）。
       if (sourceFilters !== undefined && !applySourceFilters(topic, sourceFilters)) {
         this.deps.seen.add(key)
         swallowedByFilters++
@@ -903,19 +948,12 @@ export class MonitorEngine {
         )
         continue
       }
-      // W3 旧帖过滤（第 3 步）：首页按最后回复排序，被回复顶回首页
-      // 的旧帖满足 "unseen 且数值 id ≤ 阈值" → 入 seen 不推送。豁免：上一轮就在
-      // unseen 处理流里的帖子（prevUnseenKeys，含推送失败重试/语义未决——他们
-      // 不入 seen，而轮末阈值会追上其 id，不豁免会永久吞掉重试机会）。
-      // 非数字 id 不过滤（也不进阈值计算）。
-      if (idFilter && threshold !== null) {
-        const numericId = parseNumericTopicId(topic.id)
-        if (numericId !== null && numericId <= threshold && !rt.prevUnseenKeys.has(key)) {
-          this.deps.seen.add(key)
-          swallowedOld++
-          this.noteDisposition(topic, 'old-below-threshold', `id ${numericId} ≤ 阈值 ${threshold}`)
-          continue
-        }
+      // W3 旧帖过滤（第 3 步，吞并动作；判定已在存档前算出，此处只做副作用）
+      if (oldBelowThreshold) {
+        this.deps.seen.add(key)
+        swallowedOld++
+        this.noteDisposition(topic, 'old-below-threshold', `id ${numericId} ≤ 阈值 ${threshold}`)
+        continue
       }
       if (topic.pinned) {
         // 置顶是旧帖（第 4 步）：入去重集但绝不推送

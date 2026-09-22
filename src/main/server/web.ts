@@ -8,7 +8,8 @@
  * 2. POST /api/invoke:DesktopApi 的 invoke 面——{channel, args[]} 查表分发到
  *    api.ts 的处理器,返回 {ok:true,result} | {ok:false,error};
  * 3. GET /api/events:SSE(Server-Sent Events)事件流——evStatus/evHit/evLog/
- *    evDailyReport 四个主→渲染推送通道(桌面版走 webContents.send)。SSE 而非
+ *    evDailyReport/evCategoryReport 主→渲染推送通道(桌面版走 webContents.send;
+ *    broadcast 是泛型 channel 分发,R17 起新通道零改动接入)。SSE 而非
  *    WebSocket:事件是纯服务端→客户端单向流,EventSource 自带断线重连,
  *    无需引入 ws 依赖与手写帧协议;
  * 4. GET /api/backup/export(下载)/ POST /api/backup/import(上传)——网页端
