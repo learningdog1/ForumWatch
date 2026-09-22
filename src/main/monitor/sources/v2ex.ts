@@ -57,25 +57,29 @@ function unixSecondsToIso(sec: unknown): string | null {
 }
 
 /** 单帖映射；非对象条目或缺有效数值 id 的条目返回 null（上游恒有，防御性兜底） */
-function mapTopic(item: unknown): Topic | null {
+function mapTopic(item: unknown, baseUrl: string): Topic | null {
   if (typeof item !== 'object' || item === null) return null
   const raw = item as V2exTopicItem
   if (typeof raw.id !== 'number' || !Number.isFinite(raw.id)) return null
   // 摘要按空省略键（Topic.excerpt 可选；toExcerpt 共享 rss adapter 的清洗口径）
   const excerpt = toExcerpt(raw.content ?? '')
+  const username = raw.member?.username ?? ''
   return {
     id: String(raw.id),
     // adapter 不感知来源归属：engine 处理时按来源盖章（D2/D3）
     sourceId: '',
     title: raw.title ?? '',
     url: raw.url ?? '',
-    author: raw.member?.username ?? '',
+    author: username,
     category: raw.node?.title ?? '',
     categorySlug: raw.node?.name ?? '',
     pinned: false, // latest 端点无置顶语义
     // 优先最后回复时间（last_touched），缺则退发帖时间（created），都缺则 null
     lastActiveAt: unixSecondsToIso(raw.last_touched) ?? unixSecondsToIso(raw.created),
-    ...(excerpt !== '' ? { excerpt } : {})
+    ...(excerpt !== '' ? { excerpt } : {}),
+    // 作者个人主页（issue #2 建议一 authorUrl 数据源）：username 非空才构造，
+    // 与 excerpt 同款"空则不落键"约定
+    ...(username.trim() !== '' ? { authorUrl: `${baseUrl}/member/${username}` } : {})
   }
 }
 
@@ -142,7 +146,7 @@ export class V2exSourceAdapter implements SourceAdapter {
       throw new Error(`v2ex latest response is not a JSON array (got ${typeof parsed})`)
     }
 
-    const topics = parsed.map(mapTopic).filter((t): t is Topic => t !== null)
+    const topics = parsed.map((item) => mapTopic(item, this.baseUrl)).filter((t): t is Topic => t !== null)
     if (topics.length === 0) {
       // 0 条 ≠ 无新帖：latest 恒 40 帖，0 条 = 端点改版或被拦的异常形态
       throw new Error(`parsed 0 topics from ${url} (endpoint change or challenge page)`)

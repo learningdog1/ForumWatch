@@ -68,7 +68,9 @@ function topicPayload(t: HitMessageInput['topic']): Record<string, unknown> {
     categorySlug: t.categorySlug,
     sourceId: t.sourceId,
     // 摘要（可选，RSS/V2EX 来源提供）：undefined 时 JSON.stringify 自然省键
-    ...(t.excerpt !== undefined && t.excerpt !== '' ? { excerpt: t.excerpt } : {})
+    ...(t.excerpt !== undefined && t.excerpt !== '' ? { excerpt: t.excerpt } : {}),
+    // 作者个人主页（可选，issue #2 建议一）：同 excerpt 口径，缺失自然省键
+    ...(t.authorUrl !== undefined && t.authorUrl !== '' ? { authorUrl: t.authorUrl } : {})
   }
 }
 

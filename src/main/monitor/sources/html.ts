@@ -41,6 +41,8 @@ const SELECTORS = {
 const POST_LINK_RE = /^\/post-(\d+)-\d+/
 /** `/categories/{slug}`，如 photo-share 含连字符 */
 const CATEGORY_LINK_RE = /^\/categories\/([A-Za-z0-9_-]+)/
+/** 作者锚点 `/space/{userId}`（个人主页，issue #2 建议一 authorUrl 数据源） */
+const AUTHOR_LINK_RE = /^\/space\/(\d+)/
 
 /**
  * 解析 NodeSeek 首页（?sort=createTime）HTML 为 Topic 列表。
@@ -60,6 +62,10 @@ export function parseHomepage(html: string, baseUrl: string = DEFAULT_BASE_URL):
     const categoryLink = item.find(SELECTORS.category).first()
     const categoryMatch = CATEGORY_LINK_RE.exec(categoryLink.attr('href') ?? '')
     const id = postMatch[1]
+    // 作者锚点 href（/space/{id}）→ 绝对个人主页链接；锚点缺失/改版时不落键
+    // （authorUrl 可选，推送侧按缺省退化——issue #2 建议一）
+    const authorLink = item.find(SELECTORS.author).first()
+    const authorMatch = AUTHOR_LINK_RE.exec(authorLink.attr('href') ?? '')
 
     topics.push({
       id,
@@ -67,12 +73,13 @@ export function parseHomepage(html: string, baseUrl: string = DEFAULT_BASE_URL):
       sourceId: '',
       title: titleLink.text().trim(),
       url: `${baseUrl}/post-${id}-1`,
-      author: item.find(SELECTORS.author).first().text().trim(),
+      author: authorLink.text().trim(),
       category: categoryLink.text().trim(),
       categorySlug: categoryMatch ? categoryMatch[1] : '',
       pinned:
         item.find(SELECTORS.pinnedSpan).length > 0 || item.find(SELECTORS.pinnedIcon).length > 0,
-      lastActiveAt: item.find(SELECTORS.lastActiveTime).first().attr('datetime') ?? null
+      lastActiveAt: item.find(SELECTORS.lastActiveTime).first().attr('datetime') ?? null,
+      ...(authorMatch ? { authorUrl: `${baseUrl}/space/${authorMatch[1]}` } : {})
     })
   })
 

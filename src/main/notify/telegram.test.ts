@@ -87,12 +87,12 @@ describe('escapeHtml', () => {
 })
 
 describe('formatHitMessage', () => {
-  it('四行结构：标题转义加粗 / 分类作者 / 命中词 / 帖子链接', () => {
+  it('四行结构：标题转义加粗 / 分类作者 / 命中词 / 帖子链接；命中词加 # 前缀（issue #2 建议二，Telegram hashtag 可点击筛选）', () => {
     const msg = formatHitMessage(topic, ['冰箱', '便宜&实惠'])
     const expected = [
       `🔔 <b>${escapeHtml(topic.title)}</b>`,
       `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
-      `🎯 命中: 冰箱, 便宜&amp;实惠`,
+      `🎯 命中: #冰箱, #便宜&amp;实惠`,
       `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
     ].join('\n')
     expect(msg).toBe(expected)
@@ -100,12 +100,31 @@ describe('formatHitMessage', () => {
     expect(msg).not.toContain('<script>')
   })
 
+  it('作者链接（issue #2 建议一）：topic.authorUrl 非空时 👤 渲染为指向个人主页的超链接，href 与作者名均过 escapeHtml', () => {
+    const withAuthor: Topic = { ...topic, authorUrl: 'https://www.nodeseek.com/space/9261?x=1&y=2' }
+    const msg = formatHitMessage(withAuthor, ['冰箱'])
+    const expected = [
+      `🔔 <b>${escapeHtml(topic.title)}</b>`,
+      `📁 交易 · 👤 <a href="https://www.nodeseek.com/space/9261?x=1&amp;y=2">${escapeHtml('张三<b>')}</a>`,
+      `🎯 命中: #冰箱`,
+      `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
+    ].join('\n')
+    expect(msg).toBe(expected)
+  })
+
+  it('回归：authorUrl 缺失 / undefined / 空串（RSS 来源、旧 hits 记录）→ 👤 行退化为纯文本作者名，逐字节一致', () => {
+    const baseline = formatHitMessage(topic, ['冰箱'])
+    expect(baseline).toContain(`👤 ${escapeHtml('张三<b>')}`)
+    expect(formatHitMessage({ ...topic, authorUrl: undefined }, ['冰箱'])).toBe(baseline)
+    expect(formatHitMessage({ ...topic, authorUrl: '' }, ['冰箱'])).toBe(baseline)
+  })
+
   it('带锐评：💬 行插在「🎯 命中」行之后、链接行之前，内容过 escapeHtml（含 <>&）', () => {
     const msg = formatHitMessage(topic, ['冰箱'], '这价格 <敢> 再低点 & 我就冲')
     const expected = [
       `🔔 <b>${escapeHtml(topic.title)}</b>`,
       `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
-      `🎯 命中: 冰箱`,
+      `🎯 命中: #冰箱`,
       `💬 锐评: 这价格 &lt;敢&gt; 再低点 &amp; 我就冲`,
       `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
     ].join('\n')
@@ -129,7 +148,7 @@ describe('formatHitMessage', () => {
     const expected = [
       `🔔 <b>${escapeHtml(topic.title)}</b>`,
       `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
-      `🎯 命中规则: 白菜月付 &lt;年付&gt; &amp; 88`,
+      `🎯 命中规则: #白菜月付 &lt;年付&gt; &amp; 88`,
       `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
     ].join('\n')
     expect(msg).toBe(expected)
@@ -139,7 +158,7 @@ describe('formatHitMessage', () => {
   it('规则命中 + 锐评并存：💬 行仍在「🎯 命中规则」行之后', () => {
     const msg = formatHitMessage(topic, [], '这价格可以冲', '白菜月付')
     expect(msg.split('\n')).toHaveLength(5)
-    expect(msg.split('\n')[2]).toBe('🎯 命中规则: 白菜月付')
+    expect(msg.split('\n')[2]).toBe('🎯 命中规则: #白菜月付')
     expect(msg.split('\n')[3]).toBe('💬 锐评: 这价格可以冲')
   })
 
@@ -148,7 +167,7 @@ describe('formatHitMessage', () => {
     expect(formatHitMessage(topic, ['冰箱'], '锐评', undefined)).toBe(baseline)
     expect(formatHitMessage(topic, ['冰箱'], '锐评', null)).toBe(baseline)
     expect(formatHitMessage(topic, ['冰箱'], '锐评', '')).toBe(baseline)
-    expect(baseline).toContain('🎯 命中: 冰箱')
+    expect(baseline).toContain('🎯 命中: #冰箱')
   })
 
   it('摘要行：topic.excerpt 非空时 📄 行插在标题之后、分类作者行之前，内容过 escapeHtml', () => {
@@ -161,7 +180,7 @@ describe('formatHitMessage', () => {
       `🔔 <b>${escapeHtml(topic.title)}</b>`,
       `📄 9 成新海尔冰箱 &amp; &lt;附&gt; 冰柜，自提优先`,
       `📁 交易 · 👤 ${escapeHtml('张三<b>')}`,
-      `🎯 命中: 冰箱`,
+      `🎯 命中: #冰箱`,
       `🔗 <a href="https://www.nodeseek.com/post-936634-1">打开帖子</a>`
     ].join('\n')
     expect(msg).toBe(expected)
@@ -195,7 +214,7 @@ describe('formatHitMessage', () => {
   it('回归：literal 命中（关键词非空）不受 semanticReason 影响，不出现语义命中行', () => {
     const baseline = formatHitMessage(topic, ['冰箱'])
     expect(formatHitMessage(topic, ['冰箱'], null, null, '某理由')).toBe(baseline)
-    expect(baseline).toContain('🎯 命中: 冰箱')
+    expect(baseline).toContain('🎯 命中: #冰箱')
   })
 
   it('回归：excerpt 缺失 / undefined / 空串（nodeseek 无摘要、旧记录）→ 无 📄 行，与无摘要时代逐字节一致', () => {
@@ -250,7 +269,7 @@ describe('TelegramNotifier', () => {
     await h.notifier.sendHit({ topic, matchedKeywords: [], commentary: null, matchedRule: '白菜月付' })
     const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as { text: string }
     expect(body.text).toBe(formatHitMessage(topic, [], null, '白菜月付'))
-    expect(body.text).toContain('🎯 命中规则: 白菜月付')
+    expect(body.text).toContain('🎯 命中规则: #白菜月付')
     expect(body.text).not.toContain('命中: ')
   })
 

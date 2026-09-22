@@ -40,11 +40,27 @@ describe('parseHomepage', () => {
       title: '收一个oracle圣荷西',
       url: 'https://www.nodeseek.com/post-936634-1',
       author: '没想好',
+      // issue #2 建议一：作者锚点 /space/{id} → 绝对个人主页链接
+      authorUrl: 'https://www.nodeseek.com/space/60246',
       category: '交易',
       categorySlug: 'trade',
       pinned: false,
       lastActiveAt: '2026-09-19T03:47:55.000Z'
     })
+  })
+
+  it('作者链接：锚点缺失 / 非 /space/{id} 形态 → 不落 authorUrl 键（推送侧按缺省退化）', () => {
+    const noHref = (
+      '<html><body><ul class="post-list">' +
+      '<li class="post-list-item"><div class="post-title"><a href="/post-100-1">t</a></div>' +
+      '<div class="post-info"><span class="info-item info-author"><a>bob</a></span>' +
+      '<a href="/categories/trade" class="info-item post-category">交易</a></div></li>' +
+      '</ul></body></html>'
+    )
+    expect(parseHomepage(noHref)[0]).not.toHaveProperty('authorUrl')
+
+    const foreignHref = noHref.replace('<a>bob</a>', '<a href="https://evil.example/u/bob">bob</a>')
+    expect(parseHomepage(foreignHref)[0]).not.toHaveProperty('authorUrl')
   })
 
   it('第一个帖子（iLatency公测…）是置顶', () => {
@@ -58,6 +74,8 @@ describe('parseHomepage', () => {
   it('自定义 baseUrl 生成绝对链接', () => {
     const topics = parseHomepage(fixtureHtml, 'http://localhost:1234')
     expect(topics[1].url).toBe('http://localhost:1234/post-936634-1')
+    // authorUrl 同样随 baseUrl 解析（issue #2 建议一）
+    expect(topics[1].authorUrl).toBe('http://localhost:1234/space/60246')
   })
 
   it('空字符串 / 无关 HTML → []（不抛错）', () => {

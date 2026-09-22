@@ -364,6 +364,13 @@ export interface Topic {
    * （telegram 的 📄 摘要行）按缺省省略。
    */
   excerpt?: string
+  /**
+   * 发帖人个人主页链接（issue #2 建议一）。**可选**：nodeseek 列表页作者锚点
+   * （/space/{id}）与 V2EX member（/member/{username}）能提供，RSS 一般没有——
+   * 无链接的来源/旧记录不写该键，**消费方必须容忍 undefined**（与 excerpt 同款
+   * 约定）；推送文案（telegram 的 👤 作者行）按缺省退化为纯文本作者名。
+   */
+  authorUrl?: string
 }
 
 /**

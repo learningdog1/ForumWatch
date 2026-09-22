@@ -317,3 +317,14 @@ R15 把评估默认改成禁思考后，`thinking:{type:"disabled"}` 只对智�
 - **三方言一次全发**：`req.disableThinking=true` 时请求体同时附 `thinking:{type:"disabled"}` + `enable_thinking:false` + `chat_template_kwargs:{enable_thinking:false}`（THINKING_DISABLE_FIELDS 单一事实源）。端点各取所认；宽松端点静默忽略不认识的字段，互不冲突。
 - **400 去参重试自愈**：严格校验未知参数的端点（OpenAI 官方对未知字段回 400「Unrecognized request argument」）会因此整批失败。带思考参数遇 400 → 记住该端点（按 `baseUrl|model|apiKey` 签名）并**去参原样重试一次**；同端点后续调用直接不带思考参数（不反复探测），换 provider 配置自动复位重学。重试仍 400（真实坏请求）照常上抛——兜底只吸收「参数不被认识」，不掩盖真错误。进程内存态：重启后第一次调用重新探测，代价至多一次多余 400。
 - **实现在 provider 层**：语义评估（evaluator 直出模式默认）与锐评直出模式（R12）两条调用路径自动同享；请求方接口（ChatRequest.disableThinking）不变。
+
+---
+
+# 第十八轮决策（2026-09-22，R18：issue #2 两建议——作者主页链接 + 命中词 # 标签）
+
+用户建议（learningdog1/ForumWatch#2）：①推送显示联系人并可打开对方私信页/个人主页（私有帖也能知道谁发的）；②命中词前加 `#` 便于按标签筛选。裁定：
+
+- **Topic 增可选 `authorUrl`（与 excerpt 同款约定）**：nodeseek 适配器解析作者锚点 `/space/{id}` → 绝对链接（`AUTHOR_LINK_RE` 严格匹配，锚点缺失/改版不落键）；V2EX 按 `/member/{username}` 构造；RSS 一般没有不构造。旧 hits jsonl 行无此键，消费方容忍 undefined。
+- **Telegram「👤 作者」渲染为超链接**（href 过 escapeHtml，属性上下文防注入）；**链接指向个人主页而非私信页**——NodeSeek 无公开稳定的私信直链，主页（/space/{id}）本身带私信入口，且链接直接来自页面锚点、零猜测；issue 原文「私信页**或者**个人主页」二选一，取可靠的那个。authorUrl 缺失（RSS/旧记录）退化为纯文本，消息逐字节同旧。
+- **命中词与规则 label 统一 `#` 前缀**：Telegram 把 `#` 开头的词识别为 hashtag（点击即筛选同标签消息）——用户按触发词过滤推送流的诉求由客户端原生能力承接，应用侧只加一个字符。语义理由是自由句子不加。**仅 Telegram**：Bark/ntfy 是手机横幅无标签筛选 UI，加 `#` 是纯噪音，不动。
+- **webhook topic 载荷带上 authorUrl**（可选键，同 excerpt 口径）；bark/ntfy 不带。

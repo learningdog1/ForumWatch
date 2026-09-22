@@ -281,16 +281,18 @@ headless 模式使用独立数据目录（见下文），与桌面版互不共�
   ```
   🔔 <标题加粗>
   📄 摘要（可选，见下）
-  📁 分类 · 👤 作者
-  🎯 命中: 关键词1, 关键词2
+  📁 分类 · 👤 作者（有主页链接时为可点击链接，见下）
+  🎯 命中: #关键词1, #关键词2
   🔗 打开帖子（链接）
   ```
 
-  语义命中的推送把「🎯 命中」行替换为 `🎯 语义命中: {AI 判定理由}`（理由截 120 字符、转义；AI 未给理由时仅显示 `🎯 语义命中`）——语义推送不再出现空白的「🎯 命中: 」行，与 Bark/ntfy 的 `· 语义命中: {理由}` 同口径。规则命中（`matchedBy='rule'`）则把「🎯 命中」行替换为 `🎯 命中规则: {规则名}`（规则的 label，未填 label 时用规则 id；转义后）。
+  语义命中的推送把「🎯 命中」行替换为 `🎯 语义命中: {AI 判定理由}`（理由截 120 字符、转义；AI 未给理由时仅显示 `🎯 语义命中`）——语义推送不再出现空白的「🎯 命中: 」行，与 Bark/ntfy 的 `· 语义命中: {理由}` 同口径。规则命中（`matchedBy='rule'`）则把「🎯 命中」行替换为 `🎯 命中规则: #{规则名}`（规则的 label，未填 label 时用规则 id；转义后）。
+- **作者链接（👤，issue #2 建议一）**：来源能拿到发帖人主页时（NodeSeek 作者锚点 `/space/{id}`、V2EX `/member/{username}`），「👤 作者」渲染为指向其个人主页的超链接——私有帖看不到正文也能知道并一键找到发帖人（主页内有私信入口）。RSS 来源与升级前的旧命中记录没有该链接，作者显示为纯文本，消息其余部分不变。
+- **命中词 # 标签（issue #2 建议二）**：命中关键词与规则名统一带 `#` 前缀——Telegram 把 `#` 开头的词识别为话题标签（点击即在会话内筛选同标签消息），便于按触发词过滤推送流。语义命中的理由是自由文本句子，不加前缀。
 - **摘要行（📄）**：来源提供了帖子正文时（RSS `description` / Atom `summary`、V2EX `content`；NodeSeek 列表页没有正文，不写），命中消息在标题之后多一行 `📄 {摘要}`（剥 HTML、压缩空白、截 160 字符，转义后）。动机：Telegram 的富预览卡片由其服务端抓目标页生成，抓取失败（站点拦 Telegram 爬虫）时消息只剩三行、显得异常短小——摘要让消息正文自含内容，不再依赖预览成败。
 - **AI 锐评行（💬）**：开启「推送锐评」且生成成功时，命中消息在「🎯 命中」行之后多一行 `💬 锐评: {一句话点评}`（≤80 字符，转义后）。未开启 / AI 未配置 / 本次生成失败时整行省略，消息回退纯净格式——锐评绝不影响推送本身。字面命中与语义命中都会带锐评（独立于匹配模式）。
 - **Bark / ntfy**：标题 = 帖子标题（截 60 字符），正文一行摘要 `[分类] 作者 · 命中: 词` / `· 命中规则: 规则名` / `· 语义命中: 理由`；点开跳原帖（Bark 带 url 字段，ntfy 带 click）。
-- **Webhook**：结构化 JSON POST——`{type:'hit', topic:{title,url,author,category,categorySlug,sourceId,excerpt?}, matchedBy, matchedKeywords, matchedRule, semanticReason, commentary, ts}`（命中字段全量；matchedBy 由内容推导：有词→literal、有规则→rule、否则 semantic）；日报/测试走 `{type:'raw', text, ts}`。配置了 secret 时每次请求带 `X-ForumWatch-Secret` 头；**单次请求 5 秒超时**（自建消费端慢响应不拖推送线程）。
+- **Webhook**：结构化 JSON POST——`{type:'hit', topic:{title,url,author,authorUrl?,category,categorySlug,sourceId,excerpt?}, matchedBy, matchedKeywords, matchedRule, semanticReason, commentary, ts}`（命中字段全量；matchedBy 由内容推导：有词→literal、有规则→rule、否则 semantic；authorUrl 存在 = 来源提供了作者主页链接）；日报/测试走 `{type:'raw', text, ts}`。配置了 secret 时每次请求带 `X-ForumWatch-Secret` 头；**单次请求 5 秒超时**（自建消费端慢响应不拖推送线程）。
 
 ### 重试、限流与防抖（按通道类型分档）
 

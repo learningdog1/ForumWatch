@@ -67,12 +67,20 @@ function clipHitReason(s: string): string {
 /**
  * 命中推送文案（HTML）；标题/分类/作者/关键词/锐评均为用户（或 LLM）内容，一律过 escapeHtml。
  *
+ * issue #2 两条建议（R18）：
+ * - **作者可点击**：topic.authorUrl 非空时「👤 作者」渲染为指向个人主页的超链接
+ *   （nodeseek=/space/{id}、v2ex=/member/{username}），私有帖也能知道并找到发帖人；
+ *   缺失（RSS 来源 / 旧 hits 记录）时退化为纯文本作者名，与升级前逐字节一致。
+ * - **命中词 # 标签**：关键词与规则 label 统一加 `#` 前缀——Telegram 把 # 开头的
+ *   词识别为 hashtag（点击即在会话内筛选同标签消息），用户可按触发词过滤推送流。
+ *   语义命中的理由是自由文本句子，不加前缀。
+ *
  * @param commentary AI 锐评（第三轮，可选）：**非空字符串**时在「🎯 命中」行之后插一行
  *   `💬 锐评: {commentary}`（转义后）；null / undefined / 空串时整行省略——两参调用
  *   的输出与升级前逐字节一致（引擎侧未生成锐评时直接不传即可）。
  * @param matchedRule 命中的价格规则 label（第五轮，可选）：**非空字符串**（= matchedBy
  *   'rule'——规则命中恒有 label，rules.ts 的 RuleMatch.label 已归一为 label ?? id）
- *   时「🎯 命中」行改为 `🎯 命中规则: {matchedRule}`（转义后）；null / undefined /
+ *   时「🎯 命中」行改为 `🎯 命中规则: #{matchedRule}`（转义后）；null / undefined /
  *   空串（= literal/semantic 命中）时保持 `🎯 命中: {keywords}` 原样。
  * @param semanticReason 语义命中的 AI 判定理由（可选）：matchedKeywords 为空且理由
  *   非空时「🎯 命中」行改为 `🎯 语义命中: {semanticReason}`（截 HIT_REASON_MAX_CHARS
@@ -94,17 +102,25 @@ export function formatHitMessage(
 ): string {
   const hitLine =
     typeof matchedRule === 'string' && matchedRule.length > 0
-      ? `🎯 命中规则: ${escapeHtml(matchedRule)}`
+      ? `🎯 命中规则: #${escapeHtml(matchedRule)}`
       : matchedKeywords.length > 0
-        ? `🎯 命中: ${matchedKeywords.map(escapeHtml).join(', ')}`
+        ? `🎯 命中: ${matchedKeywords.map((k) => `#${escapeHtml(k)}`).join(', ')}`
         : typeof semanticReason === 'string' && semanticReason.length > 0
           ? `🎯 语义命中: ${escapeHtml(clipHitReason(semanticReason))}`
           : `🎯 语义命中`
+  // 作者名 + 个人主页链接（建议一）：author 与 authorUrl 均非空才渲染超链接；
+  // href 过 escapeHtml（属性上下文，& 等字符须转义）。任一缺失退化为纯文本。
+  const authorPart =
+    typeof topic.authorUrl === 'string' &&
+    topic.authorUrl.length > 0 &&
+    topic.author.length > 0
+      ? `👤 <a href="${escapeHtml(topic.authorUrl)}">${escapeHtml(topic.author)}</a>`
+      : `👤 ${escapeHtml(topic.author)}`
   const lines = [`🔔 <b>${escapeHtml(topic.title)}</b>`]
   if (typeof topic.excerpt === 'string' && topic.excerpt.length > 0) {
     lines.push(`📄 ${escapeHtml(topic.excerpt)}`)
   }
-  lines.push(`📁 ${escapeHtml(topic.category)} · 👤 ${escapeHtml(topic.author)}`, hitLine)
+  lines.push(`📁 ${escapeHtml(topic.category)} · ${authorPart}`, hitLine)
   if (typeof commentary === 'string' && commentary.length > 0) {
     lines.push(`💬 锐评: ${escapeHtml(commentary)}`)
   }

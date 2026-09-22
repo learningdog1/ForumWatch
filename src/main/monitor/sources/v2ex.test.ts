@@ -68,12 +68,32 @@ describe('V2exSourceAdapter.fetchLatest', () => {
       title: '有没有好用的 RSS 阅读器推荐',
       url: 'https://www.v2ex.com/t/1243180',
       author: 'alice',
+      // issue #2 建议一：username 非空 → 会员页链接
+      authorUrl: 'https://www.v2ex.com/member/alice',
       category: '问与答',
       categorySlug: 'qna',
       pinned: false,
       lastActiveAt: '2023-11-14T22:14:21.000Z', // last_touched=1700000061
       excerpt: '正文内容，映射为 Topic.excerpt（截断见 rss adapter 的 toExcerpt）'
     })
+  })
+
+  it('authorUrl：username 缺失 / 空串 → 不落键；baseUrl 注入随 baseUrl 构造', async () => {
+    const fetchJson = okFetch(
+      JSON.stringify([
+        { ...fullItem, id: 1243176, member: null },
+        { ...fullItem, id: 1243175, member: { username: '   ' } }
+      ])
+    )
+    const topics = await new V2exSourceAdapter({ fetchJson }).fetchLatest()
+    expect('authorUrl' in topics[0]!).toBe(false)
+    expect('authorUrl' in topics[1]!).toBe(false)
+
+    const mirror = await new V2exSourceAdapter({
+      fetchJson: okFetch(),
+      baseUrl: 'https://mirror.example'
+    }).fetchLatest()
+    expect(mirror[0].authorUrl).toBe('https://mirror.example/member/alice')
   })
 
   it('content 缺失 / 空白 → 不写 excerpt 键（undefined 容忍约定）', async () => {
