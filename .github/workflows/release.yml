@@ -85,15 +85,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 检出仅为一件事：读 CHANGELOG.md 的最新版本段落做 release 说明
+      - name: Checkout (for CHANGELOG.md)
+        uses: actions/checkout@v4
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      # 提取 CHANGELOG.md 顶部第一个 '## [' 版本段落作为 release 说明正文。
+      # 取不到（没建 CHANGELOG / 忘记加本版段落）→ 硬失败：宁可构建失败，
+      # 也不发一个没有更新说明的版本。
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk '/^## \[/{n++} n==1{print} n==2{exit}' CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ]; then
+            echo "::error::CHANGELOG.md 顶部没有 '## [vX.Y.Z]' 版本段落——发版前必须先在 CHANGELOG.md 里写本版更新说明"
+            exit 1
+          fi
+          head -5 release-body.md
+
       - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-body.md
           files: |
             artifacts/*.dmg
             artifacts/*-setup.exe
