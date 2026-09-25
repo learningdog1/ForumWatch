@@ -1,6 +1,7 @@
 /**
  * 分类阶段报告（R17）：按分类（默认情报/交易/测评）对**全量话题存档**
- * （topics-store）做日/周/月三档 AI 总结。
+ * （topics-store）做日/周/月三档 AI 总结。R19 起报告升级为「行情简报」结构
+ * （AI 五段：总评/热点/趋势/行情解读/展望）+ 确定性统计段，推送改双形态渲染。
  *
  * 与 ai.dailyReport **并存不替代**：日报=命中监控报告（数据面 hits/*.jsonl，
  * 监控视角，写 reports/YYYY-MM-DD.md）；本报告=分类行情报告（数据面 topics/
@@ -8,18 +9,32 @@
  * 开关、文件全部独立——现有 listReportDays 的 REPORT_FILE_RE 只认
  * `\d{4}-\d{2}-\d{2}\.md` 且 readdirSync 非递归，子目录名被正则滤掉，互不影响。
  *
- * 报告结构（文件全文）：标题（# 分类总结报告·<label>）→ AI 总述（或模板降级）
- * → 分类热点/趋势（确定性统计）→ 行情（extractDeal 分位表）→ 数据覆盖率
- * （确定性、可验证）→ 附录·全量帖子清单（确定性拼接，每帖一行保证不漏，
- * 附录行数与分类内帖子数严格相等）。
+ * 报告结构（文件全文）：标题（# 📰 分类行情报告 · <label>）→ AI 简报五段
+ * （🧠 总评 / 🔥 热点 / 📈 趋势 / 💰 行情解读 / 🔮 展望；降级时整段缺失并
+ * 头注「⚠️ 模板模式」）→ 帖量分布/同帖多发与活跃作者/价格分位/覆盖率
+ * （确定性统计）→ 附录·全量帖子清单（确定性拼接，每帖一行保证不漏，附录行数
+ * 与分类内帖子数严格相等）。AI 载荷除每帖元数据外还带确定性统计（stats：
+ * 分类计数/作者榜/同帖多发/价格分位）——行情解读基于真实分位数而不是猜。
  *
- * LLM map-reduce 防漏（月报可达上千帖）：≤60 帖单次直出；>60 按时间序 60/段
- * 逐段小结（载荷只带 title/category/author/time/extractDeal 结果，不带 url/
- * 正文），全部成功后 reduce 汇总；任一段或 reduce 失败/空串 → **整体降级**为
- * 纯统计+全量清单模板并头注「模板模式（AI 不可用）」，绝不拼半成品；
- * provider 三项不齐同样降级；零帖不调 LLM 直接固定文案。分段数设上限
- * MAX_MAP_CHUNKS：串行 LLM × 每段 60s 超时，几千帖可占用数十分钟——超上限
- * 不走 map-reduce，直接降级确定性模板并在头注注明「体量过大」。
+ * LLM 直出模式（R19）：所有 chat 调用带 disableThinking——思考型模型的思考
+ * token 与正文共用 max_tokens 预算，思考吃光预算时 content 为空串（R11 事故
+ * 主因），曾导致报告静默降级模板（「没带 AI 总结」的根因）。
+ *
+ * LLM 分段按 **token 预算自适应**（R19b，取代旧 60 帖/段固定切分——小上下文
+ * 时代的遗产：主流模型早已 128k~1M 上下文，679 帖/天的日报按 60 帖/段要串
+ * 13 次调用（任一段失败整体降级），月报 15k+ 帖更是直接撞 1800 帖上限被
+ * 「体量过大」降级、永远没有 AI 总结）。载荷估算 ≤ REPORT_INPUT_TOKEN_BUDGET
+ * （90k token——对 128k 上下文模型也留足输出余量，1M 模型绰绰有余）单次直出；
+ * 超出按时间序贪心切段 map-reduce（逐段小结 → reduce 汇总），段数上限
+ * MAX_MAP_CHUNKS（30 段 × 90k ≈ 2.7M token ≈ 数万帖）。任一段或 reduce
+ * 失败/空串 → **整体降级**为纯统计+全量清单模板并头注「模板模式（AI 不可用）」，
+ * 绝不拼半成品；provider 三项不齐同样降级；零帖不调 LLM 直接固定文案；超段数
+ * 上限直接确定性降级并头注「体量过大」。超时随载荷放大（60s + 1s/1k token，
+ * 封顶 180s）。
+ *
+ * LLM 载荷（R19b）：每帖带 time/date/title/category/author/extractDeal/url，
+ * 摘要（excerpt）来源提供时截 120 字带上——大上下文不再省料，模型可引用真实
+ * 链接（prompt 限定 url 原样取自载荷，禁止编造）；另带确定性统计 stats。
  *
  * 并发护栏：generate 按档位（kind）互斥——手动「立即生成」与定时 tick 撞在
  * 同档时**复用同一个进行中的 Promise**（同结果返回双方），绝不双份 LLM/写文件/
@@ -30,10 +45,13 @@
  * nodeseek（对只配 RSS/V2EX 的用户回退是悬挂 id，报告恒零帖）；覆盖率
  * coveredDays 同口径传 sourceIds（空 = 不过滤），D/T 的 D 与帖子过滤对齐。
  *
- * 推送：正文（总述~覆盖率）经 splitForTelegram 分段送 notifier.sendRaw，
- * **附录不推送**（月报附录数千行会刷屏，文件里全量）；推送失败只 log error
- * 不影响生成。shouldPush 可注入（样例脚本传 () => false 恒不推）；缺省按配置
- * 四联判定（总开关 × 该档开关 × notifyEnabled × anyChannelReady）。
+ * 推送（R19）：正文（总述~覆盖率）经 splitForTelegram 分段（上限 3000，给
+ * HTML 膨胀留 4096 余量）→ 每段双形态（纯文本 + Telegram HTML，见
+ * notify/markdown-report）送 notifier.sendRaw(text, {html})——telegram 按
+ * HTML 渲染（粗体标题/对齐表格/blockquote），其余通道用纯文本；**附录不推送**
+ * （月报附录数千行会刷屏，文件里全量）；推送失败只 log error 不影响生成。
+ * shouldPush 可注入（样例脚本传 () => false 恒不推）；缺省按配置四联判定
+ * （总开关 × 该档开关 × notifyEnabled × anyChannelReady）。
  *
  * 日期口径：一律本地时区 Date 算术 + formatLocalDate（D5 坑④），绝不用 ISO
  * slice；周界用 setDate 回退（mondayOf）、月界用 new Date(y, m-1, 1) /
@@ -49,9 +67,10 @@ import { buildCategoryStats, dayOfRecord, type CategoryStats } from '../monitor/
 import { extractDeal } from '../monitor/rules'
 import { TOPIC_ARCHIVE_RETENTION_DAYS } from '../monitor/topics-store'
 import { splitForTelegram } from './daily-report'
+import { REPORT_CHUNK_MAX, reportPushPair } from '../notify/markdown-report'
 import type { AppConfig, TopicRecord } from '../../shared/types'
 import type { Logger } from '../logger'
-import { anyChannelReady } from '../notify/types'
+import { anyChannelReady, type RawMessageOptions } from '../notify/types'
 import type { AiProvider } from './provider'
 
 /** 报告档位：日 / 周（上一完整周，周一生成）/ 月（上一自然月，1 日生成） */
@@ -60,18 +79,25 @@ export type CategoryReportKind = 'daily' | 'weekly' | 'monthly'
 /** 全部档位（固定序：tick 遍历与 UI 档位 tab 共用） */
 export const CATEGORY_REPORT_KINDS: readonly CategoryReportKind[] = ['daily', 'weekly', 'monthly']
 
-/** LLM 单段帖子数上限（map-reduce 的段大小；≤ 此值单次直出） */
-export const CATEGORY_REPORT_CHUNK = 60
 /**
- * map-reduce 分段数上限（可调）：串行 LLM、每段 60s 超时——段数无上限时几千帖
- * 可占用数十分钟（30 段 ≈ 1800 帖已是月报极端量）。超出即不走 LLM，直接降级
- * 确定性报告（统计 + 全量附录，头注「体量过大」）。
+ * LLM 单次调用的输入 token 预算（载荷估算口径，R19b）：90k 对 128k 上下文模型
+ * 留足输出与 system 余量，对 256k/1M 模型绰绰有余。预算内单次直出（679 帖/天
+ * 的日报一次调用完成），超出才 map-reduce。调小更保守（多几次调用），调大
+ * 需确认所用模型上下文 ≥ 预算 × 1.5。
+ */
+export const REPORT_INPUT_TOKEN_BUDGET = 90_000
+/**
+ * map-reduce 分段数上限（可调）：串行 LLM 的时长护栏——30 段 × 90k ≈ 2.7M
+ * token ≈ 数万帖，正常论坛月报远够。超出即不走 LLM，直接降级确定性报告
+ * （统计 + 全量附录，头注「体量过大」）。
  */
 export const MAX_MAP_CHUNKS = 30
-/** LLM 请求超时（对齐 daily-report REPORT_TIMEOUT_MS 形态，量更大放宽） */
+/** LLM 请求基础超时（动态超时的底数：+1s/1k token，见 timeoutForTokens） */
 const REPORT_TIMEOUT_MS = 60000
-/** LLM max_tokens（对齐 daily-report REPORT_MAX_TOKENS 形态，量更大放宽） */
-const REPORT_MAX_TOKENS = 2000
+/** 动态超时封顶（大载荷单次 180s；串行 30 段封顶也就是 90 分钟，月报可接受） */
+const REPORT_TIMEOUT_MAX_MS = 180_000
+/** LLM max_tokens（R19：简报五段比旧三段长，2000→4000 防截断；直出模式不吃思考预算） */
+const REPORT_MAX_TOKENS = 4000
 /** 单期自动生成尝试上限（防 generate 持续失败死循环，对齐 daily-report 3 次） */
 export const MAX_AUTO_ATTEMPTS_PER_PERIOD = 3
 /** timeHHMM 解析失败回退（sanitize 已保证形状，防御性回退；按档错峰默认） */
@@ -118,7 +144,7 @@ export interface CategoryReportDeps {
      */
     coveredDays(fromDate: string, toDate: string, sourceIds?: string[]): Promise<string[]>
   }
-  notifier: { sendRaw(text: string): Promise<void> }
+  notifier: { sendRaw(text: string, opts?: RawMessageOptions): Promise<void> }
   getConfig: () => AppConfig
   logger: Pick<Logger, 'info' | 'warn' | 'error'>
   /**
@@ -222,6 +248,127 @@ function providerConfigured(cfg: AppConfig): boolean {
   return p.baseUrl.trim() !== '' && p.apiKey.trim() !== '' && p.model.trim() !== ''
 }
 
+/**
+ * AI 简报的五段结构契约（R19）：单发直出与 reduce 汇总共用，prompt 要求模型
+ * 严格按此输出（emoji 小节标题保留——推送端按标题粗体渲染，用户扫一眼即分栏）。
+ */
+const BRIEF_STRUCTURE = [
+  '## 🧠 总评',
+  '一段话（≤4 句）：本期帖子量、市场氛围、最值得注意的 2-3 件事。',
+  '',
+  '## 🔥 热点',
+  '按分类归纳本期讨论热点，每条一行 `- **热点关键词**：一句话解读（代表帖「标题原文」）`，代表帖可附 markdown 链接 `[标题](url)`（url 必须原样取自载荷 topics，禁止编造或改写）。只引用 topics 里真实存在的标题。',
+  '',
+  '## 📈 趋势',
+  '跨帖信号：重复出现的话题、活跃作者动向、数量与价格上的明显变化。没有明显信号就写「本期无明显趋势信号」。',
+  '',
+  '## 💰 行情解读',
+  '结合 stats.dealGroups 的价格分位统计，用 2-4 句话解读本期价格行情（哪个周期/币种在什么价位、流量配置如何、对买家意味着什么）。stats.dealGroups 为空则写「本期无结构化价格样本」。',
+  '',
+  '## 🔮 展望',
+  '2-3 条下一期值得关注的观察点（基于本期信号推测，写明是推测）。'
+].join('\n')
+
+/**
+ * 确定性统计 → LLM 载荷（R19）：分类计数/作者榜/同帖多发/价格分位，让模型
+ * 的「行情解读」基于真实分位数而不是从标题猜——AI 载荷与确定性渲染段同源
+ * （buildCategoryStats），数字不会两套口径。
+ */
+function statsPayload(records: TopicRecord[]): Record<string, unknown> {
+  const stats = buildCategoryStats(records)
+  return {
+    categoryTotals: stats.matrix.categories.map((c, i) => ({
+      category: c,
+      count: stats.matrix.counts.reduce((sum, row) => sum + (row[i] ?? 0), 0)
+    })),
+    topAuthors: stats.topAuthors.slice(0, 10),
+    repeatedTitles: stats.repeatedTitles.slice(0, 10),
+    dealGroups: stats.dealGroups
+  }
+}
+
+/** 载荷里摘要的截断长度（大上下文时代不再省料，但摘要只是辅助信号，120 字够用） */
+const EXCERPT_MAX_CHARS = 120
+
+/** 摘要截断（空/缺省 → undefined，JSON.stringify 自然省键——与 Topic.excerpt 同款容忍约定） */
+function clipExcerpt(s: string | undefined): string | undefined {
+  if (s === undefined || s === '') return undefined
+  return s.length <= EXCERPT_MAX_CHARS ? s : `${s.slice(0, EXCERPT_MAX_CHARS - 1)}…`
+}
+
+/**
+ * LLM 载荷的单帖条目（llmPayload 与 chunkByTokenBudget 的估算共用同一形状，
+ * 防两处口径漂移——估算漏字段会让分段偏小、预算浪费，多算则安全）。
+ */
+function llmTopicEntry(r: TopicRecord): Record<string, unknown> {
+  return {
+    time: hhmmLocal(r.firstSeenAt),
+    // 归属日优先记录内 day 字段（写入时本地日，防事后改时区归日漂移）
+    date: dayOfRecord(r),
+    title: r.title,
+    category: r.category,
+    author: r.author,
+    deal: extractDeal(r.title),
+    url: r.url,
+    excerpt: clipExcerpt(r.excerpt)
+  }
+}
+
+/**
+ * 朴素 token 估算（偏保守=偏高）：CJK ×1.2 + 其余 ×0.3，向上取整。高估只会
+ * 让分段更小（多几次调用），低估才有撑爆上下文的风险——宁可保守。
+ */
+export function estimateTokens(s: string): number {
+  let cjk = 0
+  let other = 0
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!
+    if (
+      (cp >= 0x2e80 && cp <= 0x9fff) || // CJK 部首~彝文/傣文（含假名注音）
+      (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul 音节
+      (cp >= 0xf900 && cp <= 0xfaff) || // CJK 兼容表意
+      (cp >= 0xff00 && cp <= 0xffef) || // 全角形式
+      (cp >= 0x20000 && cp <= 0x3fffd) // CJK 扩展 B+
+    ) {
+      cjk++
+    } else {
+      other++
+    }
+  }
+  return Math.ceil(cjk * 1.2 + other * 0.3)
+}
+
+/** 段载荷的固定开销估算（system prompt + stats + JSON 包裹），预算先扣掉 */
+const SEGMENT_OVERHEAD_TOKENS = 8_000
+
+/**
+ * 按输入 token 预算贪心分段（时间序，records 已旧→新）：预算内单段；累计超预算
+ * 开新段；单帖自身超预算也独立成段（不丢内容——宁可一段超预算也不裁剪数据）。
+ * 导出供测试与样例脚本复用。
+ */
+export function chunkByTokenBudget(records: TopicRecord[]): TopicRecord[][] {
+  const chunks: TopicRecord[][] = []
+  let current: TopicRecord[] = []
+  let used = SEGMENT_OVERHEAD_TOKENS
+  for (const r of records) {
+    const cost = estimateTokens(JSON.stringify(llmTopicEntry(r)))
+    if (current.length > 0 && used + cost > REPORT_INPUT_TOKEN_BUDGET) {
+      chunks.push(current)
+      current = []
+      used = SEGMENT_OVERHEAD_TOKENS
+    }
+    current.push(r)
+    used += cost
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
+/** 动态超时：大载荷输入处理更慢——底数 60s + 1s/1k token，封顶 180s */
+function timeoutForTokens(tokens: number): number {
+  return Math.min(REPORT_TIMEOUT_MS + Math.ceil(tokens / 1000) * 1000, REPORT_TIMEOUT_MAX_MS)
+}
+
 export class CategoryReportService {
   private readonly deps: CategoryReportDeps
   private readonly now: () => number
@@ -298,7 +445,7 @@ export class CategoryReportService {
 
     const appendix = cr.appendix ? buildAppendix(records) : ''
     const body = [
-      `# 分类总结报告·${period.label}`,
+      `# 📰 分类行情报告 · ${period.label}`,
       '',
       ...(archiveShort
         ? [
@@ -309,8 +456,8 @@ export class CategoryReportService {
       ...(ai.degraded
         ? [
             ai.volumeCapped
-              ? `> 模板模式（体量过大）：分类内帖子 ${records.length} 条超出 AI 总结分段上限（${MAX_MAP_CHUNKS} 段 × ${CATEGORY_REPORT_CHUNK} 帖/段），已降级为确定性统计 + 全量清单，无 AI 总结。`
-              : '> 模板模式（AI 不可用）：以下为确定性统计 + 全量清单，无 AI 总结。',
+              ? `> ⚠️ 模板模式（体量过大）：分类内帖子 ${records.length} 条超出 AI 总结分段上限（token 预算 × ${MAX_MAP_CHUNKS} 段），本期无 AI 简报，只有确定性统计 + 全量清单。`
+              : '> ⚠️ 模板模式（AI 不可用）：AI 简报生成失败，本期只有确定性统计 + 全量清单。',
             ''
           ]
         : []),
@@ -483,10 +630,10 @@ export class CategoryReportService {
   }
 
   /**
-   * LLM 总结：零帖不调返回空串；provider 未配置 / 帖量超分段上限 / 单发或任一
-   * 段/reduce 失败或空串 → { degraded: true, markdown: '', segments: 0 }（整体
-   * 降级，绝不拼半成品；volumeCapped 标记体量降级供头注区分文案）。
-   * >CHUNK 帖按时间序 60/段 map + reduce，段数以 MAX_MAP_CHUNKS 为上限。
+   * LLM 总结：零帖不调返回空串；provider 未配置 / 预算分段数超 MAX_MAP_CHUNKS /
+   * 单发或任一段/reduce 失败或空串 → { degraded: true, markdown: '', segments: 0 }
+   * （整体降级，绝不拼半成品；volumeCapped 标记体量降级供头注区分文案）。
+   * 预算内（chunkByTokenBudget 单段）单次直出；超出按时间序贪心切段 map-reduce。
    */
   private async summarize(
     kind: CategoryReportKind,
@@ -501,26 +648,22 @@ export class CategoryReportService {
       this.deps.logger.warn('category report: AI provider not configured, using template')
       return { markdown: '', degraded: true, segments: 0, volumeCapped: false }
     }
-    // 体量上限：串行 LLM × 每段 60s 超时，段数无上限时几千帖可占数十分钟——
-    // 超上限不走 map-reduce，直接确定性降级（头注「体量过大」）
-    if (Math.ceil(records.length / CATEGORY_REPORT_CHUNK) > MAX_MAP_CHUNKS) {
+    // 体量护栏：token 预算分段的段数仍超上限（串行 LLM 时长护栏）→ 确定性降级
+    const chunks = chunkByTokenBudget(records)
+    if (chunks.length > MAX_MAP_CHUNKS) {
       this.deps.logger.warn(
-        `category report: ${records.length} topics exceed map-reduce cap ` +
-          `(${MAX_MAP_CHUNKS} segments x ${CATEGORY_REPORT_CHUNK}), degrading to template`
+        `category report: ${records.length} topics need ${chunks.length} segments ` +
+          `(budget ${REPORT_INPUT_TOKEN_BUDGET} tokens, cap ${MAX_MAP_CHUNKS}), degrading to template`
       )
       return { markdown: '', degraded: true, segments: 0, volumeCapped: true }
     }
     try {
-      if (records.length <= CATEGORY_REPORT_CHUNK) {
-        const out = await this.chatSummarize(kind, period, records)
+      if (chunks.length === 1) {
+        const out = await this.chatSummarize(kind, period, chunks[0]!)
         if (out.trim() === '') throw new Error('LLM returned empty content')
         return { markdown: out, degraded: false, segments: 1, volumeCapped: false }
       }
-      // map：按时间序（records 已旧→新）60/段逐段小结（段数已被上限拦过）
-      const chunks: TopicRecord[][] = []
-      for (let i = 0; i < records.length; i += CATEGORY_REPORT_CHUNK) {
-        chunks.push(records.slice(i, i + CATEGORY_REPORT_CHUNK))
-      }
+      // map：按时间序（records 已旧→新）贪心切段逐段小结（段数已被上限拦过）
       const summaries: string[] = []
       for (let i = 0; i < chunks.length; i++) {
         const s = await this.chatChunkSummary(kind, period, i + 1, chunks.length, chunks[i]!)
@@ -528,7 +671,7 @@ export class CategoryReportService {
         summaries.push(s)
       }
       // reduce：全部段成功后汇总（任一段失败已在上方抛出，不会带半成品进来）
-      const final = await this.chatReduce(kind, period, summaries)
+      const final = await this.chatReduce(kind, period, records, summaries)
       if (final.trim() === '') throw new Error('LLM returned empty content for reduce')
       return { markdown: final, degraded: false, segments: chunks.length + 1, volumeCapped: false }
     } catch (err) {
@@ -539,25 +682,19 @@ export class CategoryReportService {
     }
   }
 
-  /** ≤CHUNK 帖：单次直出完整总结（总述 + 热点 + 趋势三段式） */
+  /** 预算内：单次直出完整简报（BRIEF_STRUCTURE 五段）；超时随载荷放大 */
   private chatSummarize(
     kind: CategoryReportKind,
     period: CategoryReportPeriod,
     records: TopicRecord[]
   ): Promise<string> {
     const system =
-      '根据论坛帖子存档生成中文分类行情总结（markdown）。结构：先一段总述（帖子量、' +
-      '主要话题与氛围），再「## 分类热点」按分类归纳讨论热点（引用代表性标题），' +
-      '最后「## 趋势」给跨帖信号（重复出现的话题、活跃作者、价格走势）。只输出 markdown。'
-    return this.deps.provider.chat({
-      system,
-      user: JSON.stringify(this.llmPayload(kind, period, records)),
-      timeoutMs: REPORT_TIMEOUT_MS,
-      maxTokens: REPORT_MAX_TOKENS
-    })
+      '你是论坛行情分析师。根据提供的帖子存档（topics）与确定性统计（stats），用中文 ' +
+      `markdown 写一期行情简报，必须严格按以下结构输出（保留 emoji 小节标题，顺序不变）：\n\n${BRIEF_STRUCTURE}\n\n只输出 markdown 正文，不要输出其他说明。`
+    return this.chatWithDynamicTimeout(system, this.llmPayload(kind, period, records))
   }
 
-  /** >CHUNK 帖的段小结（载荷只带元数据，不带 url/正文） */
+  /** 超预算段的段小结（载荷带元数据、url 与段内统计；url 供段小结透传给 reduce 引用） */
   private chatChunkSummary(
     kind: CategoryReportKind,
     period: CategoryReportPeriod,
@@ -566,35 +703,47 @@ export class CategoryReportService {
     records: TopicRecord[]
   ): Promise<string> {
     const system =
-      `这是论坛帖子存档分段时间总结的第 ${segIndex}/${segTotal} 段。用中文 markdown ` +
-      '小结该段帖子：一段概述（帖子量与话题）+ 要点列表（代表性标题与信号）。只输出 markdown。'
-    return this.deps.provider.chat({
-      system,
-      user: JSON.stringify(this.llmPayload(kind, period, records)),
-      timeoutMs: REPORT_TIMEOUT_MS,
-      maxTokens: REPORT_MAX_TOKENS
-    })
+      `这是论坛帖子存档分段时间总结的第 ${segIndex}/${segTotal} 段。用中文 markdown 提炼该段帖子的素材：` +
+      '一段概述（帖子量与话题氛围）+ 要点列表（每条一行 `- 要点：一句话`，覆盖代表性标题、' +
+      '价格与数量信号、活跃作者；代表性帖子附 markdown 链接 `[标题](url)`，url 原样取自载荷，' +
+      '禁止编造）。只输出 markdown，不要提及分段。'
+    return this.chatWithDynamicTimeout(system, this.llmPayload(kind, period, records))
   }
 
-  /** reduce：全部段小结成功后汇总为完整总结 */
+  /** reduce：全部段小结成功后汇总为完整简报（BRIEF_STRUCTURE 五段） */
   private chatReduce(
     kind: CategoryReportKind,
     period: CategoryReportPeriod,
+    records: TopicRecord[],
     summaries: string[]
   ): Promise<string> {
     const system =
-      '根据分段时间小结汇总成完整的中文分类行情总结（markdown）。结构：先一段总述' +
-      '（帖子量、主要话题与氛围），再「## 分类热点」按分类归纳讨论热点，最后「## 趋势」' +
-      '给跨帖信号（重复话题、活跃作者、价格走势）。只输出 markdown，不要提及分段过程。'
-    return this.deps.provider.chat({
-      system,
-      user: JSON.stringify({ period: period.label, kind, segments: summaries }),
-      timeoutMs: REPORT_TIMEOUT_MS,
-      maxTokens: REPORT_MAX_TOKENS
+      '你是论坛行情分析师。根据分段时间小结（segments）与全期确定性统计（stats），汇总成完整的中文 ' +
+      `行情简报，必须严格按以下结构输出（保留 emoji 小节标题，顺序不变）：\n\n${BRIEF_STRUCTURE}\n\n只输出 markdown，不要提及分段过程。`
+    return this.chatWithDynamicTimeout(system, {
+      period: period.label,
+      kind,
+      stats: statsPayload(records),
+      segments: summaries
     })
   }
 
-  /** LLM 载荷：title/category/author/time/extractDeal 结果（不带 url/正文） */
+  /** chat 的动态超时封装：按 user 载荷估算 token → 60s 底数 + 1s/1k，封顶 180s */
+  private chatWithDynamicTimeout(
+    system: string,
+    payload: Record<string, unknown>
+  ): Promise<string> {
+    const user = JSON.stringify(payload)
+    return this.deps.provider.chat({
+      system,
+      user,
+      timeoutMs: timeoutForTokens(estimateTokens(user)),
+      maxTokens: REPORT_MAX_TOKENS,
+      disableThinking: true
+    })
+  }
+
+  /** LLM 载荷：每帖元数据 + url/摘要（截 120 字）+ 确定性统计 */
   private llmPayload(
     kind: CategoryReportKind,
     period: CategoryReportPeriod,
@@ -604,24 +753,21 @@ export class CategoryReportService {
       kind,
       period: period.label,
       total: records.length,
-      topics: records.map((r) => ({
-        time: hhmmLocal(r.firstSeenAt),
-        // 归属日优先记录内 day 字段（写入时本地日，防事后改时区归日漂移）
-        date: dayOfRecord(r),
-        title: r.title,
-        category: r.category,
-        author: r.author,
-        deal: extractDeal(r.title)
-      }))
+      stats: statsPayload(records),
+      topics: records.map(llmTopicEntry)
     }
   }
 
-  /** 按配置推送正文（总述~覆盖率，**不含附录**）；分段送 sendRaw；失败只 log error */
+  /**
+   * 按配置推送正文（总述~覆盖率，**不含附录**）；splitForTelegram 分段（上限
+   * REPORT_CHUNK_MAX=3000，给 HTML 膨胀留 4096 余量）→ 每段双形态（纯文本 +
+   * Telegram HTML）送 sendRaw；失败只 log error。
+   */
   private async pushIfEnabled(kind: CategoryReportKind, body: string): Promise<void> {
     if (!this.shouldPushNow(kind)) return
-    const chunks = splitForTelegram(body)
+    const chunks = splitForTelegram(body, REPORT_CHUNK_MAX).map(reportPushPair)
     try {
-      for (const chunk of chunks) await this.deps.notifier.sendRaw(chunk)
+      for (const chunk of chunks) await this.deps.notifier.sendRaw(chunk.text, { html: chunk.html })
       this.deps.logger.info(`category report (${kind}) pushed (${chunks.length} message(s))`)
     } catch (err) {
       this.deps.logger.error(`category report (${kind}) push failed: ${describe(err)}`)
@@ -656,9 +802,9 @@ function anchorDateOf(kind: CategoryReportKind, now: Date): Date {
 
 // ---- 确定性段落渲染（模板模式的降级文案与正常模式的统计段共用同一实现） ----
 
-/** 分类热点：分类计数概览 + 每日分布（分类×日矩阵的确定性渲染） */
+/** 帖量分布：分类计数概览 + 每日分布（分类×日矩阵的确定性渲染） */
 function buildHotspotsSection(stats: CategoryStats): string {
-  const lines: string[] = ['## 分类热点', '']
+  const lines: string[] = ['## 📊 帖量分布', '']
   if (stats.total === 0) {
     lines.push('本期无帖子。')
     return lines.join('\n')
@@ -681,9 +827,9 @@ function buildHotspotsSection(stats: CategoryStats): string {
   return lines.join('\n')
 }
 
-/** 趋势：同帖多发（normalizeTitle 归并 ≥2 次）+ 作者 Top10 */
+/** 同帖多发与活跃作者：normalizeTitle 归并 ≥2 次 + 作者 Top10（确定性） */
 function buildTrendSection(stats: CategoryStats): string {
-  const lines: string[] = ['## 趋势', '']
+  const lines: string[] = ['## 🔁 同帖多发与活跃作者', '']
   if (stats.repeatedTitles.length > 0) {
     lines.push('同帖多发（标题归一后出现 ≥2 次，热门信号）：')
     for (const t of stats.repeatedTitles) lines.push(`- ×${t.count} ${t.title}`)
@@ -698,9 +844,9 @@ function buildTrendSection(stats: CategoryStats): string {
   return lines.join('\n')
 }
 
-/** 行情：extractDeal 分位表（cycle×currency）；零样本如实写「未解析出结构化价格」 */
+/** 价格分位：extractDeal 分位表（cycle×currency）；零样本如实写「未解析出结构化价格」 */
 function buildMarketSection(stats: CategoryStats): string {
-  const lines: string[] = ['## 行情（结构化价格）', '']
+  const lines: string[] = ['## 💸 价格分位', '']
   if (stats.dealGroups.length === 0) {
     lines.push('本期未解析出结构化价格（标题无可识别的周期/币种价格形态）。')
     return lines.join('\n')
@@ -731,7 +877,7 @@ function buildCoverageSection(info: {
   aiVolumeCapped: boolean
   zeroRecords: boolean
 }): string {
-  const lines: string[] = ['## 数据覆盖率', '']
+  const lines: string[] = ['## 📋 覆盖率', '']
   lines.push(`- 存档 ${info.coveredDays}/${info.totalDays} 天有数据（期间各日存档完整性）。`)
   lines.push(
     info.appendixEnabled

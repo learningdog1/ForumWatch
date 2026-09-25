@@ -10,8 +10,10 @@
  * - 文件名 `YYYY-MM-DD.md`，直接 writeFile 覆盖（日报允许手动重新生成覆盖）。
  * - 推送条件：cfg.ai.dailyReport.enabled 且有就绪推送通道（R6-W1 起通道化判定）
  *   且 notifyEnabled；
- *   推送失败只 log error 不影响返回值。分段：>3500（UTF-16 口径 text.length）
- *   按行边界聚合切分，续段尾缀"（续 N）"。
+ *   推送失败只 log error 不影响返回值。分段（R19）：>REPORT_CHUNK_MAX（markdown
+ *   口径 text.length，比 4096 上限多留 HTML 膨胀余量）按行边界聚合切分，续段尾缀
+ *   "（续 N）"；每段双形态（纯文本 + Telegram HTML，notify/markdown-report）送
+ *   sendRaw(text, {html})。
  * - tick（定时检查）：cfg.ai.dailyReport.enabled（功能总开关，关闭时到点不
  *   生成——不调 LLM、不写文件、不消耗 attempts；手动 generate 不受影响）且
  *   now >= 今天 timeHHMM 且 reports/<today>.md 不存在且 desired==='running'
@@ -26,19 +28,20 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { formatLocalDate } from '../monitor/hits-store'
+import { REPORT_CHUNK_MAX, reportPushPair } from '../notify/markdown-report'
 import type {
   AppConfig,
   DailyReportInfo,
   HitRecord
 } from '../../shared/types'
 import type { Logger } from '../logger'
-import { anyChannelReady } from '../notify/types'
+import { anyChannelReady, type RawMessageOptions } from '../notify/types'
 import type { AiProvider } from './provider'
 
 /** 日报 LLM 请求超时（D5） */
 const REPORT_TIMEOUT_MS = 30000
-/** 日报 LLM max_tokens */
-const REPORT_MAX_TOKENS = 1500
+/** 日报 LLM max_tokens（R19：结构化三段输出，1500→3000 防截断；直出模式不吃思考预算） */
+const REPORT_MAX_TOKENS = 3000
 /** Telegram 单段长度上限（UTF-16 口径，TG 上限 4096，取 3500 留余量，D5） */
 export const TELEGRAM_CHUNK_MAX = 3500
 /** 续段尾缀预留长度（"（续 N）"） */
@@ -53,7 +56,7 @@ const REPORT_FILE_RE = /^\d{4}-\d{2}-\d{2}\.md$/
 export interface DailyReportDeps {
   provider: Pick<AiProvider, 'chat'>
   hits: { readDay(dateLocal: string): Promise<HitRecord[]> }
-  notifier: { sendRaw(text: string): Promise<void> }
+  notifier: { sendRaw(text: string, opts?: RawMessageOptions): Promise<void> }
   getConfig: () => AppConfig
   logger: Pick<Logger, 'info' | 'warn' | 'error'>
   /** <userData>/reports（构造方 join 好） */
@@ -192,6 +195,8 @@ export class DailyReportService {
         title: h.topic.title,
         category: h.topic.category,
         sourceId: h.topic.sourceId,
+        // R19b：url 带上（命中清单可链接直达；大上下文不再省料）
+        url: h.topic.url,
         matchedBy: h.matchedBy,
         // 第五轮：规则命中的 label（旧 hits/*.jsonl 行没有该字段，?? null 归一）
         matchedRule: h.matchedRule ?? null,
@@ -201,19 +206,26 @@ export class DailyReportService {
       }))
     }
     const system =
-      '根据命中记录生成中文监控日报，markdown 格式，结构：一段总述（几条命中、' +
-      '主要话题）+ 分来源/分类的要点列表（标题、时间、命中方式），结尾一句数据说明' +
-      '（AI 生成）。命中如带锐评（commentary 字段），在要点中用一句话引用它。' +
-      '只输出 markdown。'
+      '根据命中记录生成中文监控日报（markdown）。结构：## 📌 概览（一段话：几条命中、' +
+      '主要话题与氛围）→ ## 📋 命中清单（按来源分组，每条一行 `- HH:MM [分类] [标题](url)（命中方式）`，' +
+      'url 原样取自载荷、禁止编造）→ ## 💡 观察（1-3 句跨命中观察，没有可整节省略），' +
+      '结尾一行数据说明（AI 生成）。' +
+      '命中如带锐评（commentary 字段），在要点中用一句话引用它。' +
+      '只输出 markdown，不得编造未提供的命中。'
     return this.deps.provider.chat({
       system,
       user: JSON.stringify(payload),
       timeoutMs: REPORT_TIMEOUT_MS,
-      maxTokens: REPORT_MAX_TOKENS
+      maxTokens: REPORT_MAX_TOKENS,
+      disableThinking: true
     })
   }
 
-  /** 按配置推送：分段送 notifier.sendRaw；失败只 log error，不影响 generate 返回 */
+  /**
+   * 按配置推送：splitForTelegram 分段（上限 REPORT_CHUNK_MAX，给 HTML 膨胀留
+   * 4096 余量）→ 每段双形态（纯文本 + Telegram HTML）送 notifier.sendRaw；
+   * 失败只 log error，不影响 generate 返回。
+   */
   private async pushIfEnabled(markdown: string): Promise<void> {
     const cfg = this.deps.getConfig()
     // R6-W1：configured 判定通道化（任一 enabled 且凭据齐备的已实现通道；本轮仅
@@ -221,9 +233,9 @@ export class DailyReportService {
     // （sendRaw），W4 才走路由。
     const configured = anyChannelReady(cfg.channels)
     if (!cfg.ai.dailyReport.enabled || !cfg.notifyEnabled || !configured) return
-    const chunks = splitForTelegram(markdown)
+    const chunks = splitForTelegram(markdown, REPORT_CHUNK_MAX).map(reportPushPair)
     try {
-      for (const chunk of chunks) await this.deps.notifier.sendRaw(chunk)
+      for (const chunk of chunks) await this.deps.notifier.sendRaw(chunk.text, { html: chunk.html })
       this.deps.logger.info(`daily report pushed (${chunks.length} message(s))`)
     } catch (err) {
       this.deps.logger.error(`daily report push failed: ${describe(err)}`)
@@ -298,7 +310,8 @@ function fallbackReport(date: string, hits: HitRecord[]): string {
     // 第三轮锐评：非空时以「」附在命中行尾；无（含旧记录缺字段 → null）不加
     const commentary = h.commentary ?? null
     const remark = commentary !== null && commentary !== '' ? `「${commentary}」` : ''
-    lines.push(`- ${time} [${h.topic.category}] ${h.topic.title}（${how}）${remark}`)
+    // R19b：行尾带裸 url（推送端 HTML 模式自动链接化，纯文本端 TG 原生可点）
+    lines.push(`- ${time} [${h.topic.category}] ${h.topic.title}（${how}）${remark} ${h.topic.url}`)
   }
   lines.push('', '—— 数据说明：本日报由 ForumWatch 按命中记录自动生成（模板模式）。')
   return lines.join('\n')

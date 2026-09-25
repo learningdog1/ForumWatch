@@ -16,15 +16,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import {
-  CATEGORY_REPORT_CHUNK,
   CategoryReportService,
   MAX_AUTO_ATTEMPTS_PER_PERIOD,
   MAX_MAP_CHUNKS,
+  chunkByTokenBudget,
+  estimateTokens,
   periodFor,
+  REPORT_INPUT_TOKEN_BUDGET,
   type CategoryReportDeps,
   type CategoryReportKind
 } from './category-report'
-import { splitForTelegram, TELEGRAM_CHUNK_MAX } from './daily-report'
+import { splitForTelegram } from './daily-report'
+import { REPORT_CHUNK_MAX, HTML_SAFE_MAX } from '../notify/markdown-report'
 import { DEFAULT_APP_CONFIG, type AppConfig, type TopicRecord } from '../../shared/types'
 
 let dir: string
@@ -95,6 +98,38 @@ function rec(id: string, overrides: Partial<TopicRecord> = {}): TopicRecord {
     ...overrides
   }
 }
+
+/**
+ * 大标题记录：单帖载荷估算 ~45k token（150k ASCII × 0.3），两帖 + 段开销即超
+ * 90k 预算 → 各自成段（token 预算分段测试的「大载荷」制造器）。
+ */
+const BIG_TITLE = 'x'.repeat(150_000)
+function bigRec(id: string): TopicRecord {
+  return rec(id, { title: BIG_TITLE })
+}
+
+describe('token 预算分段（R19b 纯函数）', () => {
+  it('estimateTokens：CJK ×1.2 + 其余 ×0.3，向上取整', () => {
+    expect(estimateTokens('')).toBe(0)
+    expect(estimateTokens('aaaa')).toBe(2) // 4 × 0.3 = 1.2 → 2
+    expect(estimateTokens('中文字')).toBe(4) // 3 × 1.2 = 3.6 → 4
+    expect(estimateTokens('中文a')).toBe(3) // 2×1.2 + 1×0.3 = 2.7 → 3
+  })
+
+  it('chunkByTokenBudget：预算内单段；超预算贪心切（顺序保持）；空数组 → []', () => {
+    expect(chunkByTokenBudget([])).toEqual([])
+    // 100 小帖 ~3k token：单段（旧逻辑按 60 帖固定切两段）
+    const small = Array.from({ length: 100 }, (_, i) => rec(String(i)))
+    expect(chunkByTokenBudget(small)).toHaveLength(1)
+    // 两大帖各 ~45k：两帖 + 8k 开销 = 98k > 90k → 两段
+    const chunks = chunkByTokenBudget([bigRec('a'), bigRec('b')])
+    expect(chunks).toHaveLength(2)
+    expect(chunks[0]).toHaveLength(1)
+    // 贪心：大帖 a + 小帖（~30 token）同段装得下 → [2, 1]
+    const mixed = chunkByTokenBudget([bigRec('a'), rec('1'), bigRec('b')])
+    expect(mixed.map((c) => c.length)).toEqual([2, 1])
+  })
+})
 
 interface TestHarness {
   svc: CategoryReportService
@@ -207,7 +242,7 @@ describe('生成（LLM 分档与降级）', () => {
     const h = build({ records: [], covered: ['2026-09-18'] })
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
     expect(h.chat).not.toHaveBeenCalled()
-    expect(md).toContain('# 分类总结报告·2026-09-18')
+    expect(md).toContain('# 📰 分类行情报告 · 2026-09-18')
     expect(md).toContain('本期分类内无帖子')
     expect(md).toContain('AI 总结：未调用（本期无帖子）')
     expect(md).not.toContain('## 附录·全量帖子清单')
@@ -220,46 +255,78 @@ describe('生成（LLM 分档与降级）', () => {
     })
   })
 
-  it('≤60 帖：单次 LLM 直出；载荷带元数据（title/category/author/deal）不带 url', async () => {
+  it('小体量（token 预算内）：单次 LLM 直出；载荷带元数据（title/category/author/deal）与 url/摘要', async () => {
     const records = [
       rec('1', { title: '年付 ¥99 512M VPS' }),
-      rec('2', { title: '机器测评', category: '测评', categorySlug: 'review' })
+      rec('2', { title: '机器测评', category: '测评', categorySlug: 'review', excerpt: 'x'.repeat(160) })
     ]
     const h = build({ records, covered: ['2026-09-18'] })
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
     expect(h.chat).toHaveBeenCalledTimes(1)
+    // R19：直出模式（disableThinking——思考型模型思考吃光 max_tokens 致空串，
+    // 曾是「报告没带 AI 总结」静默降级的根因）
+    expect(h.chat.mock.calls[0]![0].disableThinking).toBe(true)
+    expect(h.chat.mock.calls[0]![0].maxTokens).toBe(4000)
+    // prompt 为五段简报结构（emoji 小节标题）
+    expect(h.chat.mock.calls[0]![0].system).toContain('## 🧠 总评')
+    expect(h.chat.mock.calls[0]![0].system).toContain('## 💰 行情解读')
+    expect(h.chat.mock.calls[0]![0].system).toContain('## 🔮 展望')
     const payload = JSON.parse(h.chat.mock.calls[0]![0].user as string)
     expect(payload.total).toBe(2)
     expect(payload.topics[0]).toMatchObject({ title: '年付 ¥99 512M VPS', category: '交易' })
     expect(payload.topics[0].deal).toEqual({ cycle: 'yearly', price: { amount: 99, currency: 'CNY' }, trafficGB: 0.5 })
-    expect(JSON.stringify(payload)).not.toContain('https://') // 不带 url
+    // R19：载荷带确定性统计（行情解读的数据依据）
+    expect(payload.stats.categoryTotals).toEqual([{ category: '交易', count: 1 }, { category: '测评', count: 1 }])
+    expect(payload.stats.dealGroups[0]).toMatchObject({ group: 'yearly×CNY', samples: 1, median: 99 })
+    // R19b：载荷带 url（热点可附真实链接）与摘要（超 120 字截断）
+    expect(payload.topics[0].url).toBe('https://example.com/post-1-1')
+    expect(payload.topics[1].excerpt).toBe('x'.repeat(119) + '…')
     expect(md).toContain('AI 总结内容')
     expect(md).not.toContain('模板模式')
     // 附录行数 == 过滤后帖子数（防漏断言）
     expect(appendixLineCount(md)).toBe(2)
   })
 
-  it('>60 帖：按 60 切段逐段 map + reduce（61 帖 → 2 段小结 + 1 汇总）', async () => {
-    const records = Array.from({ length: CATEGORY_REPORT_CHUNK + 1 }, (_, i) =>
+  it('超 token 预算：贪心切段逐段 map + reduce（两大帖 → 2 段小结 + 1 汇总）；超时随载荷放大', async () => {
+    const records = [bigRec('a'), bigRec('b')]
+    const h = build({ records, covered: ['2026-09-18'] })
+    const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
+    expect(h.chat).toHaveBeenCalledTimes(3)
+    // 前两次 = 段小结（各 1 帖），第三次 = reduce（segments 数组）
+    const first = JSON.parse(h.chat.mock.calls[0]![0].user as string)
+    const second = JSON.parse(h.chat.mock.calls[1]![0].user as string)
+    const reduce = JSON.parse(h.chat.mock.calls[2]![0].user as string)
+    expect(first.total).toBe(1)
+    expect(second.total).toBe(1)
+    expect(reduce.segments).toHaveLength(2)
+    // 段载荷不变量：每段估算 ≤ 预算（单帖自身超预算的段除外——此处两段都是单帖大载荷）
+    expect(estimateTokens(h.chat.mock.calls[0]![0].user as string)).toBeLessThanOrEqual(
+      REPORT_INPUT_TOKEN_BUDGET
+    )
+    // 动态超时：~45k token 载荷 → 60s 底数 + ~45s，落在 (60s, 180s]
+    const timeout = h.chat.mock.calls[0]![0].timeoutMs as number
+    expect(timeout).toBeGreaterThan(60_000)
+    expect(timeout).toBeLessThanOrEqual(180_000)
+    expect(md).toContain('AI 总结内容')
+    expect(appendixLineCount(md)).toBe(2)
+    expect(md).toContain(`分段 ${3} 段全部成功`)
+  })
+
+  it('预算内大体量单次直出：100 小帖一次调用（不再按 60 帖固定切段）', async () => {
+    const records = Array.from({ length: 100 }, (_, i) =>
       rec(String(i), { firstSeenAt: `2026-09-18T${String(8 + (i % 12)).padStart(2, '0')}:30:00` })
     )
     const h = build({ records, covered: ['2026-09-18'] })
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
-    expect(h.chat).toHaveBeenCalledTimes(3)
-    // 前两次 = 段小结（60 + 1），第三次 = reduce（segments 数组）
-    const first = JSON.parse(h.chat.mock.calls[0]![0].user as string)
-    const second = JSON.parse(h.chat.mock.calls[1]![0].user as string)
-    const reduce = JSON.parse(h.chat.mock.calls[2]![0].user as string)
-    expect(first.total).toBe(CATEGORY_REPORT_CHUNK)
-    expect(second.total).toBe(1)
-    expect(reduce.segments).toHaveLength(2)
+    expect(h.chat).toHaveBeenCalledTimes(1)
+    const payload = JSON.parse(h.chat.mock.calls[0]![0].user as string)
+    expect(payload.total).toBe(100)
     expect(md).toContain('AI 总结内容')
-    expect(appendixLineCount(md)).toBe(CATEGORY_REPORT_CHUNK + 1)
-    expect(md).toContain(`分段 ${3} 段全部成功`)
+    expect(appendixLineCount(md)).toBe(100)
   })
 
   it('任一 map 段失败 → 整体降级模板（统计表 + 全量附录 + 头注），绝不拼半成品', async () => {
-    const records = Array.from({ length: CATEGORY_REPORT_CHUNK + 5 }, (_, i) => rec(String(i)))
+    const records = [bigRec('a'), bigRec('b'), bigRec('c')] // 3 段，第 2 段失败
     let call = 0
     const chat = vi.fn(async () => {
       call++
@@ -271,14 +338,14 @@ describe('生成（LLM 分档与降级）', () => {
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
     expect(md).toContain('模板模式（AI 不可用）')
     expect(md).not.toContain('段小结') // 半成品不出现
-    expect(md).toContain('## 分类热点')
+    expect(md).toContain('## 📊 帖量分布')
     expect(md).toContain('## 附录·全量帖子清单')
-    expect(appendixLineCount(md)).toBe(CATEGORY_REPORT_CHUNK + 5)
+    expect(appendixLineCount(md)).toBe(3)
     expect(md).toContain('AI 不可用·模板模式')
   })
 
   it('reduce 失败 → 同降级；段小结返回空串 → 同降级', async () => {
-    const records = Array.from({ length: CATEGORY_REPORT_CHUNK + 1 }, (_, i) => rec(String(i)))
+    const records = [bigRec('a'), bigRec('b')] // 2 段：第 1、2 次段小结，第 3 次 reduce
     // reduce（第 3 次调用）失败
     const h1 = build({ records, covered: ['2026-09-18'] })
     let c1 = 0
@@ -362,7 +429,7 @@ describe('生成（LLM 分档与降级）', () => {
     const mdShort = await short.svc.generate('monthly', now)
     expect(mdShort).toContain('存档 2/31 天有数据')
     expect(mdShort).toContain('存档不足')
-    expect(mdShort).toContain('# 分类总结报告·2026-08')
+    expect(mdShort).toContain('# 📰 分类行情报告 · 2026-08')
 
     const full = build({ records: [rec('1')], covered: allDays('2026-08-01', '2026-08-31') })
     const mdFull = await full.svc.generate('monthly', now)
@@ -384,10 +451,9 @@ describe('生成（LLM 分档与降级）', () => {
     expect(mdSome).toContain('| 2 | 100 | 150 | 200 | 250 | 300 |')
   })
 
-  it(`体量上限：>${MAX_MAP_CHUNKS} 段（${MAX_MAP_CHUNKS * CATEGORY_REPORT_CHUNK} 帖）不调 provider、直接降级确定性报告并注明体量`, async () => {
-    const records = Array.from({ length: MAX_MAP_CHUNKS * CATEGORY_REPORT_CHUNK + 1 }, (_, i) =>
-      rec(String(i))
-    )
+  it(`体量上限：预算分段 > ${MAX_MAP_CHUNKS} 段不调 provider、直接降级确定性报告并注明体量`, async () => {
+    // 每帖 ~45k token → 各自成段；31 帖 = 31 段 > 上限 30
+    const records = Array.from({ length: MAX_MAP_CHUNKS + 1 }, (_, i) => bigRec(String(i)))
     const h = build({ records, covered: ['2026-09-18'] })
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
     expect(h.chat).not.toHaveBeenCalled() // 体量降级不碰 LLM
@@ -400,9 +466,7 @@ describe('生成（LLM 分档与降级）', () => {
   })
 
   it(`体量上限边界：恰 ${MAX_MAP_CHUNKS} 段仍走 map-reduce（不降级）`, async () => {
-    const records = Array.from({ length: MAX_MAP_CHUNKS * CATEGORY_REPORT_CHUNK }, (_, i) =>
-      rec(String(i))
-    )
+    const records = Array.from({ length: MAX_MAP_CHUNKS }, (_, i) => bigRec(String(i)))
     const h = build({ records, covered: ['2026-09-18'] })
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
     expect(h.chat).toHaveBeenCalledTimes(MAX_MAP_CHUNKS + 1) // 30 段小结 + 1 reduce
@@ -497,9 +561,9 @@ describe('并发护栏（同档互斥复用进行中 Promise；不同档互不�
     const now = new Date(2026, 8, 18, 23, 0, 0, 0)
     const pDaily = svc.generate('daily', now)
     const mdWeekly = await svc.generate('weekly', now) // 不等 daily
-    expect(mdWeekly).toContain('# 分类总结报告·09-07 ~ 09-13')
+    expect(mdWeekly).toContain('# 📰 分类行情报告 · 09-07 ~ 09-13')
     releaseDaily()
-    await expect(pDaily).resolves.toContain('# 分类总结报告·2026-09-18')
+    await expect(pDaily).resolves.toContain('# 📰 分类行情报告 · 2026-09-18')
   })
 })
 
@@ -535,28 +599,38 @@ describe('推送与开关', () => {
     }
   })
 
-  it('推送载荷不含附录（正文=总述~覆盖率）；长正文经 splitForTelegram 多段', async () => {
-    const chat = vi.fn(async () => 'AI 总结内容\n' + '很长的总结段落。'.repeat(600)) // >3500 字
+  it('推送载荷不含附录（正文=总述~覆盖率）；长正文分段且每段双形态（R19 纯文本 + HTML opts）', async () => {
+    const chat = vi.fn(async () => '## 🧠 总评\nAI 总结内容\n' + '很长的总结段落。'.repeat(600)) // >3000 字
     const h = build({ records: Array.from({ length: 100 }, (_, i) => rec(String(i))), covered: ['2026-09-18'] })
     h.chat.mockImplementation(chat)
     await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
-    // 100 帖 > CHUNK → map-reduce；reduce 返回超长文本 → 正文多段推送
+    // 100 帖预算内单次直出；LLM 返回超长文本 → 正文多段推送
     expect(h.sendRaw.mock.calls.length).toBeGreaterThan(1)
-    for (const call of h.sendRaw.mock.calls) {
-      expect(String(call[0])).not.toContain('附录·全量帖子清单')
-      expect(String(call[0]).length).toBeLessThanOrEqual(TELEGRAM_CHUNK_MAX)
-    }
-    // 与 splitForTelegram 的段数一致（复用导出函数的分段口径）
-    const body = h.sendRaw.mock.calls.map((c) => String(c[0])).join('')
+    h.sendRaw.mock.calls.forEach((call, i) => {
+      const text = String(call[0])
+      expect(text).not.toContain('附录·全量帖子清单')
+      // 纯文本段已剥 markdown 记号（## 标题不再裸奔）
+      expect(text).not.toContain('## 🧠')
+      // opts.html：Telegram HTML 渲染（标题加粗），且不超 Telegram 4096 上限
+      const html = (call[1] as { html?: string }).html
+      expect(typeof html).toBe('string')
+      expect(html!.length).toBeGreaterThan(0)
+      expect(html!.length).toBeLessThanOrEqual(HTML_SAFE_MAX)
+      if (i === 0) {
+        expect(text).toContain('🧠 总评')
+        expect(html).toContain('<b>🧠 总评</b>')
+      }
+    })
+    const body = h.sendRaw.mock.calls.map((c) => String(c[0])).join('\n')
     expect(body).toContain('AI 总结内容')
-    expect(splitForTelegram(body).length).toBeGreaterThanOrEqual(1)
+    expect(splitForTelegram(body, REPORT_CHUNK_MAX).length).toBeGreaterThanOrEqual(1)
   })
 
   it('推送失败只 log error 不影响生成（文件照写、返回值正常）', async () => {
     const h = build({ records: [rec('1')], covered: ['2026-09-18'] })
     h.sendRaw.mockRejectedValue(new Error('tg down'))
     const md = await h.svc.generate('daily', new Date(2026, 8, 18, 23, 0, 0, 0))
-    expect(md).toContain('# 分类总结报告·2026-09-18')
+    expect(md).toContain('# 📰 分类行情报告 · 2026-09-18')
     expect(await h.svc.loadReport('daily', '2026-09-18')).toBe(md)
   })
 

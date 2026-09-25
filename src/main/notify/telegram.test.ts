@@ -403,10 +403,31 @@ describe('TelegramNotifier', () => {
     const body = JSON.parse(h.calls[0]?.init?.body ?? '{}') as {
       text: string
       parse_mode?: string
+      link_preview_options?: { is_disabled: boolean }
     }
     expect(body.text).toBe(raw) // 不做 HTML 转义
     expect(body.parse_mode).toBeUndefined() // 纯文本：无 parse_mode
+    // R19：报告形态禁用链接预览（首 URL 预览卡对报告是噪音）
+    expect(body.link_preview_options).toEqual({ is_disabled: true })
     expect(h.sleeps).toEqual([]) // 首条不限流等待
+  })
+
+  it('R19 sendRaw 带 opts.html：以 parse_mode=HTML 发送富文本（报告推送主路径）；空 html 退纯文本', async () => {
+    const h = makeHarness(() => okRes)
+    await h.notifier.sendRaw('🧠 总评 纯文本兜底', { html: '<b>🧠 总评</b>' })
+    await h.notifier.sendRaw('第二段退纯文本', { html: '' })
+    expect(h.calls.length).toBe(2)
+    const b1 = JSON.parse(h.calls[0]?.init?.body ?? '{}') as {
+      text: string
+      parse_mode?: string
+      link_preview_options?: { is_disabled: boolean }
+    }
+    expect(b1.text).toBe('<b>🧠 总评</b>')
+    expect(b1.parse_mode).toBe('HTML')
+    expect(b1.link_preview_options).toEqual({ is_disabled: true })
+    const b2 = JSON.parse(h.calls[1]?.init?.body ?? '{}') as { text: string; parse_mode?: string }
+    expect(b2.text).toBe('第二段退纯文本')
+    expect(b2.parse_mode).toBeUndefined()
   })
 
   it('sendRaw 与 sendHit 共用同一串行队列与 1050ms 限流', async () => {

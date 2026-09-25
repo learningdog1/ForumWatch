@@ -1,7 +1,7 @@
 {
   "name": "forumwatch",
   "productName": "ForumWatch",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "ForumWatch - multi-forum new topic monitor with keyword & AI semantic matching, Telegram push, AI daily digest and category periodic reports (daily/weekly/monthly)",
   "author": "colmidad",
   "license": "MIT",

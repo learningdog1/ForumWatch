@@ -92,7 +92,8 @@ import {
   isChannelReady,
   telegramCredentialsOf,
   type HitMessageInput,
-  type Notifier
+  type Notifier,
+  type RawMessageOptions
 } from '../notify/types'
 import type { FetchLike, HttpRequestInit, HttpResponse } from '../net/http-types'
 import type { AppConfig, ChannelConfig, EngineStatus, HitRecord } from '../../shared/types'
@@ -318,7 +319,7 @@ export class DesktopRuntime {
     this.reportService = new DailyReportService({
       provider: this.aiProvider,
       hits: hitsStore,
-      notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+      notifier: { sendRaw: (text, opts) => notifier.sendRaw(text, opts) },
       getConfig: () => this.store.get(),
       logger: this.logger,
       reportsDir: join(this.userDataDir, 'reports'),
@@ -333,7 +334,7 @@ export class DesktopRuntime {
     this.categoryReportService = new CategoryReportService({
       provider: this.aiProvider,
       archive: this.topicArchive,
-      notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+      notifier: { sendRaw: (text, opts) => notifier.sendRaw(text, opts) },
       getConfig: () => this.store.get(),
       logger: this.logger,
       reportsDir: join(this.userDataDir, 'reports', 'category'),
@@ -842,8 +843,8 @@ class NotifierShell implements Notifier {
   sendHit(input: HitMessageInput): Promise<void> {
     return this.current.sendHit(input)
   }
-  sendRaw(text: string): Promise<void> {
-    return this.current.sendRaw(text)
+  sendRaw(text: string, opts?: RawMessageOptions): Promise<void> {
+    return this.current.sendRaw(text, opts)
   }
   sendTest(): Promise<void> {
     return this.current.sendTest()

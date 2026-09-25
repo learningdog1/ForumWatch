@@ -21,7 +21,7 @@
 import type { FetchLike, HttpResponse, HttpRequestInit } from '../net/http-types'
 import type { TelegramConfig, Topic } from '@shared/types'
 import { scrubSecret } from '../ai/provider'
-import type { HitMessageInput, Notifier } from './types'
+import type { HitMessageInput, Notifier, RawMessageOptions } from './types'
 
 export class TelegramError extends Error {
   constructor(
@@ -200,12 +200,20 @@ export class TelegramNotifier implements Notifier {
   }
 
   /**
-   * 纯文本发送（D5 日报用）：**不做 HTML 转义、不带 parse_mode**——markdown
-   * 日报以纯文本呈现（链接退化为裸 URL，TG 原生可点）。复用同一串行队列 /
-   * 1050ms 限流 / 429 retry_after 语义，与命中推送互相排队。
+   * 报告发送（D5 日报 / R17 分类报告）：缺省纯文本（不转义、不带 parse_mode，
+   * markdown 源码按字面呈现）；R19 起 opts.html 非空时以 parse_mode='HTML'
+   * 发送富文本渲染（markdown-report 转换：粗体标题/对齐表格/blockquote——
+   * Telegram 不认 markdown，纯文本直发时 `#`、`|---|` 全部裸奔）。报告推送
+   **禁用链接预览**（正文首 URL 的预览卡对报告是噪音；裸 URL 仍可点击）。
+   * 复用同一串行队列 / 1050ms 限流 / 429 retry_after 语义，与命中推送互相排队。
    */
-  async sendRaw(text: string): Promise<void> {
-    await this.enqueue(() => this.deliver(text, null))
+  async sendRaw(text: string, opts?: RawMessageOptions): Promise<void> {
+    const html = opts?.html
+    if (typeof html === 'string' && html !== '') {
+      await this.enqueue(() => this.deliver(html, 'HTML', true))
+    } else {
+      await this.enqueue(() => this.deliver(text, null, true))
+    }
   }
 
   /** 排队执行；前一个任务失败不阻塞后一个 */
@@ -225,8 +233,12 @@ export class TelegramNotifier implements Notifier {
     this.lastSendAt = this.now()
   }
 
-  /** @param parseMode 'HTML'（命中/测试消息）或 null（sendRaw 纯文本，不带 parse_mode） */
-  private async deliver(text: string, parseMode: 'HTML' | null): Promise<void> {
+  /**
+   * @param parseMode 'HTML'（命中/测试消息与 sendRaw 的富文本形态）或 null
+   *   （sendRaw 纯文本，不带 parse_mode）
+   * @param disablePreview true 时禁用链接预览（sendRaw 报告形态；命中/测试恒开预览）
+   */
+  private async deliver(text: string, parseMode: 'HTML' | null, disablePreview = false): Promise<void> {
     const cfg = this.getConfig()
     if (!cfg.botToken || !cfg.chatId) {
       throw new TelegramError('telegram not configured')
@@ -242,7 +254,7 @@ export class TelegramNotifier implements Notifier {
         chat_id: cfg.chatId,
         text,
         ...(parseMode !== null ? { parse_mode: parseMode } : {}),
-        link_preview_options: { is_disabled: false }
+        link_preview_options: { is_disabled: disablePreview }
       })
     }
 

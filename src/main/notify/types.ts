@@ -48,12 +48,23 @@ export interface HitMessageInput {
 }
 
 /**
+ * sendRaw 的可选富文本（R19 报告推送）：`html` = 同一内容的 Telegram
+ * parse_mode='HTML' 渲染（markdown-report 转换）。支持富文本的通道
+ * （telegram）非空时用它发送，其余通道/空值一律用 text 纯文本——接口向后
+ * 兼容：旧调用（单参）与只实现单参的通道（bark/ntfy/webhook）不受影响。
+ */
+export interface RawMessageOptions {
+  html?: string
+}
+
+/**
  * 一个推送通道的发送接口。实现方契约：
  * - `id`：通道 id（与 ChannelConfig.id 一致；W3 起作为 HitRecord.notifyDetail
  *   的 per-channel 明细键）；
  * - `sendHit`：命中推送（各通道自行决定文案格式与转义）；失败抛 Error（message
  *   进 HitRecord.notifyError）；
- * - `sendRaw`：纯文本发送（日报等；不做转义）；
+ * - `sendRaw`：纯文本发送（日报等；不做转义）；R19 起可带 opts.html 富文本，
+ *   不支持富文本的通道忽略 opts；
  * - `sendTest`：设置页「发送测试消息」用，固定文案。
  * 内部队列/限流/重试语义由各实现自理（telegram 的 1050ms 串行队列 + 429 退避
  * 是既有资产，W2 新通道按各自 API 限制决定）。
@@ -61,7 +72,7 @@ export interface HitMessageInput {
 export interface Notifier {
   readonly id: string
   sendHit(input: HitMessageInput): Promise<void>
-  sendRaw(text: string): Promise<void>
+  sendRaw(text: string, opts?: RawMessageOptions): Promise<void>
   sendTest(): Promise<void>
 }
 

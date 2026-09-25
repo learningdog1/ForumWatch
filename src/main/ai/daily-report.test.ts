@@ -12,11 +12,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_APP_CONFIG, type AppConfig, type HitRecord, type Topic } from '../../shared/types'
 import { formatLocalDate } from '../monitor/hits-store'
-import {
-  DailyReportService,
-  splitForTelegram,
-  TELEGRAM_CHUNK_MAX
-} from './daily-report'
+import { DailyReportService, splitForTelegram, TELEGRAM_CHUNK_MAX } from './daily-report'
+import { REPORT_CHUNK_MAX, reportPushPair } from '../notify/markdown-report'
 
 let dir: string
 
@@ -119,7 +116,12 @@ describe('generate', () => {
     expect(md).toContain('2026-09-19')
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
     expect(h.sendRaw).toHaveBeenCalledTimes(1)
-    expect(h.sendRaw.mock.calls[0]![0]).toBe(md)
+    // R19：推送双形态——text 为剥记号纯文本，opts.html 为 Telegram HTML 渲染
+    const pair = reportPushPair(md)
+    expect(h.sendRaw.mock.calls[0]![0]).toBe(pair.text)
+    expect(h.sendRaw.mock.calls[0]![1]).toEqual({ html: pair.html })
+    expect(pair.text).not.toContain('# ')
+    expect(pair.html).toContain('<b>')
     expect(h.onGenerated).toHaveBeenCalledWith({ date: '2026-09-19', markdown: md })
   })
 
@@ -140,7 +142,9 @@ describe('generate', () => {
     // 第三轮：system prompt 提示 LLM 在要点中引用锐评
     expect(req.system).toContain('命中如带锐评（commentary 字段），在要点中用一句话引用它')
     expect(req.timeoutMs).toBe(30000)
-    expect(req.maxTokens).toBe(1500)
+    expect(req.maxTokens).toBe(3000)
+    // R19：直出模式（思考型模型思考吃光 max_tokens 致空串，曾是降级根因）
+    expect((req as { disableThinking?: boolean }).disableThinking).toBe(true)
     const payload = JSON.parse(req.user) as {
       date: string
       total: number
@@ -196,9 +200,9 @@ describe('generate', () => {
       chatReply: () => new Error('AI down')
     })
     const md = await h2.svc.generate(at(22, 30))
-    expect(md).toMatch(/9\.9元\/月 小鸡（规则命中：白菜月付）$/m)
-    expect(md).toMatch(/3元\/月 小鸡（规则命中）$/m)
-    expect(md).toMatch(/羊毛 B（字面命中）$/m)
+    expect(md).toMatch(/9\.9元\/月 小鸡（规则命中：白菜月付） https:\/\/www\.nodeseek\.com\/post-3-1$/m) // R19b：行尾附裸 url（推送端链接化）
+    expect(md).toMatch(/3元\/月 小鸡（规则命中） https:\/\/www\.nodeseek\.com\/post-5-1$/m)
+    expect(md).toMatch(/羊毛 B（字面命中） https:\/\/www\.nodeseek\.com\/post-2-1$/m)
   })
 
   it('LLM 抛错：降级固定模板仍成功落盘，log warn，推送照发（锐评「」附行尾，无锐评不加）', async () => {
@@ -217,8 +221,8 @@ describe('generate', () => {
     expect(md).toContain('语义 B')
     expect(md).toContain('语义命中')
     // 第三轮锐评：有 → 「原文」附在命中行尾；无 → 命中行到（命中方式）即止
-    expect(md).toMatch(/语义 B（语义命中）「这价格怕不是钓鱼」$/m)
-    expect(md).toMatch(/羊毛 A（字面命中）$/m)
+    expect(md).toMatch(/语义 B（语义命中）「这价格怕不是钓鱼」 https:\/\/www\.nodeseek\.com\/post-2-1$/m)
+    expect(md).toMatch(/羊毛 A（字面命中） https:\/\/www\.nodeseek\.com\/post-1-1$/m)
     expect(md).toContain('模板模式')
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
     expect(h.sendRaw).toHaveBeenCalledTimes(1)
@@ -256,7 +260,7 @@ describe('generate', () => {
     await expect(h.svc.loadReport('2026-09-19')).resolves.toBe(md)
   })
 
-  it('超长 markdown：分段推送，每段 ≤3500 且行边界切分，第 2 段起尾缀（续 N）', async () => {
+  it('超长 markdown：分段推送，每段 ≤REPORT_CHUNK_MAX 且行边界切分，第 2 段起尾缀（续 N）', async () => {
     // 50 行 × ~100 字符 = ~5000 字符 → 至少 2 段
     const longMd = Array.from({ length: 50 }, (_, i) => `${String(i).padStart(2, '0')} ${'x'.repeat(98)}`).join('\n')
     const h = makeHarness({ hitsForDay: [makeHit('1', '羊毛 A')], chatReply: () => longMd })
@@ -264,7 +268,7 @@ describe('generate', () => {
 
     expect(h.sendRaw.mock.calls.length).toBeGreaterThanOrEqual(2)
     for (const [text] of h.sendRaw.mock.calls as Array<[string]>) {
-      expect(text.length).toBeLessThanOrEqual(TELEGRAM_CHUNK_MAX)
+      expect(text.length).toBeLessThanOrEqual(REPORT_CHUNK_MAX)
     }
     const first = h.sendRaw.mock.calls[0]![0] as string
     expect(first.endsWith('（续 1）')).toBe(false)

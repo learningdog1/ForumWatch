@@ -33,7 +33,7 @@
  */
 
 import type { RoutingRule } from '@shared/types'
-import type { HitMessageInput, Notifier } from './types'
+import type { HitMessageInput, Notifier, RawMessageOptions } from './types'
 import { resolveChannelIds, type RouteContext } from './router'
 
 /** 聚合错误里单通道错误明细的截断长度（对齐 telegram.ts 的 200 字符口径） */
@@ -78,9 +78,9 @@ export class CompositeNotifier implements Notifier {
     await this.fanOut(targets, (n) => n.sendHit(input))
   }
 
-  /** 纯文本（日报）：广播全部通道，不走路由 */
-  async sendRaw(text: string): Promise<void> {
-    await this.fanOut(this.notifiers, (n) => n.sendRaw(text))
+  /** 纯文本（日报/报告）：广播全部通道，不走路由；opts.html 富文本随透传（R19，通道自决是否消费） */
+  async sendRaw(text: string, opts?: RawMessageOptions): Promise<void> {
+    await this.fanOut(this.notifiers, (n) => n.sendRaw(text, opts))
   }
 
   /** 测试消息：广播全部通道，不走路由 */

@@ -447,7 +447,7 @@ async function main(): Promise<number | null> {
       return notifierImpl.id
     },
     sendHit: (input) => notifierImpl.sendHit(input),
-    sendRaw: (text) => notifierImpl.sendRaw(text),
+    sendRaw: (text, opts) => notifierImpl.sendRaw(text, opts),
     sendTest: () => notifierImpl.sendTest()
   }
 
@@ -477,7 +477,7 @@ async function main(): Promise<number | null> {
   const reportService = new DailyReportService({
     provider: aiProvider,
     hits: hitsStore,
-    notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+    notifier: { sendRaw: (text, opts) => notifier.sendRaw(text, opts) },
     getConfig: () => getEffective(),
     logger,
     reportsDir: join(dir, 'reports'),
@@ -491,7 +491,7 @@ async function main(): Promise<number | null> {
   const categoryReportService = new CategoryReportService({
     provider: aiProvider,
     archive: topicArchive,
-    notifier: { sendRaw: (text) => notifier.sendRaw(text) },
+    notifier: { sendRaw: (text, opts) => notifier.sendRaw(text, opts) },
     getConfig: () => getEffective(),
     logger,
     reportsDir: join(dir, 'reports', 'category'),
