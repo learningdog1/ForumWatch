@@ -26,7 +26,8 @@
 
 - mac 本地 `electron-builder --win nsis`：electron-builder 26 打常规 NSIS **不需要 wine**；避开 MSI/WiX 目标和自定义 NSIS 脚本（仍需 wine）。
 - 代码签名留空：Windows 会有 SmartScreen 提示，个人使用可接受；mac 未公证走"右键-打开"。若未来要签：jsign / Azure Trusted Signing / 仅在 GH Actions windows runner 上签。
-- CI：tag 触发，mac runner 出 dmg、windows runner 出 nsis，发 Release；CI 跑单测门禁。
+- CI：tag 触发，mac runner 出 dmg、windows runner 出 nsis、ubuntu runner 出 AppImage+deb（x64/arm64 双架构交叉打，无原生模块故无需 qemu），发 Release；CI 跑单测门禁。
+- Linux 目标选 AppImage + deb（v0.10.0，issue #1）：AppImage 覆盖通用发行版、deb 覆盖 Debian/Ubuntu 系；rpm 等 fpm 派生目标刻意不做（维护成本 > 覆盖收益）。deb 维护者用 GitHub noreply 地址（package.json author 无 email 会被 fpm 拒绝）；`syncDesktopName: true` + package.json `desktopName: forumwatch` 让 .desktop 的 StartupWMClass 对齐可执行名，否则 GNOME/KDE 任务栏不关联图标。
 - MVP 不做自动更新（mac 上 electron-updater 基本要求签名+公证）。
 
 ## 5. 数据源：NodeSeek SSR HTML 为主路径

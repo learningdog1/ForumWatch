@@ -238,6 +238,7 @@ UI 与托盘按 desired 优先的顺序展示为四种状态：
 
 - macOS 默认：`~/Library/Application Support/ForumWatch/`
 - Windows 默认：`%APPDATA%\ForumWatch\`
+- Linux 默认：`~/.config/ForumWatch/`（托盘菜单入口文案仍写「Finder」，目录本身可直接打开）
 
 | 文件 | 作用 | 说明 |
 | --- | --- | --- |

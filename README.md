@@ -46,6 +46,7 @@
 | --- | --- | --- |
 | macOS (Apple Silicon / Intel) | `.dmg` | 未签名：首次打开请**右键 → 打开**（只做一次）。仍提示"已损坏"时执行 `xattr -cr /Applications/ForumWatch.app` |
 | Windows | `.exe` (NSIS) | 未签名：SmartScreen 提示时点"更多信息 → 仍要运行" |
+| Linux (x86_64 / arm64) | `.AppImage` / `.deb` | AppImage：`chmod +x` 后直接运行（需要 FUSE）。deb：`sudo apt install ./ForumWatch-*.deb`。凭据加密在无 gnome-keyring/KWallet 的环境自动降级明文（日志有 warn），不影响使用 |
 | Docker (NAS / VPS / 群晖) | `cashewchickengazgazgood/forumwatch` | 无头内核 + **同一套网页管理界面**，详见 [Docker 部署](#-docker-部署) |
 
 ## 🐳 Docker 部署

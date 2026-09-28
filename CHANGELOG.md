@@ -6,6 +6,18 @@
 
 格式约定：`## [vX.Y.Z] - YYYY-MM-DD`，新增/改进/修复分组，面向使用者而非开发者。
 
+## [v0.10.0] - 2026-09-28
+
+Linux 桌面版来了（[#1](https://github.com/learningdog1/ForumWatch/issues/1)）：AppImage 与 deb 双格式、x86_64 与 arm64 双架构，Release 页直接下载。
+
+### 新增
+
+- **Linux 桌面版**：`ForumWatch-<版本>-x86_64/arm64.AppImage`（`chmod +x` 后直接运行，需要 FUSE）与
+  `ForumWatch-<版本>-amd64/arm64.deb`（`sudo apt install ./ForumWatch-*.deb`）。功能与 mac/Windows 版
+  完全一致：托盘常驻（彩色托盘图标）、开机自启（XDG autostart）、凭据加密。无 gnome-keyring/KWallet
+  的极简环境（部分 WM/i3 等）凭据自动降级明文落盘，日志有 warn，不影响使用。不想装桌面依赖的服务器
+  场景照旧可用 Docker 镜像（自带网页管理界面）。
+
 ## [v0.9.0] - 2026-09-25
 
 分类行情日报三连修：AI 总结缺失、推送不渲染 markdown、栏目挖不出价值。

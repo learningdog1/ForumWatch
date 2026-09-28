@@ -37,6 +37,31 @@ win:
   # 同上，png 自动转 ico（exe 与安装器共用）。
   icon: resources/icon.png
 
+# AppImage 覆盖通用发行版（双架构）；deb 覆盖 Debian/Ubuntu 系。rpm 等 fpm 派生
+# 目标刻意不做——无原生模块的前提下这两个已覆盖绝大多数场景，CI 矩阵越宽越难维护。
+# 打包无需 wine/dpkg：无原生模块交叉打包成立（ADR 第 3 条），deb 由 app-builder
+# 原生构造。AppImage 运行时需要 FUSE（多数发行版自带；无 FUSE 环境用 deb）。
+linux:
+  target:
+    - AppImage
+    - deb
+  # freedesktop 菜单分类，desktop entry 语义必填。
+  category: Utility
+  # 512x512 png，自动下采样 hicolor 各档，AppImage/deb 共用。
+  icon: resources/icon.png
+  # deb 维护者必须有 email；用 GitHub noreply 地址避免暴露真实邮箱。
+  maintainer: learningdog1 <learningdog1@users.noreply.github.com>
+  # desktop 文件名对齐 StartupWMClass/可执行名（linux 下默认小写 forumwatch），
+  # 否则 GNOME/KDE 任务栏不会把运行中的窗口关联到启动器图标。
+  syncDesktopName: true
+  synopsis: Multi-forum new topic monitor with keyword & AI semantic matching
+  description: >-
+    ForumWatch monitors NodeSeek, V2EX, linux.do and any RSS/Atom forum for new
+    topics, matches them with keywords and optional AI semantic filtering, and
+    pushes hits to Telegram / Bark / ntfy / webhook. Also ships AI daily
+    digests and category periodic reports.
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

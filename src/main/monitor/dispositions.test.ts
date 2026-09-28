@@ -147,7 +147,9 @@ describe('jsonl 持久化（本地时区日分桶追加）', () => {
       '' // 空行
     ]
     await writeFile(join(dataDir, '2026-09-18.jsonl'), lines.join('\n') + '\n', 'utf-8')
-    const store = new DispositionStore({ dataDir })
+    // now 注入到 09-19：构造时的 7 天保留清理（cutoff=09-12）才不会把写死的
+    // 09-18 夹具文件当过期删掉——用真实时钟时本用例会在 2026-09-26 起必挂。
+    const store = new DispositionStore({ dataDir, now: clockAt(new Date(2026, 8, 19).getTime()) })
     const recs = await store.readDay('2026-09-18')
     expect(recs).toHaveLength(1)
     expect(recs[0].topicId).toBe('1')

@@ -78,9 +78,44 @@ jobs:
           path: dist/*-setup.exe
           if-no-files-found: error
 
+  build-linux:
+    name: Build Linux (AppImage + deb)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test (vitest)
+        run: npx vitest run
+
+      - name: Build (electron-vite)
+        run: npm run build
+
+      # 无原生模块（ADR 第 3 条），x64 runner 交叉出 arm64 无需 qemu/工具链。
+      - name: Package AppImage + deb (unsigned)
+        run: npx electron-builder --linux AppImage deb --x64 --arm64 --publish never
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+
   release:
     name: Attach artifacts to Release
-    needs: [build-mac, build-win]
+    needs: [build-mac, build-win, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -114,4 +149,6 @@ jobs:
           files: |
             artifacts/*.dmg
             artifacts/*-setup.exe
+            artifacts/*.AppImage
+            artifacts/*.deb
           generate_release_notes: true
