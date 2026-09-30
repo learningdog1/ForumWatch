@@ -12,6 +12,11 @@
  * - L1 删除不弹确认（§3.5）：已保存过的行转「待删除」态（删除线 + 琥珀徽标 +
  *   撤销删除）；未保存过的新行直接从 draft 移除。
  * - id 由前端生成（rule / rule-2 / …，全列表去重），sanitize 会再 slug 化兜底。
+ *
+ * 步骤 M（设置重组，01 匹配规则组）：行摘要对齐概念 .rule 卡形制——规则名
+ * （.rt > b）+ 条件 chips（.kws > .k：周期 / 价格 / 流量 / 关键词数）+ 开关，
+ * 编辑/删除/待删除能力与展开表单原样；「新建规则」入口对齐概念 rules 屏段
+ * 末行（共享 .frow：钮 + 行内提示文字）。
  */
 import { useState } from 'react'
 import type { PriceCurrency, PriceCycle, PriceRuleConfig } from '@shared/types'
@@ -38,7 +43,7 @@ function cycleText(cycle: PriceCycle): string {
   return CYCLE_OPTIONS.find((o) => o.value === cycle)?.label ?? '不限周期'
 }
 
-/** 列表行的条件摘要：`年付 · ≤ ¥100 · ≥ 500G · 关键词×2` */
+/** 列表行的条件摘要（title/aria 用）：`年付 · ≤ ¥100 · ≥ 500G · 关键词×2` */
 function ruleSummary(r: PriceRuleConfig): string {
   const parts: string[] = [cycleText(r.cycle)]
   if (r.maxPrice !== undefined) {
@@ -50,6 +55,28 @@ function ruleSummary(r: PriceRuleConfig): string {
     parts.push(`关键词×${r.keywords.length}`)
   }
   return parts.join(' · ')
+}
+
+/**
+ * 行内条件 chips（步骤 M，概念 .rule .kws）：周期 / 价格 / 流量 / 关键词数
+ * 各成一枚 mono chip；零条件（周期不限且无价格/流量/关键词）只剩一枚
+ * 占位 chip（rule-bare，弱档）——如实呈现「当前恒真」而不是空。
+ */
+function ruleChips(r: PriceRuleConfig): { text: string; bare: boolean }[] {
+  const chips: { text: string; bare: boolean }[] = [
+    { text: r.cycle === 'any' ? '周期 不限' : `周期 ${cycleText(r.cycle)}`, bare: false }
+  ]
+  if (r.maxPrice !== undefined) {
+    const sym = r.currency !== undefined && r.currency !== 'any' ? CURRENCY_SYMBOL[r.currency] : ''
+    chips.push({ text: `≤ ${sym}${r.maxPrice}`, bare: false })
+  }
+  if (r.minTrafficGB !== undefined) chips.push({ text: `流量 ≥ ${r.minTrafficGB}G`, bare: false })
+  if (r.keywords !== undefined && r.keywords.length > 0) {
+    chips.push({ text: `关键词 ×${r.keywords.length}`, bare: false })
+  }
+  // 恒真规则：唯一 chip 降为占位档（条件列还在，点「编辑」补条件）
+  if (r.cycle === 'any' && chips.length === 1) chips[0].bare = true
+  return chips
 }
 
 /** 新规则 id：rule / rule-2 / rule-3…（全列表去重；sanitize 侧会再 slug 化） */
@@ -124,18 +151,23 @@ export function RulesCard(
             rowClass={(r) => (pendingDelete.has(r.id) ? ' del' : '')}
             render={(r) => {
               const summary = ruleSummary(r)
+              const chips = ruleChips(r)
               const del = pendingDelete.has(r.id)
               const expanded = expandedId === r.id && !del
               const name = r.label ?? r.id
               return (
                 <>
-                  <div className={`ent-main${r.enabled ? '' : ' is-off'}`}>
-                    <span className="ent-name" title={name}>
-                      {name}
-                    </span>
-                    <span className="ent-sum" title={summary}>
-                      {summary}
-                    </span>
+                  <div className={`ent-main rule-row${r.enabled ? '' : ' is-off'}`}>
+                    <div className="rt">
+                      <b title={name}>{name}</b>
+                      <div className="kws" aria-label={`条件：${summary}`}>
+                        {chips.map((c) => (
+                          <span className={`k${c.bare ? ' rule-bare' : ''}`} key={c.text}>
+                            {c.text}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
                     {del && <span className="badge-del">待删除</span>}
                     <span className="ent-ops">
                       {!del ? (
@@ -298,17 +330,22 @@ export function RulesCard(
             }}
           />
         )}
-        <div className="input-row mt-md">
+        {/* 「新建规则」入口（步骤 M，概念 rules 屏段末行）：共享 .frow——
+            钮 + 行内提示文字；计数/上限并入提示句（卡头 aux 亦有 N/20） */}
+        <div className="frow frow-add-rule">
           <button
             type="button"
             className="btn"
             disabled={liveRules.length >= 20}
-            title={liveRules.length >= 20 ? '已达上限 20 条' : '添加一条价格规则并展开编辑'}
+            title={liveRules.length >= 20 ? '已达上限 20 条' : '新建一条价格规则并展开编辑'}
             onClick={addRule}
           >
-            添加规则
+            新建规则
           </button>
-          <span className="feedback muted">{liveRules.length}/20 条</span>
+          <span className="fh">
+            一条规则内的条件 AND 组合、全部满足即命中；周期 / 价格 / 流量从帖子标题
+            自动提取做精确比对。{liveRules.length}/20 条。
+          </span>
         </div>
       </Field>
     </section>

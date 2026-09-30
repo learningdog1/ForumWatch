@@ -60,6 +60,8 @@ const CONFIG_SCHEMA_VERSION = 4
 // 与 http.ts 的 resolveDispatcherSpec 支持面保持一致（socks5h = 远端 DNS 解析）
 const PROXY_URL_PREFIXES = ['http://', 'https://', 'socks5://', 'socks5h://'] as const
 const PROXY_SCOPES: readonly ProxyScope[] = ['all', 'telegram-only']
+/** closeBehavior 合法枚举（界面重构步骤 D）；非法/缺失回 'tray'（ADR 8.4 既有行为） */
+const CLOSE_BEHAVIORS: readonly AppConfig['closeBehavior'][] = ['tray', 'quit']
 const AI_MATCH_MODES: readonly MatchMode[] = ['literal', 'semantic', 'both']
 /** AI baseUrl 只认 http(s)（D6：请求时拼 /chat/completions） */
 const AI_BASE_URL_PREFIXES = ['http://', 'https://'] as const
@@ -116,6 +118,8 @@ const DEFAULT_SIMILARITY_THRESHOLD = 0.72
  * - `pollIntervalSec`：非数字/NaN/Infinity → 60；否则钳到 ≥15。
  * - `proxyUrl`：trim；非空时必须以 `http://` `https://` `socks5://` `socks5h://` 开头（忽略大小写），否则置 ''。
  * - `proxyScope`：只认 'all' | 'telegram-only'，非法回退 'telegram-only'。
+ * - `closeBehavior`（界面重构步骤 D）：只认 'tray' | 'quit'，非法/缺失回
+ *   'tray'（默认 = ADR 8.4 关窗进托盘行为不变）。
  * - `channels`（第六轮 R6-W1，见 sanitizeChannels）：非数组 → 默认单项 telegram；
  *   逐项按 type 分派重建（telegram: token/chatId trim，空凭据合法=未配置态；
  *   bark: deviceKey trim、serverUrl 非 http(s) 弃字段；ntfy: topic trim 且非空
@@ -174,6 +178,7 @@ export function sanitizeConfig(cfg: AppConfig): AppConfig {
     routing: sanitizeRouting(src.routing, channels, sources, priceRules),
     notifyEnabled: src.notifyEnabled === true,
     launchAtLogin: src.launchAtLogin === true,
+    closeBehavior: sanitizeCloseBehavior(src.closeBehavior),
     sources,
     priceRules,
     similarity: sanitizeSimilarity(src.similarity),
@@ -347,6 +352,16 @@ function sanitizeProxyUrl(value: string | undefined): string {
 
 function sanitizeProxyScope(value: ProxyScope | undefined): ProxyScope {
   return PROXY_SCOPES.includes(value as ProxyScope) ? (value as ProxyScope) : 'telegram-only'
+}
+
+/**
+ * 关窗行为清洗（界面重构步骤 D）：只认 'tray' | 'quit'，非法/缺失回 'tray'
+ * ——默认即 ADR 8.4「关窗进托盘」的既有语义，老配置（无该字段）行为零变化。
+ */
+function sanitizeCloseBehavior(value: AppConfig['closeBehavior'] | undefined): AppConfig['closeBehavior'] {
+  return CLOSE_BEHAVIORS.includes(value as AppConfig['closeBehavior'])
+    ? (value as AppConfig['closeBehavior'])
+    : 'tray'
 }
 
 /** 字符串字段清洗：非字符串（含 unknown 盘上垃圾）→ ''，否则 trim */

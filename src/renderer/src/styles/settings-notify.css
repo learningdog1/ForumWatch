@@ -1,8 +1,9 @@
 /* ── settings-notify 域卡样式（通知 / 通道 / 路由 / 网络 / AI / 遥控 / 数据 / 关于）──
-   R12「霁蓝平台」版：卡基 / 按钮族 / 输入族 / 字段行 / 实体行外壳 / 错误条 /
-   .radios-card 来自 primitives.css，设置骨架与吸底栏来自 settings-core.css；
-   本文件只补本域缺口，内距一律走 spacing 令牌、随共享层升呼吸档。
-   零硬编码 hex：一切实底色块文字走 var(--color-on-primary) / var(--on-danger)。
+   Watchtower 换装（SPEC §5.4-10）：卡基 / 按钮族 / 输入族 / 字段行 / 实体行
+   外壳 / 错误条 / .radios-card 来自 primitives.css，设置骨架与吸底栏来自
+   settings-core.css；本文件只补本域缺口，内距一律走 spacing 令牌。
+   零硬编码 hex：一切实底色块文字走 var(--color-on-primary) / var(--on-danger)；
+   弱底 chip 一律对应点档 12% wash（theme.css），双主题自动换相。
    （注：本文件在 global.css 里最后 @import，同名规则以本文件为准。） */
 
 /* .num 等宽 hook 已收编 base.css（全局唯一，收尾归属裁决），本域无副本；
@@ -92,9 +93,10 @@
   flex: none;
   min-width: 76px;
 }
-/* 状态字（就绪/已停用/未配齐）：R12 由「裸文字」升为 tone pill chip——点 + 弱底 +
-   描边 + 文字四重冗余（色不单用纪律的合规呈现），与 .src-badge 徽标同高成行内节奏。
-   对比度实算（--tone-text on --tone-bg，浅档）：ok 4.57 / warn 6.08 / err 5.45，≥4.5 */
+/* 状态字（就绪/已停用/未配齐）：tone pill chip——点 + 弱底 + 描边 + 文字四重
+   冗余（色不单用纪律的合规呈现），与 .src-badge 徽标同高成行内节奏。
+   对比度（--tone-text on 自家 12% wash over surface，SPEC §2 表）：
+   深 ok 8.38 / warn 8.67 / err 6.98；浅 ok 6.59 / warn 6.04 / err 5.39，全 ≥4.5 */
 .ch-state {
   flex: none;
   padding: 0 var(--space-md);
@@ -173,8 +175,12 @@
   flex-basis: 100%;
 }
 
-/* ── 遥控指令 chip（mono 12 + 中性弱底，同 .tag 语言）：把指令从整句提示里
-   提成可扫读的等宽单元（排版微调，文案内容不变） ── */
+/* ── 遥控指令 chip：把指令从整句提示里提成可扫读的等宽单元。
+   步骤 M（设置重组）对位概念 .cmd 形制：surface-2 底 + border 描边 + 4px
+   小件圆角（与 primitives .cmds .cmd 同配方；容器仍为本域 .cmd-list——
+   RemoteControlCard 的 chip 内容是 bot-commands.ts 真实命令集
+   /status /pause /resume /poll /help，tsx 不动、只换皮）。对比度：
+   muted on surface-2 深 6.35 / 浅 6.25 ✓ */
 .cmd-list {
   display: flex;
   align-items: center;
@@ -185,17 +191,19 @@
 .cmd {
   font-family: var(--font-mono);
   font-size: var(--fs-12);
+  font-weight: 500;
   line-height: var(--lh-chip);
   padding: 0 var(--space-md);
-  border-radius: var(--r-pill);
-  background: var(--mute-chip);
-  color: var(--text-2);
+  border-radius: 4px; /* §2.8 小件收档（概念 6px） */
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
   white-space: nowrap;
 }
 
-/* ── 关于卡：logo 走 R12「图标砖」语言（与侧栏 brand 磁贴同族：wash 承托 +
-   品牌图形档图标，§3.4「版本 mono、logo --color-primary」；
-   版本号等宽由 .num 工具类承担）── */
+/* ── 关于卡：logo 图标砖（与侧栏 brand 磁贴同族）：中性 wash 承托
+   （--primary-wash = fg wash，SPEC §5.4-10 自动换相）+ accent 图标
+   （--color-primary → 琥珀信号档）；版本号等宽由 .num 工具类承担 ── */
 .about-logo {
   display: inline-flex;
   align-items: center;

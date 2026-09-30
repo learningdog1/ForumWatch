@@ -1,0 +1,917 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1360">
+<title>ForumWatch · 界面概念重设计</title>
+<style>
+/* ============ 设计系统：深色瞭望塔控制台 ============
+   炭蓝底 · 琥珀信号色 · 思源宋体标题 × 系统 sans 正文 × 等宽数字 */
+:root{
+  color-scheme:dark;
+  --bg:oklch(0.155 0.015 260);
+  --stage:oklch(0.105 0.013 260);
+  --surface:oklch(0.195 0.016 258);
+  --surface-2:oklch(0.23 0.017 258);
+  --surface-3:oklch(0.268 0.018 258);
+  --surface-hi:oklch(0.295 0.019 258);
+  --fg:oklch(0.95 0.004 90);
+  --muted:oklch(0.7 0.012 258);
+  --faint:oklch(0.55 0.012 258);
+  --border:rgba(255,255,255,0.08);
+  --border-strong:rgba(255,255,255,0.16);
+  --accent:oklch(0.79 0.135 70);
+  --accent-ink:oklch(0.2 0.05 70);
+  --success:oklch(0.74 0.14 152);
+  --danger:oklch(0.66 0.19 27);
+  --warn:oklch(0.83 0.15 98);
+  --info:oklch(0.72 0.115 240);
+  --info-soft:oklch(0.79 0.08 240);
+  --seg-gray:oklch(0.44 0.01 255);
+  --seg-dark:oklch(0.33 0.01 255);
+  --tl-r:#ff5f57;--tl-y:#febc2e;--tl-g:#28c840;
+  --font-display:"Noto Serif SC","Songti SC","STSong","Source Han Serif SC","SimSun",serif;
+  --font-body:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"SF Mono",ui-monospace,"JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--stage);font:400 14px/1.6 var(--font-body);color:var(--fg);-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--surface-3);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-track{background:transparent}
+:focus-visible{outline:2px solid rgba(255,255,255,.35);outline-offset:2px}
+[hidden]{display:none!important}
+.stage{min-height:100%;display:grid;place-items:center;padding:26px}
+.window{position:relative;width:min(1480px,100%);height:min(940px,calc(100vh - 52px));min-width:1150px;background:var(--bg);border:1px solid var(--border-strong);border-radius:14px;box-shadow:0 40px 120px oklch(0 0 0/0.55);overflow:hidden;display:flex;flex-direction:column}
+/* ---- 标题栏 ---- */
+.titlebar{height:46px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--surface);border-bottom:1px solid var(--border)}
+.t-lights{display:flex;gap:8px}
+.t-lights i{width:12px;height:12px;border-radius:50%}
+.t-lights i:nth-child(1){background:var(--tl-r)}.t-lights i:nth-child(2){background:var(--tl-y)}.t-lights i:nth-child(3){background:var(--tl-g)}
+.t-name{font-weight:600;font-size:13px;letter-spacing:.02em}
+.t-sub{color:var(--faint);font-size:12px;margin-left:4px;padding-left:14px;border-left:1px solid var(--border)}
+.t-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.tag-proto{font-size:10.5px;letter-spacing:.06em;color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:2px 7px}
+.chip-mono{font:500 11px/1 var(--font-mono);color:var(--muted);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:5px 8px;letter-spacing:.02em}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);background:var(--surface-2);border:1px solid var(--border);border-radius:99px;padding:5px 11px}
+.pill-dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
+.pill-dot.live{animation:pulse 2.2s infinite}
+.pill-dot.off{background:var(--faint);animation:none}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--success) 50%,transparent)}100%{box-shadow:0 0 0 7px transparent}}
+/* ---- 侧栏 ---- */
+.shell{flex:1;min-height:0;display:flex}
+.sidebar{width:218px;flex:none;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:12px 12px 14px}
+.brand{display:flex;gap:11px;align-items:center;padding:8px 8px 16px}
+.brand .logo{width:30px;height:30px;color:var(--accent);flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
+.brand b{display:block;font-size:14px;letter-spacing:.01em}
+.brand span{display:block;font-size:11px;color:var(--faint);letter-spacing:.02em;margin-top:2px}
+.ngl{font-size:10.5px;font-weight:600;letter-spacing:.1em;color:var(--faint);padding:10px 10px 6px}
+.nav-item{display:flex;align-items:center;gap:10px;width:100%;height:40px;padding:0 11px;border-radius:8px;border:1px solid transparent;background:none;color:var(--muted);font:500 13.5px/1 var(--font-body);cursor:pointer;text-align:left;letter-spacing:.01em}
+.nav-item:hover{color:var(--fg);background:var(--surface-hi)}
+.nav-item.on{color:var(--fg);background:var(--surface-3);border-color:var(--border)}
+.side-foot{margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted);line-height:2}
+.side-foot .dot{margin-right:6px}
+.mono-cmd{font:500 10.5px/2 var(--font-mono);color:var(--faint);letter-spacing:.03em}
+.dim{color:var(--faint)}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+/* ---- 主区 ---- */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.screen{flex:1;min-height:0;overflow-y:auto;padding:26px 30px 44px}
+.scr-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:20px}
+.eyebrow{font-size:10.5px;font-weight:600;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:9px}
+.scr-head h1{font:600 27px/1.1 var(--font-display);letter-spacing:-0.015em}
+.scr-sub{margin-top:7px;font-size:12.5px;color:var(--muted);letter-spacing:.01em}
+.scr-actions{display:flex;gap:10px;align-items:center}
+.ic{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.nav-item .ic{width:16px;height:16px;opacity:.75}
+/* ---- 按钮 ---- */
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 15px;border-radius:8px;font:500 13px/1 var(--font-body);letter-spacing:.02em;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--fg);cursor:pointer;transition:background .15s,border-color .15s,transform .1s}
+.btn:hover{background:var(--surface-3);border-color:rgba(255,255,255,.26)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--accent);border-color:transparent;color:var(--accent-ink);font-weight:600;box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 6px 18px color-mix(in srgb,var(--accent) 20%,transparent)}
+.btn.primary:hover{background:oklch(0.83 0.14 80)}
+.btn.ghost{background:transparent}
+.btn.sm{height:30px;padding:0 11px;font-size:12px}
+.btn:disabled{opacity:.55;cursor:default}
+.spin{animation:spin .7s ease}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* ---- 监控台 ---- */
+.stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:15px 17px 11px}
+.stat .lbl{font-size:12px;font-weight:500;color:var(--muted);letter-spacing:.02em}
+.stat .num{font:600 30px/1 var(--font-mono);letter-spacing:-0.02em;font-variant-numeric:tabular-nums;margin:9px 0 3px}
+.stat .delta{font:500 11px/1 var(--font-mono);color:var(--faint)}
+.stat .delta.up{color:var(--success)}
+.stat .delta.bad{color:var(--danger)}
+.spark{width:100%;height:28px;margin-top:9px;display:block}
+.dash-grid{display:grid;grid-template-columns:5fr 7fr;gap:14px;align-items:start}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.panel.pad{padding:16px 18px}
+.panel-h{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px}
+.panel-h.pad0{padding:0 0 10px}
+.panel-h h3{font-size:12.5px;font-weight:600;letter-spacing:.05em}
+.ph-tag{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--faint);text-align:left;padding:8px 14px;border-bottom:1px solid var(--border-strong);white-space:nowrap}
+.tbl td{padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
+.tbl tbody tr:last-child td{border-bottom:none}
+.tbl tbody tr{cursor:pointer;transition:background .12s}
+.tbl tbody tr:hover{background:var(--surface-hi)}
+.src-name{font-weight:600;font-size:13px}
+.src-name small{display:block;font-weight:400;font-size:11px;color:var(--faint);margin-top:1px;letter-spacing:.02em}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--faint)}
+.dot.ok{background:var(--success)}.dot.warn{background:var(--warn)}.dot.err{background:var(--danger)}
+.dot.live{animation:pulse 2.2s infinite}
+.mini-tag{font-size:10px;color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 35%,transparent);border-radius:4px;padding:1px 5px;margin-left:6px;letter-spacing:.04em}
+.badge{display:inline-flex;align-items:center;height:21px;padding:0 8px;border-radius:6px;font-size:11px;font-weight:500;letter-spacing:.02em;border:1px solid transparent}
+.b-kw{color:var(--info-soft);background:color-mix(in srgb,var(--info) 14%,transparent);border-color:color-mix(in srgb,var(--info) 30%,transparent)}
+.b-price{color:oklch(0.8 0.11 155);background:color-mix(in srgb,var(--success) 12%,transparent);border-color:color-mix(in srgb,var(--success) 28%,transparent)}
+.b-ai{color:var(--muted);background:var(--surface-2);border-color:var(--border-strong);border-style:dashed}
+.feed{max-height:404px;overflow-y:auto}
+.feed-row{display:flex;justify-content:space-between;gap:18px;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s}
+.feed-row:last-child{border-bottom:none}
+.feed-row:hover{background:var(--surface-hi)}
+.feed-row.enter{animation:slideIn .45s ease}
+@keyframes slideIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.f-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.src{font:500 10.5px/1 var(--font-mono);color:var(--faint);letter-spacing:.05em}
+.rname{font-size:11px;color:var(--muted)}
+.feed-row h4{font-size:13.5px;font-weight:600;line-height:1.45;margin:5px 0 3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.f-sub{font-size:11px;color:var(--faint)}
+.f-side{text-align:right;flex:none;display:flex;flex-direction:column;justify-content:space-between;gap:6px}
+.price{font:600 13.5px/1 var(--font-mono);font-variant-numeric:tabular-nums}
+.tm{font:400 11px/1 var(--font-mono);color:var(--faint)}
+.new{font:700 9.5px/1 var(--font-mono);letter-spacing:.12em;color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);border-radius:4px;padding:2px 5px}
+/* ---- 工具条 / 表单 ---- */
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.search-wrap{position:relative;display:inline-flex;align-items:center}
+.search-wrap .ic{position:absolute;left:11px;width:14px;height:14px;stroke:var(--faint);pointer-events:none}
+.search-wrap .ipt{padding-left:32px;width:280px}
+.ipt,.sel,.ta{height:34px;background:var(--surface);border:1px solid var(--border-strong);border-radius:8px;color:var(--fg);padding:0 12px;font-size:13px}
+.ipt:focus,.sel:focus,.ta:focus{outline:none;border-color:rgba(255,255,255,.32)}
+.ipt.dt{width:128px}
+.ta{height:auto;min-height:64px;padding:9px 12px;resize:vertical;line-height:1.6}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{height:30px;padding:0 13px;border-radius:99px;border:1px solid var(--border-strong);background:var(--surface);color:var(--muted);font:500 12px/1 var(--font-body);cursor:pointer;letter-spacing:.01em;transition:.15s}
+.chip:hover{color:var(--fg)}
+.chip.on{background:var(--surface-3);color:var(--fg);border-color:rgba(255,255,255,.3)}
+.linkish{background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.linkish:hover{color:var(--fg)}
+.grow{flex:1;min-width:200px}
+/* ---- 历史命中 ---- */
+.hist-grid{display:grid;grid-template-columns:1fr 292px;gap:14px;align-items:start}
+.hit-t{font-weight:600;font-size:13px;max-width:480px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);white-space:nowrap}
+.st .dot{width:7px;height:7px}
+.rail{display:flex;flex-direction:column;gap:14px}
+.bars7{display:grid;grid-template-columns:repeat(7,1fr);gap:9px;align-items:end;height:84px;margin-top:6px}
+.bars7 .b{border-radius:4px 4px 2px 2px;background:color-mix(in srgb,var(--info) 55%,transparent);min-height:4px}
+.bars7 .b.acc{background:var(--accent)}
+.lbls{display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:var(--faint);letter-spacing:.03em}
+.kw{display:flex;align-items:center;gap:9px;font-size:12px;margin-top:9px}
+.kw b{width:56px;font-weight:500;color:var(--fg);flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kw b.mono{width:64px}
+.kw .bar-t{flex:1;height:5px;border-radius:3px;background:var(--surface-3);overflow:hidden}
+.kw .bar-t i{display:block;height:100%;border-radius:3px;background:var(--info)}
+.kw .n{font:500 11px var(--font-mono);color:var(--faint);width:24px;text-align:right;flex:none}
+.heat{display:grid;grid-template-columns:repeat(24,1fr);gap:3px;margin-top:6px}
+.heat i{height:26px;border-radius:3px;background:color-mix(in srgb,var(--info) calc(var(--v)*100%),transparent)}
+.axis{display:flex;justify-content:space-between;margin-top:7px;font:500 10px var(--font-mono);color:var(--faint)}
+/* ---- 去向 ---- */
+.dist-panel{margin-bottom:14px}
+.dist{display:flex;height:10px;border-radius:5px;overflow:hidden;gap:2px;background:var(--surface-2)}
+.dist i{flex-grow:var(--w);border-radius:2px}
+.c1{background:var(--seg-gray)}.c2{background:var(--info)}.c3{background:var(--warn)}.c4{background:var(--info-soft)}.c5{background:var(--seg-dark)}.c6{background:oklch(0.38 0.01 255)}.c7{background:var(--danger)}
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}
+.lg{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 11px;border-radius:99px;border:1px solid var(--border);background:var(--surface-2);color:var(--muted);font:500 11.5px/1 var(--font-body);cursor:pointer}
+.lg:hover{color:var(--fg);border-color:var(--border-strong)}
+.lg b{font:600 11px var(--font-mono);color:var(--fg)}
+.rdot{display:inline-block;width:7px;height:7px;border-radius:50%}
+.rb{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);white-space:nowrap}
+.why{font-size:11.5px;color:var(--faint);margin-top:3px;line-height:1.5;max-width:560px}
+/* ---- 设置 ---- */
+.set-grid{display:grid;grid-template-columns:176px 1fr;gap:28px;align-items:start}
+.anchor{position:sticky;top:-26px;display:flex;flex-direction:column;gap:3px}
+.anchor a{display:flex;align-items:center;gap:9px;padding:8px 11px;border-radius:7px;color:var(--muted);font-size:13px;text-decoration:none;border:1px solid transparent;transition:.15s}
+.anchor a b{font:600 10px var(--font-mono);color:var(--faint);letter-spacing:.05em}
+.anchor a:hover{color:var(--fg);background:var(--surface-hi)}
+.anchor a.on{color:var(--fg);background:var(--surface-2);border-color:var(--border)}
+.sec{margin-bottom:30px}
+.sec h3{font:600 17px/1.2 var(--font-display);letter-spacing:-.01em;display:flex;align-items:baseline;gap:10px;padding-bottom:11px;border-bottom:1px solid var(--border);margin-bottom:6px}
+.sec .n{font:600 11px var(--font-mono);color:var(--faint);letter-spacing:.05em}
+.frow{display:flex;align-items:center;gap:16px;padding:13px 0;border-bottom:1px dashed var(--border)}
+.frow:last-child{border-bottom:none}
+.fl{width:150px;flex:none;font-size:13px;font-weight:500}
+.fl small{display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:1px}
+.fh{flex:1;font-size:12px;color:var(--faint);line-height:1.6}
+.fh.mono{font-family:var(--font-mono);letter-spacing:0}
+.rule{display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin:10px 0}
+.rule .rt>b{font-size:13.5px}
+.kws{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.k{font:500 11px/1 var(--font-mono);padding:5px 8px;border-radius:5px;background:var(--surface-3);color:var(--fg);letter-spacing:0}
+.k.x{color:oklch(0.75 0.1 25);background:color-mix(in srgb,var(--danger) 10%,transparent)}
+.switch{position:relative;display:inline-block;width:38px;height:21px;flex:none}
+.switch input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.switch i{display:block;width:100%;height:100%;border-radius:99px;background:var(--surface-3);border:1px solid var(--border-strong);transition:.2s;position:relative}
+.switch i::after{content:"";position:absolute;top:2.5px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:.2s}
+.switch input:checked+i{background:color-mix(in srgb,var(--success) 26%,var(--surface-2));border-color:var(--success)}
+.switch input:checked+i::after{left:19px;background:var(--fg)}
+input[type=radio],input[type=checkbox]{accent-color:var(--fg)}
+input[type=range]{accent-color:var(--info);width:220px}
+.radios{display:flex;flex-direction:column;gap:9px;flex:1}
+.rad{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+.rad .hint{color:var(--faint);font-size:11.5px;margin-left:4px}
+.soon{font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;letter-spacing:.04em}
+.cmd{font:500 11.5px/1 var(--font-mono);padding:5px 9px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);color:var(--muted);letter-spacing:0}
+.cmds{display:flex;flex-wrap:wrap;gap:7px}
+.savebar{position:sticky;bottom:0;margin:6px -30px -44px;padding:14px 30px;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(10px);border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:12px}
+/* ---- 抽屉 / 遮罩 / Toast ---- */
+.bk{position:absolute;inset:0;background:oklch(0.1 0.01 255/0.55);opacity:0;pointer-events:none;transition:opacity .25s;z-index:39}
+.bk.on{opacity:1;pointer-events:auto}
+.drawer{position:absolute;top:0;right:0;bottom:0;width:462px;max-width:88%;background:var(--surface);border-left:1px solid var(--border-strong);transform:translateX(103%);transition:transform .3s cubic-bezier(.2,.8,.2,1);z-index:40;display:flex;flex-direction:column;box-shadow:-30px 0 60px oklch(0 0 0/0.35)}
+.drawer.open{transform:none}
+.d-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px 10px;border-bottom:1px solid var(--border);flex:none}
+.d-close{background:none;border:1px solid var(--border-strong);border-radius:7px;width:28px;height:28px;display:grid;place-items:center;cursor:pointer;color:var(--muted)}
+.d-close:hover{color:var(--fg);background:var(--surface-2)}
+.d-close .ic{width:13px;height:13px}
+.d-body{padding:18px 20px 26px;overflow-y:auto}
+.d-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.d-title{font:600 19px/1.5 var(--font-display);letter-spacing:-.01em;margin:13px 0 10px}
+.d-price{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px}
+.d-price .price{font-size:16px}
+.conf{font-size:11.5px;color:var(--muted)}
+.conf b{font-family:var(--font-mono);color:var(--fg)}
+.d-sec{margin-top:20px}
+.d-sec h5{font-size:11px;font-weight:600;letter-spacing:.1em;color:var(--faint);margin-bottom:10px}
+.d-sec ul{list-style:none}
+.d-sec li{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;color:var(--muted);line-height:1.65;padding:5px 0}
+.d-sec li .ic{width:13px;height:13px;stroke:var(--success);margin-top:4px}
+.quote{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font:400 13.5px/1.9 var(--font-display);color:var(--fg)}
+.fb-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.fb-row .fh{flex:none}
+.voted{border-color:var(--success);color:var(--success)}
+.toast-wrap{position:absolute;bottom:22px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;z-index:60;pointer-events:none}
+.toast{background:var(--surface-3);border:1px solid var(--border-strong);padding:10px 18px;border-radius:10px;font-size:12.5px;font-weight:500;box-shadow:0 14px 38px oklch(0 0 0/0.5);animation:tIn .3s ease;transition:opacity .35s}
+.toast.out{opacity:0}
+@keyframes tIn{from{opacity:0;transform:translateY(10px)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="stage">
+<div class="window" data-od-id="app-window">
+
+  <header class="titlebar" data-od-id="titlebar">
+    <div class="t-lights"><i></i><i></i><i></i></div>
+    <span class="t-name">ForumWatch</span>
+    <span class="t-sub">论坛监控 · 界面概念重设计</span>
+    <div class="t-right">
+      <span class="tag-proto">概念原型 · 示例数据</span>
+      <span class="chip-mono">Web 管理 :8787</span>
+      <span class="pill"><i class="pill-dot live" id="pillDot"></i><span id="pillTxt">监控中 · 5 个来源</span></span>
+    </div>
+  </header>
+
+  <div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5" opacity=".5"/><path d="M12 12 17.8 6.2"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/></svg>
+      <div><b>ForumWatch</b><span>论坛哨兵 · 瞭望塔</span></div>
+    </div>
+    <p class="ngl">监控</p>
+    <button class="nav-item on" data-screen="dashboard"><svg class="ic" viewBox="0 0 24 24"><path d="M4.5 15a8 8 0 1 1 15 0"/><path d="M12 15l3.5-4.5"/><circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none"/></svg>监控台</button>
+    <button class="nav-item" data-screen="history"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 2"/></svg>历史命中</button>
+    <button class="nav-item" data-screen="dispo"><svg class="ic" viewBox="0 0 24 24"><path d="M6.5 12h2.5"/><circle cx="4.5" cy="12" r="1.4"/><path d="M9 12h2c4.5 0 4.5-6 8-6h2"/><path d="M9 12h2c4.5 0 4.5 6 8 6h2"/><circle cx="21" cy="6" r="1.1" fill="currentColor" stroke="none"/><circle cx="21" cy="18" r="1.1" fill="currentColor" stroke="none"/></svg>去向</button>
+    <p class="ngl">系统</p>
+    <button class="nav-item" data-screen="settings"><svg class="ic" viewBox="0 0 24 24"><path d="M5 8h14M5 16h14"/><circle cx="9.5" cy="8" r="2.1"/><circle cx="14.5" cy="16" r="2.1"/></svg>设置</button>
+    <div class="side-foot">
+      <p><i class="dot ok"></i>Telegram Bot 已连接</p>
+      <p class="mono-cmd">/status · /pause · /digest</p>
+      <p class="dim">UI 概念原型 · 2026-09</p>
+    </div>
+  </aside>
+
+  <main class="main">
+
+  <section class="screen" id="scr-dash" data-od-id="dashboard">
+    <div class="scr-head">
+      <div>
+        <p class="eyebrow">Overview · 09-30 周二</p>
+        <h1>监控台</h1>
+        <p class="scr-sub">现在的运行真相 · 事件实时更新</p>
+      </div>
+      <div class="scr-actions">
+        <button class="btn" id="btnPause"><svg class="ic" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg>暂停监控</button>
+        <button class="btn" id="btnRefresh"><svg class="ic" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4.5H15"/></svg>立即刷新</button>
+      </div>
+    </div>
+
+    <div class="stat-row" data-od-id="stat-row">
+      <div class="stat"><p class="lbl">今日命中</p><p class="num" id="n-hits">0</p><p class="delta up">▲ +12 较昨日</p>
+        <svg class="spark" viewBox="0 0 120 30" preserveAspectRatio="none"><path d="M0 22 15 19 30 21 45 13 60 15 75 8 90 11 105 4 120 6V30H0Z" class="sf sf-a"/><path d="M0 22 15 19 30 21 45 13 60 15 75 8 90 11 105 4 120 6" fill="none" class="sl sl-a" stroke-width="1.6"/></svg></div>
+      <div class="stat"><p class="lbl">已推送</p><p class="num" id="n-push">0</p><p class="delta up">▲ +5 较昨日</p>
+        <svg class="spark" viewBox="0 0 120 30" preserveAspectRatio="none"><path d="M0 25 15 23 30 24 45 18 60 19 75 13 90 15 105 9 120 10V30H0Z" class="sf sf-s"/><path d="M0 25 15 23 30 24 45 18 60 19 75 13 90 15 105 9 120 10" fill="none" class="sl sl-s" stroke-width="1.6"/></svg></div>
+      <div class="stat"><p class="lbl">AI 判定无关</p><p class="num" id="n-ai">0</p><p class="delta">▼ -2 较昨日</p>
+        <svg class="spark" viewBox="0 0 120 30" preserveAspectRatio="none"><path d="M0 14 15 16 30 10 45 14 60 18 75 13 90 17 105 12 120 15V30H0Z" class="sf sf-i"/><path d="M0 14 15 16 30 10 45 14 60 18 75 13 90 17 105 12 120 15" fill="none" class="sl sl-i" stroke-width="1.6"/></svg></div>
+      <div class="stat"><p class="lbl">轮询错误</p><p class="num" id="n-err">0</p><p class="delta bad">▲ +1 需关注</p>
+        <svg class="spark" viewBox="0 0 120 30" preserveAspectRatio="none"><path d="M0 24 15 24 30 22 45 24 60 18 75 23 90 20 105 24 120 21V30H0Z" class="sf sf-d"/><path d="M0 24 15 24 30 22 45 24 60 18 75 23 90 20 105 24 120 21" fill="none" class="sl sl-d" stroke-width="1.6"/></svg></div>
+    </div>
+
+    <div class="dash-grid">
+      <section class="panel" data-od-id="sources-panel">
+        <div class="panel-h"><h3>来源健康度</h3><span class="ph-tag">Sources</span></div>
+        <table class="tbl">
+          <thead><tr><th>状态</th><th>来源</th><th>延迟</th><th>上次轮询</th><th>今日</th></tr></thead>
+          <tbody>
+            <tr><td><i class="dot ok live"></i></td><td><div class="src-name">NodeSeek<small>网页抓取 · 30s</small></div></td><td class="mono">412ms</td><td class="mono dim">8 秒前</td><td class="mono">12</td></tr>
+            <tr><td><i class="dot ok"></i></td><td><div class="src-name">V2EX<small>API · 45s</small></div></td><td class="mono">198ms</td><td class="mono dim">22 秒前</td><td class="mono">9</td></tr>
+            <tr><td><i class="dot ok"></i></td><td><div class="src-name">Linux.do<small>RSS · 2m</small></div></td><td class="mono">2.3s</td><td class="mono dim">1 分钟前</td><td class="mono">15</td></tr>
+            <tr><td><i class="dot warn"></i></td><td><div class="src-name">LowEndTalk<small>RSS · 5m</small><span class="mini-tag">慢</span></div></td><td class="mono">4.5s</td><td class="mono dim">12 秒前</td><td class="mono">3</td></tr>
+            <tr><td><i class="dot ok"></i></td><td><div class="src-name">HOSTLOC<small>RSS · 3m</small></div></td><td class="mono">612ms</td><td class="mono dim">55 秒前</td><td class="mono">2</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" data-od-id="live-feed">
+        <div class="panel-h"><h3>实时命中流</h3><span class="ph-tag">Live Feed</span></div>
+        <div class="feed" id="feedBox"></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="screen" id="scr-hist" hidden data-od-id="history">
+    <div class="scr-head">
+      <div>
+        <p class="eyebrow">History</p>
+        <h1>历史命中</h1>
+        <p class="scr-sub">每一条命中都有迹可循 · 点击行查看完整判定链</p>
+      </div>
+      <div class="scr-actions"><span class="chip-mono">近 7 天 · 241 条</span></div>
+    </div>
+    <div class="bar">
+      <label class="search-wrap"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input class="ipt" id="histSearch" placeholder="快速定位：标题 / 关键词 …"></label>
+      <div class="chips" id="histChips">
+        <button class="chip on" data-rule="all">全部</button>
+        <button class="chip" data-rule="kw">关键词</button>
+        <button class="chip" data-rule="price">价格</button>
+        <button class="chip" data-rule="ai">AI 语义</button>
+      </div>
+      <select class="sel" id="srcSel">
+        <option value="all">全部来源</option><option>NodeSeek</option><option>V2EX</option><option>Linux.do</option><option>LowEndTalk</option><option>HOSTLOC</option>
+      </select>
+      <input type="date" class="ipt dt" value="2026-09-23"><span class="dim">→</span><input type="date" class="ipt dt" value="2026-09-30">
+    </div>
+    <div class="hist-grid">
+      <section class="panel" id="histPanel">
+        <div class="panel-h"><h3>命中记录</h3><span class="ph-tag">Hits · 可拖拽</span></div>
+        <div class="tbl-scroll" id="histScroll">
+        <table class="tbl">
+          <thead><tr><th>帖子标题</th><th>来源</th><th>规则</th><th>价格</th><th>时间</th><th>状态</th></tr></thead>
+          <tbody id="histBody"></tbody>
+        </table>
+        </div>
+        <div class="grip-x" id="gripX" title="上下拖动调高 · 双击复位"></div>
+      </section>
+      <aside class="rail" data-od-id="stats-profile">
+          <div class="grip-y" id="gripY" title="左右拖动调宽 · 双击复位"></div>
+        <section class="panel pad"><div class="panel-h pad0"><h3>7 日命中趋势</h3><span class="ph-tag">Trend</span></div>
+          <div class="bars7"><i class="b" style="height:34%"></i><i class="b" style="height:52%"></i><i class="b" style="height:41%"></i><i class="b" style="height:27%"></i><i class="b" style="height:58%"></i><i class="b" style="height:46%"></i><i class="b acc" style="height:72%"></i></div>
+          <div class="lbls"><span>周一</span><span>周二</span><span>周三</span><span>周四</span><span>周五</span><span>周六</span><span>周日</span></div>
+        </section>
+        <section class="panel pad"><div class="panel-h pad0"><h3>TOP 关键词</h3><span class="ph-tag">Keywords</span></div>
+          <div class="kw"><b>搬瓦工</b><span class="bar-t"><i style="width:92%"></i></span><span class="n">23</span></div>
+          <div class="kw"><b>香港</b><span class="bar-t"><i style="width:72%"></i></span><span class="n">18</span></div>
+          <div class="kw"><b>甲骨文</b><span class="bar-t"><i style="width:48%"></i></span><span class="n">12</span></div>
+          <div class="kw"><b>CN2</b><span class="bar-t"><i style="width:36%"></i></span><span class="n">9</span></div>
+          <div class="kw"><b>年付</b><span class="bar-t"><i style="width:28%"></i></span><span class="n">7</span></div>
+        </section>
+        <section class="panel pad"><div class="panel-h pad0"><h3>价格分布</h3><span class="ph-tag">¥ / 年</span></div>
+          <div class="kw"><b class="mono">&lt;¥10</b><span class="bar-t"><i style="width:33%"></i></span><span class="n">4</span></div>
+          <div class="kw"><b class="mono">¥10-20</b><span class="bar-t"><i style="width:75%"></i></span><span class="n">9</span></div>
+          <div class="kw"><b class="mono">¥20-30</b><span class="bar-t"><i style="width:100%"></i></span><span class="n">12</span></div>
+          <div class="kw"><b class="mono">¥30-40</b><span class="bar-t"><i style="width:42%"></i></span><span class="n">5</span></div>
+          <div class="kw"><b class="mono">≥¥40</b><span class="bar-t"><i style="width:25%"></i></span><span class="n">3</span></div>
+        </section>
+        <section class="panel pad"><div class="panel-h pad0"><h3>高峰时段</h3><span class="ph-tag">UTC+8</span></div>
+          <div class="heat"><i style="--v:.12"></i><i style="--v:.18"></i><i style="--v:.10"></i><i style="--v:.08"></i><i style="--v:.06"></i><i style="--v:.05"></i><i style="--v:.09"></i><i style="--v:.22"></i><i style="--v:.45"></i><i style="--v:.62"></i><i style="--v:.50"></i><i style="--v:.38"></i><i style="--v:.42"></i><i style="--v:.55"></i><i style="--v:.68"></i><i style="--v:.60"></i><i style="--v:.47"></i><i style="--v:.52"></i><i style="--v:.44"></i><i style="--v:.36"></i><i style="--v:.30"></i><i style="--v:.24"></i><i style="--v:.20"></i><i style="--v:.14"></i></div>
+          <div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+        </section>
+      </aside>
+    </div>
+  </section>
+
+  <section class="screen" id="scr-dispo" hidden data-od-id="dispositions">
+    <div class="scr-head">
+      <div>
+        <p class="eyebrow">Dispositions</p>
+        <h1>去向</h1>
+        <p class="scr-sub">这是可观测性，不是垃圾场 —— 16 类处置原因，每条帖子都有交代</p>
+      </div>
+      <div class="scr-actions"><span class="chip-mono">今日 102 条处置</span></div>
+    </div>
+
+    <section class="panel pad dist-panel" data-od-id="dispo-dist">
+      <div class="dist"><i class="c1" style="--w:58"></i><i class="c2" style="--w:14"></i><i class="c3" style="--w:9"></i><i class="c4" style="--w:8"></i><i class="c5" style="--w:6"></i><i class="c6" style="--w:3"></i><i class="c7" style="--w:2"></i></div>
+      <div class="legend" id="dispoLegend">
+        <button class="lg" data-cat="miss"><i class="rdot c1"></i>未命中 <b>58</b></button>
+        <button class="lg" data-cat="exclude"><i class="rdot c2"></i>排除词否决 <b>14</b></button>
+        <button class="lg" data-cat="price"><i class="rdot c3"></i>价格不符 <b>9</b></button>
+        <button class="lg" data-cat="score"><i class="rdot c4"></i>评分不足 <b>8</b></button>
+        <button class="lg" data-cat="dup"><i class="rdot c5"></i>重复·限频 <b>6</b></button>
+        <button class="lg" data-cat="paused"><i class="rdot c6"></i>暂停中 <b>3</b></button>
+        <button class="lg" data-cat="fail"><i class="rdot c7"></i>抓取失败 <b>2</b></button>
+      </div>
+    </section>
+
+    <div class="bar">
+      <label class="search-wrap"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input class="ipt" id="dispoSearch" placeholder="快速定位：标题 / 解释 …"></label>
+      <div class="chips" id="dispoChips">
+        <button class="chip on" data-cat="all">全部</button>
+        <button class="chip" data-cat="miss">未命中</button>
+        <button class="chip" data-cat="exclude">排除词否决</button>
+        <button class="chip" data-cat="price">价格不符</button>
+        <button class="chip" data-cat="score">评分不足</button>
+        <button class="chip" data-cat="dup">重复·限频</button>
+        <button class="chip" data-cat="paused">暂停中</button>
+        <button class="chip" data-cat="fail">抓取失败</button>
+      </div>
+      <button class="linkish" id="dispoClear">清除筛选</button>
+    </div>
+
+    <section class="panel">
+      <table class="tbl">
+        <thead><tr><th>时间</th><th>来源</th><th>帖子 · 解释</th><th>原因</th><th></th></tr></thead>
+        <tbody id="dispoBody"></tbody>
+      </table>
+    </section>
+  </section>
+
+  <section class="screen" id="scr-set" hidden data-od-id="settings">
+    <div class="scr-head">
+      <div>
+        <p class="eyebrow">Settings</p>
+        <h1>设置</h1>
+        <p class="scr-sub">把哨兵调成你的样子</p>
+      </div>
+    </div>
+    <div class="set-grid">
+      <aside class="anchor">
+        <a href="#" class="on" data-sec="rules"><b>01</b>匹配规则</a>
+        <a href="#" data-sec="sources"><b>02</b>监控来源</a>
+        <a href="#" data-sec="ai"><b>03</b>AI 语义匹配</a>
+        <a href="#" data-sec="notify"><b>04</b>通知推送</a>
+        <a href="#" data-sec="general"><b>05</b>通用</a>
+      </aside>
+      <div>
+        <section class="sec" id="sec-rules" data-sec="rules">
+          <h3><span class="n">01</span>匹配规则</h3>
+          <div id="ruleList">
+            <div class="rule">
+              <div class="rt"><b>「VPS 香港优惠」</b>
+                <div class="kws"><span class="k">搬瓦工 &amp;&amp; 香港</span><span class="k">CN2</span><span class="k x">¬招聘</span><span class="k x">¬求购</span></div>
+              </div>
+              <label class="switch"><input type="checkbox" checked><i></i></label>
+            </div>
+            <div class="rule">
+              <div class="rt"><b>「甲骨文闲置 · AI 语义」</b>
+                <div class="kws"><span class="k">置信度 ≥ 0.75</span><span class="k">反馈样本 128 条</span></div>
+              </div>
+              <label class="switch"><input type="checkbox" checked><i></i></label>
+            </div>
+            <div class="rule">
+              <div class="rt"><b>「年付 ≤ ¥35」价格规则</b>
+                <div class="kws"><span class="k">周期 年付</span><span class="k">≤ ¥35/年</span><span class="k">流量 ≥ 300M</span></div>
+              </div>
+              <label class="switch"><input type="checkbox" checked><i></i></label>
+            </div>
+          </div>
+          <div class="frow"><button class="btn ghost sm" id="btnAddRule"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建规则</button><span class="fh">关键词支持 &amp;&amp; 组合；排除词一票否决；价格规则从标题自动提取周期 / 价格 / 流量做精确比对</span></div>
+        </section>
+
+        <section class="sec" id="sec-sources" data-sec="sources">
+          <h3><span class="n">02</span>监控来源</h3>
+          <div class="frow"><span class="fl">NodeSeek<small>网页抓取</small></span><span class="fh mono">间隔 30s</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">V2EX<small>API</small></span><span class="fh mono">间隔 45s</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">Linux.do<small>RSS 2.0</small></span><span class="fh mono">间隔 2m</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">LowEndTalk<small>RSS 2.0</small></span><span class="fh mono">间隔 5m · 低频</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">HOSTLOC<small>RSS 2.0</small></span><span class="fh mono">间隔 3m</span><label class="switch"><input type="checkbox"><i></i></label></div>
+          <div class="frow"><input class="ipt grow" placeholder="粘贴任意 RSS 2.0 / Atom 论坛链接 …"><button class="btn sm">验证并添加</button></div>
+        </section>
+
+        <section class="sec" id="sec-ai" data-sec="ai">
+          <h3><span class="n">03</span>AI 语义匹配</h3>
+          <div class="frow"><span class="fl">模型预设</span>
+            <select class="sel" id="aiPreset"><option value="deepseek" selected>DeepSeek</option><option value="kimi">Kimi</option><option value="glm">GLM</option><option value="custom">自定义（OpenAI 兼容）</option></select>
+            <span class="fh">OpenAI 兼容接口均可接入</span>
+          </div>
+          <div class="frow"><span class="fl">模型</span><input class="ipt grow" id="aiModel" value="deepseek-chat"></div>
+          <div class="frow"><span class="fl">接口地址</span><input class="ipt grow" id="aiEp" value="https://api.deepseek.com/v1"></div>
+          <div class="frow"><span class="fl">置信度阈值</span>
+            <input type="range" id="aiTh" min="0.5" max="0.95" step="0.01" value="0.75">
+            <b class="mono" id="aiThVal" style="width:44px">0.75</b>
+            <span class="fh">低于阈值的帖子进入「去向 · 评分不足」</span>
+          </div>
+          <div class="frow"><span class="fl">提示词</span>
+            <div class="grow"><textarea class="ta grow" style="width:100%">你是论坛优惠信息的筛选助手。判断帖子是否为「真实可买的优惠 / 出售信息」，排除求购、招聘、无关闲聊。输出 JSON：{relevant, confidence, reason}。</textarea></div>
+          </div>
+          <div class="frow"><button class="btn sm" id="btnTest">测试连接</button><span class="fh">每次 👍 / 👎 反馈都会进入语义调优样本池</span></div>
+        </section>
+
+        <section class="sec" id="sec-notify" data-sec="notify">
+          <h3><span class="n">04</span>通知推送</h3>
+          <div class="frow"><span class="fl">Bot Token</span><input class="ipt grow" type="password" value="7230981:FW-bot-token-sample"></div>
+          <div class="frow"><span class="fl">Chat ID</span><input class="ipt grow" value="104239871"></div>
+          <div class="frow"><span class="fl">每日总结<small>23:00 推送当日汇总</small></span><span class="fh">命中数 · 推送数 · 来源健康一览</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">周报 / 月报行情<small>分类价格走势</small></span><span class="fh">按机型 / 地域聚合的历史价格带</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">Bot 远程控制</span><span class="fh">在 Telegram 里直接操控哨兵</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">远程命令</span>
+            <div class="cmds"><span class="cmd">/status</span><span class="cmd">/pause</span><span class="cmd">/resume</span><span class="cmd">/rule add</span><span class="cmd">/digest</span><span class="cmd">/why 序号</span></div>
+          </div>
+        </section>
+
+        <section class="sec" id="sec-general" data-sec="general">
+          <h3><span class="n">05</span>通用</h3>
+          <div class="frow"><span class="fl">关窗行为</span>
+            <div class="radios">
+              <label class="rad"><input type="radio" name="close" checked>最小化到托盘<span class="hint">推荐 · 关窗不退出，后台继续监控</span></label>
+              <label class="rad"><input type="radio" name="close">退出应用</label>
+            </div>
+          </div>
+          <div class="frow"><span class="fl">开机自启</span><span class="fh">登录后静默驻留托盘</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">Web 管理界面</span><span class="fh">与桌面版完全一致 · 供 Docker 无头模式使用</span><span class="chip-mono">127.0.0.1:8787</span><label class="switch"><input type="checkbox" checked><i></i></label></div>
+          <div class="frow"><span class="fl">外观</span>
+            <div class="radios" style="flex-direction:row;gap:22px;flex-wrap:wrap">
+              <label class="rad"><input type="radio" name="theme" value="dark" checked>深色 · 瞭望塔</label>
+              <label class="rad"><input type="radio" name="theme" value="light">浅色 · 晨报</label>
+              <label class="rad"><input type="radio" name="theme" value="system">跟随系统</label>
+            </div>
+          </div>
+        </section>
+
+        <div class="savebar">
+          <button class="btn ghost" id="btnReset">恢复默认</button>
+          <button class="btn primary" id="btnSave">保存并热更新</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </main>
+  </div>
+
+  <div class="bk" id="bk"></div>
+  <aside class="drawer" id="drawer" data-od-id="hit-drawer" aria-label="命中详情">
+    <div class="d-head"><span class="ph-tag">Hit Detail · 命中详情</span><button class="d-close" id="dClose" aria-label="关闭"><svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="d-body" id="drawerBody"></div>
+  </aside>
+  <div class="toast-wrap" id="toasts"></div>
+
+</div>
+</div>
+
+<script>
+var $=function(s,r){return (r||document).querySelector(s)},
+    $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+var IC_CHECK='<svg class="ic" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    IC_PAUSE='<svg class="ic" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg>',
+    IC_PLAY='<svg class="ic" viewBox="0 0 24 24"><path d="M8 6l10 6-10 6z"/></svg>',
+    IC_UP='<svg class="ic" viewBox="0 0 24 24"><path d="M6.5 10.5v9M6.5 10.5h2.8l2.6-5.2a1.6 1.6 0 0 1 3 .8l-.7 4.4h3.6a2 2 0 0 1 2 2.3l-.9 5a2 2 0 0 1-2 1.7H6.5"/></svg>',
+    IC_DOWN='<svg class="ic" viewBox="0 0 24 24"><path d="M6.5 13.5v-9M6.5 13.5h2.8l2.6 5.2a1.6 1.6 0 0 0 3-.8l-.7-4.4h3.6a2 2 0 0 0 2-2.3l-.9-5a2 2 0 0 0-2-1.7H6.5"/></svg>';
+
+/* ---------- 示例数据（概念原型） ---------- */
+var HITS=[
+{id:1,t:"14:32",src:"NodeSeek",rule:"kw",ruleName:"搬瓦工 && 香港",price:"¥28.9/年",st:"push",title:"【年付】搬瓦工 CN2 GIA 2C/1G/20G 香港 · 优惠码 FW-2026X",
+ why:["关键词命中：『搬瓦工』✓『香港』✓ · && 组合成立","排除词扫描：未命中『招聘 / 求购』","价格规则：¥28.9/年 ≤ 上限 ¥35/年","去重检查：24h 内无相似帖 · 最高相似度 41%"],
+ ai:"典型的限量闪购：库存少、改价频繁。历史低价在 ¥27–31 区间，当前处于近 90 天低位；GIA 香港小鸡适合落地或轻量反代，不建议重度中转。",conf:0.94},
+{id:2,t:"14:07",src:"V2EX",rule:"ai",ruleName:"甲骨文闲置",price:"—",st:"pushai",title:"出一台甲骨文 ARM 小鸡，首尔区，闲置三个月没开机",
+ why:["AI 语义命中：『甲骨文』『闲置』『出』语义组合 · 置信度 0.91","关键词规则：未直接命中","排除词扫描：未命中","频率限制：本小时 3/8 条 · 未超限"],
+ ai:"首尔 ARM 4C/24G 是甲骨文里流动性最好的配置；帖内未报价，建议蹲楼内更新。『闲置三个月』有回收风险，落地先验证实例状态。",conf:0.91},
+{id:3,t:"13:41",src:"Linux.do",rule:"price",ruleName:"年付 ≤ ¥35",price:"¥19.9/年",st:"push",title:"羊毛：某云轻量 2C/2G/300M 新用户年付 ¥19.9（拼车）",
+ why:["价格提取：标题解析出 周期=年付 · 价格=¥19.9 · 流量=300M","规则比对：¥19.9/年 ≤ ¥35/年 ✓ · 流量 ≥ 300M ✓","去重检查：新用户专享 · 非重复帖"],
+ ai:"新用户价常见套路：续费价通常 ×3。当一年期用完即抛可以入，长期持有请直接跳过。",conf:0.87},
+{id:4,t:"13:26",src:"LowEndTalk",rule:"kw",ruleName:"annual && NVMe",price:"$11.99/yr",st:"push",title:"Annual Offer · 2 vCPU / 2GB / 30GB NVMe · Los Angeles",
+ why:["关键词命中：『annual』✓『NVMe』✓","排除词扫描：未命中『Wanted / LEB』","价格规则：外币折算 ≈¥86/年 · 超上限，仅关键词通道放行"],
+ ai:"洛杉矶机房晚高峰一般，2C/2G 年付 $11.99 属 LET 常规水位，不稀缺。",conf:0.82},
+{id:5,t:"12:58",src:"NodeSeek",rule:"price",ruleName:"月付 ≤ ¥10",price:"¥9.9/月",st:"push",title:"良心云 1C/1G/2M 小水管 月付 ¥9.9 可原价续费",
+ why:["价格提取：周期=月付 · 价格=¥9.9","规则比对：¥9.9/月 ≤ ¥10/月 ✓ · 备注可原价续费","去重检查：90 天内同款已推送 2 次 · 间隔 45 天，放行"],
+ ai:"可续费是关键卖点，2M 小水管只适合 DDNS / 轻量探针。历史波动 ¥8.8–12.9。",conf:0.79},
+{id:6,t:"12:31",src:"Linux.do",rule:"ai",ruleName:"甲骨文闲置",price:"—",st:"wait",title:"有没有人要甲骨文东京区，白嫖半年了出掉",
+ why:["AI 语义命中：『甲骨文』『出掉』· 置信度 0.79（边界值，已放行）","频率限制：10 分钟内已推送 5 条 · 待下一窗口推送"],
+ ai:"东京区一直是稀缺货，白嫖半年说明实例稳定；置信度卡在阈值附近，建议反馈帮助校准。",conf:0.79},
+{id:7,t:"11:47",src:"HOSTLOC",rule:"kw",ruleName:"CN2",price:"¥36/季",st:"push",title:"HK CN2 GIA 线路 1C/512M 季付 ¥36，稳定三年老店",
+ why:["关键词命中：『CN2』✓","价格规则：季付不在已配置周期内 · 仅关键词通道放行","去重检查：同店同款 30 天内未推送"],
+ ai:"512M 内存只能跑探针或 DNS；老店稳定性是唯一卖点，价格中规中矩。",conf:0.75},
+{id:8,t:"10:52",src:"V2EX",rule:"ai",ruleName:"VPS 优惠（语义）",price:"€12/年",st:"pushai",title:"Hetzner 拍卖场捡漏：CX22 €12/年 顺手出了两台",
+ why:["AI 语义命中：『拍卖场』『捡漏』『出了』· 置信度 0.85","排除词扫描：未命中","频率限制：未超限"],
+ ai:"Hetzner 拍卖机适合自用，转手流动性一般；€12/年 的 CX22 若非故障机即是好价。",conf:0.85}
+];
+var FEED=HITS.concat([
+ {t:"",src:"NodeSeek",rule:"kw",ruleName:"DMIT && 年付",price:"$39.9/年",st:"push",title:"DMIT LAX Pro 6.8 折 · 年付 $39.9，CN2 GIA 另有少量现货",
+  why:["关键词命中：『DMIT』✓『年付』✓","价格规则：折合 ≈¥286/年 高于上限 · 仅关键词通道放行","去重检查：90 天内无同款推送"],
+  ai:"Pro 系列长期 6.5–7 折区间波动，6.8 折属常规水位；LA 线路晚高峰一般。",conf:0.88},
+ {t:"",src:"LowEndTalk",rule:"price",ruleName:"年付 ≤ ¥35（闪购白名单）",price:"$10.28/yr",st:"push",title:"RackNerd Flash Sale · 1C/768M/15G NVMe · $10.28/yr",
+  why:["价格提取：$10.28/yr · 命中『闪购特例』白名单","关键词未命中 · 价格通道放行"],
+  ai:"RackNerd 常年闪购，$10.28 是 768M 档历史底价区；做落地页可以，建站慎选。",conf:0.83},
+ {t:"",src:"V2EX",rule:"ai",ruleName:"甲骨文闲置",price:"—",st:"pushai",title:"Oracle 首尔 ARM 4C/24G 出，走闲鱼担保交易",
+  why:["AI 语义命中：『Oracle』『ARM』『出』· 置信度 0.90","排除词扫描：未命中"],
+  ai:"4C/24G 首尔是硬通货，闲鱼担保可规避回收风险；先验实例再付款。",conf:0.90}
+]);
+var RULE={kw:["关键词","b-kw"],price:["价格","b-price"],ai:["AI 语义","b-ai"]},
+    ST={push:["已推送","ok"],pushai:["已推送 · 锐评","ok"],wait:["待推送","warn"]};
+
+function toast(m){var t=document.createElement("div");t.className="toast";t.textContent=m;
+ $("#toasts").appendChild(t);setTimeout(function(){t.classList.add("out");setTimeout(function(){t.remove()},380)},2600)}
+function nowStr(){var n=new Date();return ("0"+n.getHours()).slice(-2)+":"+("0"+n.getMinutes()).slice(-2)}
+
+/* ---------- 导航（记忆停留屏） ---------- */
+var SCREENS={dashboard:"scr-dash",history:"scr-hist",dispo:"scr-dispo",settings:"scr-set"};
+function go(id){if(!SCREENS[id])id="dashboard";
+ $$(".nav-item").forEach(function(b){b.classList.toggle("on",b.dataset.screen===id)});
+ Object.keys(SCREENS).forEach(function(k){$("#"+SCREENS[k]).hidden=(k!==id)});
+ try{localStorage.setItem("fw-screen",id)}catch(e){}}
+$$(".nav-item").forEach(function(b){b.addEventListener("click",function(){go(b.dataset.screen)})});
+var savedScreen="dashboard";try{savedScreen=localStorage.getItem("fw-screen")||"dashboard"}catch(e){}
+go(savedScreen);
+
+/* ---------- 数字滚动 ---------- */
+function countUp(el,target){var t0=performance.now(),d=900;
+ (function step(n){var p=Math.min(1,(n-t0)/d);el.textContent=Math.round(target*(1-Math.pow(1-p,3)));
+  if(p<1)requestAnimationFrame(step)})(t0)}
+countUp($("#n-hits"),47);countUp($("#n-push"),23);countUp($("#n-ai"),11);countUp($("#n-err"),2);
+
+/* ---------- 实时命中流 ---------- */
+var feedBox=$("#feedBox");
+function feedRow(h,fresh){var d=document.createElement("article");d.className="feed-row"+(fresh?" enter":"");d.tabIndex=0;
+ d.innerHTML='<div class="f-main"><div class="f-meta"><span class="src">'+h.src+'</span>'
+  +'<span class="badge '+RULE[h.rule][1]+'">'+RULE[h.rule][0]+'</span><span class="rname">'+h.ruleName+'</span>'
+  +(fresh?'<span class="new">NEW</span>':'')
+  +'</div><h4>'+h.title+'</h4><div class="f-sub">'+(h.st==="wait"?"待推送 · 频率窗口内":"已推送 Telegram")+'</div></div>'
+  +'<div class="f-side"><span class="price">'+h.price+'</span><time class="tm">'+(fresh?nowStr():h.t)+'</time></div>';
+ d.addEventListener("click",function(){openDrawer(h)});
+ return d}
+HITS.slice(-5).reverse().forEach(function(h){feedBox.appendChild(feedRow(h,false))});
+var feedIdx=0,live=true;
+setInterval(function(){if(!live||document.hidden)return;
+ var old=$(".new",feedBox);old&&old.remove();
+ feedBox.insertBefore(feedRow(FEED[feedIdx++%FEED.length],true),feedBox.firstChild);
+ while(feedBox.children.length>14)feedBox.removeChild(feedBox.lastElementChild)},7000);
+
+/* ---------- 暂停 / 刷新 ---------- */
+$("#btnPause").addEventListener("click",function(){live=!live;
+ this.innerHTML=(live?IC_PAUSE+"暂停监控":IC_PLAY+"恢复监控");
+ $("#pillTxt").textContent=live?"监控中 · 5 个来源":"已暂停 · 命中暂存本地";
+ $("#pillDot").classList.toggle("off",!live);
+ $("#pillDot").classList.toggle("live",live);
+ toast(live?"监控已恢复 · 继续轮询 5 个来源":"监控已暂停 · 命中暂存本地，不推送")});
+$("#btnRefresh").addEventListener("click",function(){var s=this.querySelector("svg");
+ s.classList.remove("spin");void s.getBoundingClientRect();s.classList.add("spin");
+ toast("已轮询全部来源 · 5/5 成功 · 平均延迟 1.4s")});
+
+/* ---------- 历史命中 ---------- */
+var histBody=$("#histBody");
+HITS.slice().reverse().forEach(function(h){var tr=document.createElement("tr");
+ tr.dataset.rule=h.rule;tr.dataset.src=h.src;tr.dataset.title=h.title.toLowerCase();
+ tr.innerHTML='<td><div class="hit-t">'+h.title+'</div></td><td><span class="src">'+h.src+'</span></td>'
+  +'<td><span class="badge '+RULE[h.rule][1]+'">'+RULE[h.rule][0]+'</span></td>'
+  +'<td class="mono">'+h.price+'</td><td class="mono dim">'+h.t+'</td>'
+  +'<td><span class="st"><i class="dot '+ST[h.st][1]+'"></i>'+ST[h.st][0]+'</span></td>';
+ tr.addEventListener("click",function(){openDrawer(h)});histBody.appendChild(tr)});
+var hf={rule:"all",src:"all",q:""};
+function applyHist(){$$("#histBody tr").forEach(function(tr){var d=tr.dataset;
+ var ok=(hf.rule==="all"||d.rule===hf.rule)&&(hf.src==="all"||d.src===hf.src)&&(!hf.q||d.title.indexOf(hf.q)>-1);
+ tr.style.display=ok?"":"none"})}
+$$("#histChips .chip").forEach(function(c){c.addEventListener("click",function(){
+ $$("#histChips .chip").forEach(function(x){x.classList.remove("on")});c.classList.add("on");
+ hf.rule=c.dataset.rule;applyHist()})});
+$("#srcSel").addEventListener("change",function(e){hf.src=e.target.value;applyHist()});
+$("#histSearch").addEventListener("input",function(e){hf.q=e.target.value.trim().toLowerCase();applyHist()});
+
+/* ---------- 去向 ---------- */
+var DISPO=[
+ {t:"14:35",src:"NodeSeek",cat:"exclude",title:"香港 VPS 团队招运维，可远程",rb:"排除词否决",why:"命中『香港』，但触发排除词『招聘』—— 一票否决"},
+ {t:"14:29",src:"LowEndTalk",cat:"miss",title:"Looking for a cheap VPS in HK / CN2",rb:"未命中",why:"无规则匹配：英文标题与全部 6 条规则无交集"},
+ {t:"14:21",src:"V2EX",cat:"score",title:"出一批甲骨文账号，自提价",rb:"评分不足",why:"AI 置信度 0.38 ＜ 阈值 0.75 · 判定为风险交易帖"},
+ {t:"14:12",src:"NodeSeek",cat:"price",title:"搬瓦工 45 码年付，香港 CN2",rb:"价格不符",why:"解析为 ¥45/年 · 高于上限 ¥35/年"},
+ {t:"13:58",src:"Linux.do",cat:"dup",title:"【补车】Euserv 免费小鸡，上车速来",rb:"重复",why:"与 13:02 命中相似度 92% · 24h 内已推送，合并抑制"},
+ {t:"13:44",src:"HOSTLOC",cat:"price",title:"xx 云 2C2G 300M ¥15/月 拼车",rb:"价格不符",why:"月付周期不在『年付 ≤ ¥35』规则范围内"},
+ {t:"13:30",src:"V2EX",cat:"miss",title:"求推荐一个便宜的香港小鸡",rb:"未命中",why:"无规则匹配：语义为『求购』，非优惠信息"},
+ {t:"13:12",src:"NodeSeek",cat:"paused",title:"低价出 DMIT 年付，走担保",rb:"暂停中",why:"推送队列暂停（13:05–13:30 手动暂停）· 命中已暂存"},
+ {t:"12:58",src:"LowEndTalk",cat:"fail",title:"LET · Flash Sale Round 42",rb:"抓取失败",why:"来源连续 2 次超时 · 已退避重试（下次 45s）"},
+ {t:"12:41",src:"Linux.do",cat:"dup",title:"羊毛：某云轻量 2C/2G 新用户 ¥19.9/年",rb:"限频",why:"10 分钟内已推送 5 条 · 本条延迟合并推送"}
+];
+var CATC={miss:"c1",exclude:"c2",price:"c3",score:"c4",dup:"c5",paused:"c6",fail:"c7"};
+var dispoBody=$("#dispoBody");
+DISPO.forEach(function(d){var tr=document.createElement("tr");tr.dataset.cat=d.cat;tr.dataset.title=(d.title+" "+d.why).toLowerCase();
+ tr.innerHTML='<td class="mono dim">'+d.t+'</td><td><span class="src">'+d.src+'</span></td>'
+  +'<td><div class="hit-t">'+d.title+'</div><div class="why">'+d.why+'</div></td>'
+  +'<td><span class="rb"><i class="rdot '+CATC[d.cat]+'"></i>'+d.rb+'</span></td><td class="mono dim">›</td>';
+ dispoBody.appendChild(tr)});
+var dcat="all",dq="";
+function applyDispo(){$$("#dispoBody tr").forEach(function(tr){
+ var ok=(dcat==="all"||tr.dataset.cat===dcat)&&(!dq||tr.dataset.title.indexOf(dq)>-1);
+ tr.style.display=ok?"":"none"})}
+function setDispoChips(cat){$$("#dispoChips .chip").forEach(function(x){x.classList.toggle("on",x.dataset.cat===cat)})}
+$$("#dispoChips .chip").forEach(function(c){c.addEventListener("click",function(){
+ dcat=c.dataset.cat;setDispoChips(dcat);applyDispo()})});
+$$("#dispoLegend .lg").forEach(function(c){c.addEventListener("click",function(){
+ dcat=c.dataset.cat;setDispoChips(dcat);applyDispo();
+ $("#scr-dispo").scrollTo({top:0,behavior:"smooth"})})});
+$("#dispoSearch").addEventListener("input",function(e){dq=e.target.value.trim().toLowerCase();applyDispo()});
+$("#dispoClear").addEventListener("click",function(){dcat="all";dq="";$("#dispoSearch").value="";setDispoChips("all");applyDispo()});
+
+/* ---------- 命中详情抽屉 ---------- */
+var drawer=$("#drawer"),bk=$("#bk");
+function openDrawer(h){
+ $("#drawerBody").innerHTML=
+  '<div class="d-meta"><span class="src">'+h.src+'</span><span class="mono dim">'+(h.t||nowStr())+'</span>'
+  +'<span class="badge '+RULE[h.rule][1]+'">'+RULE[h.rule][0]+' · '+h.ruleName+'</span></div>'
+  +'<h3 class="d-title">'+h.title+'</h3>'
+  +'<div class="d-price"><span class="price">'+h.price+'</span><span class="conf">语义置信度 <b>'+h.conf.toFixed(2)+'</b></span></div>'
+  +'<div class="d-sec"><h5>命中原因 · 逐条可解释</h5><ul>'
+  +h.why.map(function(w){return '<li>'+IC_CHECK+'<span>'+w+'</span></li>'}).join("")+'</ul></div>'
+  +'<div class="d-sec"><h5>AI 锐评</h5><div class="quote">'+h.ai+'</div></div>'
+  +'<div class="d-sec"><h5>这条推送有用吗？</h5><div class="fb-row">'
+  +'<button class="btn ghost sm" data-fb="有用">'+IC_UP+'有用</button>'
+  +'<button class="btn ghost sm" data-fb="无关">'+IC_DOWN+'无关</button>'
+  +'<span class="fh">反馈将进入语义匹配的调优样本</span></div></div>';
+ drawer.classList.add("open");bk.classList.add("on")}
+function closeDrawer(){drawer.classList.remove("open");bk.classList.remove("on")}
+$("#dClose").addEventListener("click",closeDrawer);
+bk.addEventListener("click",closeDrawer);
+document.addEventListener("keydown",function(e){if(e.key==="Escape")closeDrawer()});
+$("#drawerBody").addEventListener("click",function(e){var b=e.target.closest("[data-fb]");
+ if(b){b.classList.add("voted");toast("已记录「"+b.dataset.fb+"」· 将用于调优语义匹配")}});
+
+/* ---------- 设置：锚点导航 + 滚动定位 ---------- */
+var setScr=$("#scr-set");
+function mark(a){$$(".anchor a").forEach(function(x){x.classList.toggle("on",x===a)})}
+$$(".anchor a").forEach(function(a){a.addEventListener("click",function(e){e.preventDefault();mark(a);
+ var sec=$("#sec-"+a.dataset.sec);
+ var top=sec.getBoundingClientRect().top-setScr.getBoundingClientRect().top+setScr.scrollTop-16;
+ setScr.scrollTo({top:top,behavior:"smooth"})})});
+setScr.addEventListener("scroll",function(){
+ if($("#scr-set").hidden)return;
+ var base=setScr.getBoundingClientRect().top,cur=$$(".anchor a")[0];
+ $$(".sec").forEach(function(s){if(s.getBoundingClientRect().top-base<=70){
+  cur=$(".anchor a[data-sec='"+s.dataset.sec+"']")}});
+ mark(cur)},{passive:true});
+
+/* ---------- 设置：交互 ---------- */
+var AIM={deepseek:["deepseek-chat","https://api.deepseek.com/v1"],
+         kimi:["moonshot-v1-8k","https://api.moonshot.cn/v1"],
+         glm:["glm-4-flash","https://open.bigmodel.cn/api/paas/v4"],
+         custom:["",""]};
+$("#aiPreset").addEventListener("change",function(e){var v=AIM[e.target.value];
+ $("#aiModel").value=v[0];$("#aiEp").value=v[1]});
+$("#aiTh").addEventListener("input",function(e){$("#aiThVal").textContent=Number(e.target.value).toFixed(2)});
+$("#btnTest").addEventListener("click",function(){var o=this.innerHTML;this.disabled=true;this.textContent="连接中 …";
+ var b=this;setTimeout(function(){b.disabled=false;b.innerHTML=o;toast("连接成功 · 模型响应 412ms · 余额充足")},800)});
+$("#btnAddRule").addEventListener("click",function(){
+ var n=$(".rule").cloneNode(true);n.querySelector(".rt>b").textContent="「未命名规则」";
+ $("#ruleList").appendChild(n);toast("已新建规则 · 保存后生效")});
+$("#btnSave").addEventListener("click",function(){toast("已保存 · 监控内核热更新生效，无需重启")});
+$("#btnReset").addEventListener("click",function(){toast("已恢复默认值（原型演示，未真正写入）")});
+
+/* ---------- 外观：深色 / 浅色 / 跟随系统 ---------- */
+var fwMq=window.matchMedia("(prefers-color-scheme: light)");
+function fwApply(mode){
+  var t=(mode==="system")?(fwMq.matches?"light":"dark"):mode;
+  document.documentElement.setAttribute("data-theme",t);
+  try{localStorage.setItem("fw-theme",mode)}catch(e){}
+  return t}
+var fwTheme="dark";
+try{fwTheme=localStorage.getItem("fw-theme")||"dark"}catch(e){}
+var fwQs=null;try{fwQs=new URLSearchParams(location.search).get("theme")}catch(e){}
+if(fwQs==="light"||fwQs==="dark"||fwQs==="system")fwTheme=fwQs;
+$$('input[name="theme"]').forEach(function(r){
+  r.checked=(r.value===fwTheme);
+  r.addEventListener("change",function(){
+    var t=fwApply(this.value);
+    toast("已切换 · "+(t==="light"?"浅色「晨报」":"深色「瞭望塔」")+(this.value==="system"?"（跟随系统）":""))})});
+fwApply(fwTheme);
+(function(){var h=function(){var m="dark";try{m=localStorage.getItem("fw-theme")||"dark"}catch(e){}
+  if(m==="system")fwApply("system")};
+  if(fwMq.addEventListener)fwMq.addEventListener("change",h);else if(fwMq.addListener)fwMq.addListener(h)})();
+
+/* ---------- 命中记录面板：左右调宽 / 上下调高（记忆 + 双击复位） ---------- */
+function fwMakeDrag(el,onMove,onReset){
+  var on=false;
+  el.addEventListener("pointerdown",function(e){on=true;el.classList.add("on");
+    try{el.setPointerCapture(e.pointerId)}catch(_){/* ignore */}e.preventDefault()});
+  el.addEventListener("pointermove",function(e){if(on)onMove(e)});
+  function end(){if(!on)return;on=false;el.classList.remove("on")}
+  el.addEventListener("pointerup",end);el.addEventListener("pointercancel",end);
+  if(onReset)el.addEventListener("dblclick",onReset)}
+(function(){
+  var grid=$(".hist-grid"),panel=$("#histPanel"),gy=$("#gripY"),gx=$("#gripX");
+  var railW=292;try{railW=Math.min(460,Math.max(232,+localStorage.getItem("fw-rail-w")||292))}catch(e){}
+  grid.style.setProperty("--rail-w",railW+"px");
+  fwMakeDrag(gy,function(e){
+    railW=Math.round(Math.min(460,Math.max(232,grid.getBoundingClientRect().right-e.clientX)));
+    grid.style.setProperty("--rail-w",railW+"px");
+    try{localStorage.setItem("fw-rail-w",railW)}catch(e2){/* ignore */}},
+    function(){railW=292;grid.style.setProperty("--rail-w","292px");
+      try{localStorage.removeItem("fw-rail-w")}catch(e2){/* ignore */}});
+  var restored=false,naturalH=0;
+  function setH(h){panel.style.height=Math.round(h)+"px";
+    try{localStorage.setItem("fw-hist-h",Math.round(h))}catch(e){/* ignore */}}
+  function tryRestore(){if(restored)return;var n=panel.offsetHeight;if(!n)return;
+    restored=true;naturalH=n;
+    try{var s=+localStorage.getItem("fw-hist-h");if(s)setH(Math.min(s,n))}catch(e){/* ignore */}}
+  tryRestore();
+  $$(".nav-item").forEach(function(b){b.addEventListener("click",function(){setTimeout(tryRestore,0)})});
+  fwMakeDrag(gx,function(e){
+    if(!naturalH)naturalH=panel.offsetHeight||2000;
+    var h=Math.min(naturalH||2000,Math.max(220,e.clientY-panel.getBoundingClientRect().top+4));
+    setH(h)},
+    function(){panel.style.height="";
+      try{localStorage.removeItem("fw-hist-h")}catch(e2){/* ignore */}});
+})();
+</script>
+</body>
+</html>
+<style id="fw-theme-style">
+/* ---- 主题层：深色「瞭望塔」 / 浅色「晨报」 ---- */
+:root{
+  --success-text:oklch(0.8 0.11 155);--danger-text:oklch(0.75 0.1 25);--seg-mid:oklch(0.38 0.01 255);
+  --focus-ring:rgba(255,255,255,0.35);--border-hover:rgba(255,255,255,0.28);--border-active:rgba(255,255,255,0.32);
+  --shadow-win:0 40px 120px oklch(0 0 0/0.55);--shadow-cta:inset 0 1px 0 rgba(255,255,255,0.3),0 6px 18px color-mix(in srgb,var(--accent) 20%,transparent);
+  --shadow-drawer:-30px 0 60px oklch(0 0 0/0.35);--shadow-toast:0 14px 38px oklch(0 0 0/0.5);--bk:oklch(0.1 0.01 255/0.55);
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --stage:oklch(0.9 0.008 255);
+  --bg:oklch(0.965 0.005 255);
+  --surface:oklch(0.995 0.003 255);
+  --surface-2:oklch(0.955 0.006 255);
+  --surface-3:oklch(0.915 0.008 255);
+  --surface-hi:oklch(0.89 0.01 255);
+  --fg:oklch(0.25 0.02 260);
+  --muted:oklch(0.46 0.02 260);
+  --faint:oklch(0.52 0.02 262);
+  --border:rgba(20,30,50,0.10);
+  --border-strong:rgba(20,30,50,0.18);
+  --accent:oklch(0.54 0.125 70);
+  --accent-ink:oklch(0.99 0.005 90);
+  --success:oklch(0.52 0.13 155);
+  --danger:oklch(0.52 0.19 25);
+  --warn:oklch(0.58 0.13 95);
+  --info:oklch(0.48 0.12 235);
+  --info-soft:oklch(0.44 0.1 235);
+  --success-text:oklch(0.42 0.12 155);
+  --danger-text:oklch(0.5 0.18 25);
+  --seg-gray:oklch(0.74 0.012 260);
+  --seg-dark:oklch(0.62 0.015 260);
+  --seg-mid:oklch(0.68 0.012 260);
+  --focus-ring:rgba(20,30,50,0.45);
+  --border-hover:rgba(20,30,50,0.30);
+  --border-active:rgba(20,30,50,0.40);
+  --shadow-win:0 30px 90px rgba(20,30,50,0.20);
+  --shadow-cta:inset 0 1px 0 rgba(255,255,255,0.35),0 6px 18px color-mix(in srgb,var(--accent) 30%,transparent);
+  --shadow-drawer:-30px 0 60px rgba(20,30,50,0.18);
+  --shadow-toast:0 14px 38px rgba(20,30,50,0.20);
+  --bk:rgba(15,23,42,0.32);
+}
+/* 原规则的硬编码色 → 主题令牌（浅色下自动换算） */
+:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.window{box-shadow:var(--shadow-win)}
+.btn:hover{border-color:var(--border-hover)}
+.btn.primary{box-shadow:var(--shadow-cta)}
+.btn.primary:hover{background:color-mix(in oklab,var(--accent) 86%,white)}
+.chip.on{border-color:var(--border-hover)}
+.ipt:focus,.sel:focus,.ta:focus{border-color:var(--border-active)}
+.b-price{color:var(--success-text)}
+.k.x{color:var(--danger-text)}
+.c6{background:var(--seg-mid)}
+.bk{background:var(--bk)}
+.drawer{box-shadow:var(--shadow-drawer)}
+.toast{box-shadow:var(--shadow-toast)}
+/* 迷你走势图 → 主题化填充 */
+.sf{stroke:none}.sl{stroke-width:1.6}
+.sf-a{fill:color-mix(in srgb,var(--accent) 16%,transparent)}.sl-a{stroke:var(--accent)}
+.sf-s{fill:color-mix(in srgb,var(--success) 15%,transparent)}.sl-s{stroke:var(--success)}
+.sf-i{fill:color-mix(in srgb,var(--info) 15%,transparent)}.sl-i{stroke:var(--info)}
+.sf-d{fill:color-mix(in srgb,var(--danger) 14%,transparent)}.sl-d{stroke:var(--danger)}
+/* 历史命中 · 规则列放宽：pill 不换行 + 预留列宽 + 呼吸感 */
+.badge{white-space:nowrap}
+#histBody th:nth-child(3),#histBody td:nth-child(3){white-space:nowrap}
+#histBody th:nth-child(3){width:104px}
+#histBody td:nth-child(3){padding-left:22px;padding-right:18px}
+#histBody .badge{height:24px;padding:0 11px;font-size:11.5px;letter-spacing:.03em;border-radius:7px}
+/* 命中记录面板 · 可拖拽：左右调宽（与统计画像之间的分隔线）/ 上下调高（底边） */
+.hist-grid{grid-template-columns:1fr var(--rail-w,292px)}
+.rail{position:relative}
+#histPanel{display:flex;flex-direction:column}
+#histPanel .tbl-scroll{flex:1 1 auto;min-height:0;overflow:auto}
+#histPanel .tbl{min-width:780px}
+#histPanel thead th{position:sticky;top:0;background:var(--surface);z-index:2}
+.grip-y{position:absolute;left:-15px;top:0;bottom:0;width:16px;cursor:col-resize;z-index:6;touch-action:none}
+.grip-y::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:2px;transform:translateX(-50%);border-radius:2px;background:transparent;transition:background .15s}
+.grip-y:hover::after,.grip-y.on::after{background:var(--accent)}
+.grip-x{position:absolute;left:14px;right:14px;bottom:1px;height:10px;cursor:row-resize;z-index:6;touch-action:none;display:grid;place-items:center}
+.grip-x::after{content:"";width:36px;height:3px;border-radius:2px;background:var(--faint);opacity:0;transition:.15s}
+#histPanel:hover .grip-x::after{opacity:.45}
+.grip-x.on::after{opacity:1;background:var(--accent)}
+
+</style>

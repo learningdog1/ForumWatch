@@ -3,11 +3,17 @@
  * 放弃修改 + 全局修改摘要 + 保存反馈三态互斥。
  *
  * 状态区优先级（audit #7 的反向约束）：保存中 > 保存失败（err，需可读可重试）
- * > dirty（`有 N 处未保存修改 · 含 M 项待删除`，N = 12 段中与已保存值不一致的
+ * > dirty（`有 N 处未保存修改 · 含 M 项待删除`，N = 13 段中与已保存值不一致的
  * 段数）> 已保存·时刻（ok，dirty 一旦为真即被清除，两者绝不并存）> 干净态。
  *
  * 放弃修改走行内确认（L2 立即不可逆）：首击后保存栏原地变形为确认条
  * （丢弃 N 处 draft 的 danger 确认，非弹窗），确认后由 Settings 恢复 saved 快照。
+ *
+ * 步骤 M（设置重组）：对齐概念 savebar 形制——吸底毛玻璃（settings-core.css：
+ * bg 82% 透明 + backdrop blur + border-top）+ **按钮组右对齐**（状态文案占
+ * 左侧弹性列，放弃修改 / 保存设置两钮贴右）。按钮文案语义原样保留（概念稿
+ * 的「恢复默认」是不存在的功能，不引入）；保存成功的全局 toast 由
+ * Settings.save 发出（本组件的 ok 状态文案照旧）。
  */
 export interface SavebarMsg {
   kind: 'ok' | 'err' | 'warn' | 'pending' | 'muted'
@@ -74,6 +80,9 @@ export function SettingsSavebar(props: {
 
   return (
     <div className="savebar">
+      <span className={cls} aria-live="polite">
+        {text}
+      </span>
       <button
         type="button"
         className="btn btn-lg btn-danger"
@@ -91,9 +100,6 @@ export function SettingsSavebar(props: {
       >
         保存设置
       </button>
-      <span className={cls} aria-live="polite">
-        {text}
-      </span>
     </div>
   )
 }

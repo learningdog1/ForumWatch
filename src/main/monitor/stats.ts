@@ -13,6 +13,10 @@
  *   （本地时区单一口径，禁 toISOString().slice(0,10)）。
  * - pushFailRate = notifyError 非空（非 null 且非 ''）的占比；total=0 时为 0。
  *   静音（notifyError=null）不是失败。
+ * - pushedByDay 每日已推送数：当日推送成功 = notifiedAt 非空**且** notifyError
+ *   为空的命中（静音与失败都不算）。日期复用 dayOf（notifiedAt 优先）——推送
+ *   成功的记录 notifiedAt 必非空，天然按推送时间归日。与 byDay 同构的稀疏
+ *   口径：只含有推送成功的日期，零推送日不占位（UI 按 date 对齐时自行补零）。
  * - keywordHits：遍历 matchedKeywords 计数（大小写不敏感归并，展示用首见
  *   原形），count 降序（并列保持首见序）；cfg.includeKeywords 中从未命中的
  *   词以 count=0 + zeroHit=true **附尾**（保持配置序）——"考虑移除或改写"
@@ -21,7 +25,7 @@
  */
 import { formatLocalDate } from './hits-store'
 import type { HitRecord } from '../../shared/types'
-import type { StatsResult } from '../../shared/ipc'
+import type { StatsDayCount, StatsResult } from '../../shared/ipc'
 
 export type { StatsResult }
 
@@ -49,12 +53,29 @@ function dayOf(hit: HitRecord): string | null {
   return formatLocalDate(new Date(ts))
 }
 
+/** 记录 → 是否当日推送成功（pushedByDay 口径）：notifiedAt 非空且 notifyError 为空 */
+function isPushed(hit: HitRecord): boolean {
+  return (
+    hit.notifiedAt != null &&
+    hit.notifiedAt !== '' &&
+    !(hit.notifyError != null && hit.notifyError !== '')
+  )
+}
+
+/** 日计数 Map → StatsDayCount[]（'YYYY-MM-DD' 字典序 = 时间序，倒排 → 新→旧） */
+function toDayCounts(m: Map<string, number>): StatsDayCount[] {
+  return [...m.entries()]
+    .map(([date, count]) => ({ date, count }))
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+}
+
 /**
  * 聚合一批命中记录为 StatsResult。纯函数：同输入同输出，不碰文件与时钟。
  */
 export function computeStats(hits: HitRecord[], cfg: ComputeStatsConfig): StatsResult {
   const byMatchedBy = { literal: 0, semantic: 0, rule: 0, matchall: 0 }
   const dayCounts = new Map<string, number>()
+  const pushedDayCounts = new Map<string, number>()
   const sourceCounts = new Map<string, number>()
   const keywordCounts = new Map<string, KeywordCount>() // key = 小写
   let failCount = 0
@@ -66,6 +87,8 @@ export function computeStats(hits: HitRecord[], cfg: ComputeStatsConfig): StatsR
     else byMatchedBy.rule += 1
     const day = dayOf(hit)
     if (day !== null) dayCounts.set(day, (dayCounts.get(day) ?? 0) + 1)
+    // 每日已推送：日期沿用 dayOf（与 byDay 同一派生，口径见文件头）
+    if (day !== null && isPushed(hit)) pushedDayCounts.set(day, (pushedDayCounts.get(day) ?? 0) + 1)
     const sourceId = hit.topic.sourceId
     sourceCounts.set(sourceId, (sourceCounts.get(sourceId) ?? 0) + 1)
     for (const kw of hit.matchedKeywords) {
@@ -94,10 +117,8 @@ export function computeStats(hits: HitRecord[], cfg: ComputeStatsConfig): StatsR
 
   return {
     total: hits.length,
-    // 'YYYY-MM-DD' 字典序 = 时间序，倒排 → 新→旧
-    byDay: [...dayCounts.entries()]
-      .map(([date, count]) => ({ date, count }))
-      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)),
+    byDay: toDayCounts(dayCounts),
+    pushedByDay: toDayCounts(pushedDayCounts),
     byMatchedBy,
     bySource: [...sourceCounts.entries()]
       .map(([sourceId, count]) => ({ sourceId, count }))

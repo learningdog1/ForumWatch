@@ -1,0 +1,271 @@
+/* 浮层底座（Watchtower 步骤 E）：Toast / 抽屉 / 遮罩三件套一次写全——后续
+   抽屉组件直接消费本文件类名（Esc 关闭、焦点管理在组件层），避免多执行者
+   抢一个文件。形制对齐概念稿 :229-257 + 主题层 :887-889（DESIGN-LANGUAGE
+   §3.10-3.11）。
+
+   纪律：
+   - 色值/字号/圆角零硬编码，全部 theme.css 令牌（字阶七档 / 圆角三档）。
+     概念散值收编口径沿 SPEC §2.7-2.8：11.5→fs-12、12.5/13.5→fs-13、16→
+     fs-16、19（抽屉题）→fs-22（见 .d-title 注）、概念 10px 面板圆角→
+     --r-card（浮层/面板档；不设 10px 新档）、7px 钮圆角→--r-ctl、.25s/
+     .3s→--t-glide。间距/位移（padding/gap/10px 滑距等）为布局值，沿概念
+     字面值（先例：SPEC §3.3 按钮尺寸档 32/28/40 字面值）。
+   - 抽屉内类名按概念原样保留（.d-head/.d-body/.d-title…），但全部锚定
+     .drawer 作用域——events.css:256 已有去向行的裸 .d-title（fs-14 省略
+     号行），不锚定会双向串味；(0,2,0) 特指度与加载顺序双解耦。
+   - 衬线授权扩展（步骤 E 裁决）：抽屉内 .d-title / .quote 两处衬线位随
+     任务指令落地。SPEC §2.7「三处授权」立于「应用无抽屉」前提（19px 抽屉
+     题「无对应物不迁移」），抽屉底座落地后为其追加；依旧禁止继续扩散到
+     按钮/输入/chip/badge/nav/表格。
+   - 层级阶梯（概念原值）：.bk 39 / .drawer 40 / .toast-wrap 60；savebar 95
+     （settings-core）更高——toast 非交互且 3s 自灭，与保存栏无指针竞争。
+   - 定位：概念在演示 .window 容器内用 absolute；应用为视口级浮层，一律
+     fixed（先例：savebar 的视口底吸附）。
+   - reduced-motion：base.css 全局熔断（0.01ms 技术）覆盖本文件全部动画/
+     过渡（瞬时出现/消失即合规），不另写熔断块。
+   - .drawer 为 flex 纵向列、.d-body 弹性填充 + min-height:0 独立滚动
+     （flex 列内滚动成立的前提）；三路关闭（关闭钮/遮罩/Esc）由组件层做。 */
+
+/* ── 遮罩 .bk：on 态 opacity 过渡 ──
+   概念 --bk（深 oklch(0.1 0.01 255/0.55) / 浅 rgba(15,23,42,0.32)）无对应
+   令牌且 theme.css 本步禁改，按 spark-bar 浅色定向先例（events.css :581
+   同款手法）从原语派生：深 = bg 55%（向窗口底色暗化）；浅 = fg 32%
+   （#1C222B@0.32，与概念 rgba(15,23,42,.32) 同档）。 */
+.bk {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-glide) var(--ease-std);
+}
+.bk.on {
+  opacity: 1;
+  pointer-events: auto;
+}
+:root[data-theme='light'] .bk {
+  background: color-mix(in srgb, var(--fg) 32%, transparent);
+}
+
+/* ── 抽屉 .drawer：右缘全高，462px（max-width 88% 按 960px 窗口收窄）──
+   transform 进出 300ms cubic-bezier(.2,.8,.2,1) 为概念专属缓动（:232），
+   任务指令保留字面值（SPEC §2.8「不迁移」立于当时无抽屉可迁）。阴影走
+   --shadow-xl 窗口级浮层档：概念 --shadow-drawer 是向左定向投影，无令牌
+   可引；非定向窗口级扩散影两主题自动换值，语义同档。 */
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 462px;
+  max-width: 88%;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-xl);
+  transform: translateX(103%);
+  transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.drawer.open {
+  transform: none;
+}
+
+/* 头：左标签右关闭钮（概念 padding 16/18/10 字面值） */
+.drawer .d-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.drawer .d-close {
+  width: 28px;
+  height: 28px;
+  padding: 0; /* 概念全局 reset 抵掉的按钮默认内距，就地板正 */
+  display: grid;
+  place-items: center;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-ctl);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color var(--t-fast) var(--ease-std),
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std);
+}
+.drawer .d-close:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+.drawer .d-close .ic {
+  width: 13px;
+  height: 13px;
+}
+
+/* 体：弹性填充独立滚动 */
+.drawer .d-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 20px 26px;
+}
+
+/* 命中元信息行：来源 / 时间等横排换行 */
+.drawer .d-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 命中标题：衬线扩展位 1。概念 19px 在字阶七档无对应（19 恰在 16/22 中点），
+   收编 fs-22 对位 .report-title 衬线四件套（600/fs-22/lh-display/
+   ls-display——ls-display 本就只授权 ≥20px 标题，取 fs-16 则字距令牌无处安放）。
+   后四行是 events.css 裸 .d-title（去向行省略号语言）的就地中和：
+   (0,2,0) 赢特指度但未重述的属性仍会漏下来，显式回卷多行标题行为。 */
+.drawer .d-title {
+  margin: 13px 0 10px;
+  font-family: var(--font-display);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  line-height: var(--lh-display);
+  letter-spacing: var(--ls-display);
+  color: var(--fg);
+  flex: none;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+  text-overflow: clip;
+}
+
+/* 价格 + 语义置信度条：surface-2 嵌井形制 */
+.drawer .d-price {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+}
+.drawer .d-price .price {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: var(--fs-16);
+}
+.drawer .conf {
+  font-size: var(--fs-12);
+  color: var(--muted);
+}
+.drawer .conf b {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+/* 小节：micro-label 头（概念 11px/.1em → fs-12/ls-label，primitives 微标签
+   同款收编口径）+ 命中原因 checklist（概念 li 12.5/1.65 → fs-13/lh-read
+   最近档；对勾 --success → --ok 图形档） */
+.drawer .d-sec {
+  margin-top: 20px;
+}
+.drawer .d-sec h5 {
+  margin: 0 0 10px;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--faint); /* 抽屉底 = surface，faint 落面合法（§3.4 禁区仅在 s3/surface-hi） */
+}
+.drawer .d-sec ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.drawer .d-sec li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 5px 0;
+  font-size: var(--fs-13);
+  color: var(--muted);
+  line-height: var(--lh-read);
+}
+.drawer .d-sec li .ic {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 4px;
+  stroke: var(--ok);
+}
+
+/* AI 锐评引文：衬线扩展位 2（概念 13.5/1.9 → fs-13/lh-read） */
+.drawer .quote {
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  font-family: var(--font-display);
+  font-size: var(--fs-13);
+  line-height: var(--lh-read);
+  color: var(--fg);
+}
+
+/* 反馈按钮行：.fh 的排版归消费方 hint 类，这里只定行形制（概念 :251-252）；
+   .voted = 反馈后的钮态（边 --ok 图形档、字 --ok-text 文字档，两档分工） */
+.drawer .fb-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.drawer .fb-row .fh {
+  flex: none;
+}
+.drawer .voted {
+  border-color: var(--ok);
+  color: var(--ok-text);
+}
+
+/* ── Toast（概念 §3.11 / :254-257 + JS :623-624）──
+   容器：视口底部居中 22px、纵列堆叠 gap=space-md、不接指针事件。
+   单条：surface-3 底（fg on s3 13.09/12.41 ✓，不落 faint）+ border-strong
+   装饰描边 + shadow-lg（= 概念 --shadow-toast 双主题同值，theme.css 浮层
+   兜底档）。停留 2600ms 后 ToastHost 加 .out、380ms 后卸载——退场时长与
+   JS 计时对齐，为任务指令字面值（概念 .35s 微差，以指令为准）。 */
+.toast-wrap {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+  z-index: 60;
+  pointer-events: none;
+}
+.toast {
+  padding: 10px 18px;
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-card);
+  font-size: var(--fs-13);
+  font-weight: 500;
+  box-shadow: var(--shadow-lg);
+  animation: toast-in var(--t-glide) var(--ease-out); /* 概念 .3s ease → glide + ease-out（SPEC §2.8 散值对号入座） */
+  transition: opacity 380ms var(--ease-std);
+}
+.toast.out {
+  opacity: 0;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}

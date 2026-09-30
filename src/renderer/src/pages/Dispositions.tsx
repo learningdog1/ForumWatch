@@ -1,31 +1,41 @@
 /**
- * 去向页（R10 阶段 2，dispositions.md 五区骨架，整页重写）：
- * Zone A 页头（数据面徽标「实时 · 最近 200 条」/「某日 · 落盘文件」+ 数据截至 +
- * 暂停自刷/刷新；页题 = 侧栏导航 label「去向」，B-2 页头契约）→ 单卡列表
- * （TASTE-UPGRADE §B-6 与历史页同构：卡头「判定记录」+ 窗口 aux + 查询指示 →
- * 卡内筛选条 .filter-bar（五分组 chips + 计数右锚 / 来源显示名下拉 / 日期 /
- * 搜索 300ms 防抖 / 重置，搜索与重置相对位置与历史页一致）→ Zone C 状态条
- * （错误 / 并入 / 口径提示互斥，优先级 错误 > 新记录 > 口径）→ Zone D 判定
- * 列表（唯一滚动区，行展开 = 完整原因 + 同帖轨迹 + 按 outcome 的「去调整」
- * 出口）→ Zone E 分段加载条（历史日全量返回 150+150，不做触底自动加载））。
+ * 去向页（Watchtower 步骤 L，concept.html dispositions 屏一比一重做）：
+ * 页头（eyebrow「Dispositions」+ 衬线大题「去向」+ 副题「这是可观测性，不是
+ * 垃圾场 —— 14 类处置原因，每条帖子都有交代」（类数取 DISPOSITION_OUTCOMES
+ * 真实长度）+ 右侧 chip「今日 N 条处置」（dispositionsDay(today) 落盘真实计数，
+ * 与实时环口径独立）→ 分布段（.dist 7 段堆叠分布条 + .legend 可点 pill 组名
+ * 计数；点击 = 设该组筛选 + 回顶，再点同组取消）→ 筛选条 .bar 两行（行一：
+ * 搜索 / 7 组 chips + 全部 / 清除筛选；行二：来源下拉 / 日期 / 回实时 / 计数）
+ * → 主表 .tbl（时间 / 来源 / 帖子 · 解释 / 原因（组色点 + 组名）/ ›，行展开
+ * 跨列行 = 完整原因 + 同帖轨迹 + 按 outcome 的「去调整」出口）→ 分段加载条。
  *
- * 保留资产：OUTCOME_GROUPS 分组、请求序号守卫 loadSeq、跨午夜 sticky 日期
- * 分隔、「回实时」条件显示、IME 处理；OUTCOME_LABELS / badgeTone 迁至
- * DispositionRow（值原样）。行渲染明确不并入 HitList（结构不同，杜绝第二份拷贝）。
+ * 7 组映射（DISPOSITION_GROUPS，DispositionRow.tsx 单一事实源，分布条 / legend /
+ * chips / 原因列同一映射联动）：未命中 = miss+semantic-miss；排除词否决 =
+ * excluded；来源过滤 = filtered+old-below-threshold+pinned；评分不足 =
+ * semantic-below-threshold；重复·限频 = similar-swallowed；挂起中 =
+ * deferred+deferred-skip+semantic-pending；推送结果 = pushed+push-failed+muted
+ * ——14 类真实 outcome 全覆盖（Record 全键编译期保证）。分布计数用当前数据面
+ * 已加载全量（items，与主表同源），不另起请求。
  *
- * 错误 ≠ 空（REDESIGN §6.3）：dispositionsRecent / dispositionsDay 失败进独立
- * 错误条（旧数据保留 + 重试），绝不落入「还没有判定记录」空态。
- *
- * 自刷三态暂停（ia §5.1 + dispositions.md §3.5）：悬停列表（移开 2s 自动恢复）/
- * 筛选激活（清筛选自动恢复）/ 手动（显式恢复）；暂停期新记录一律进「并入 N 条
- * 新记录」角标不插列表（阶段 1 活列表范式，点击/回顶一次性并入）。keep-alive
- * 挂载：页面不活跃或窗口隐藏时不自刷，恢复可见立即刷一次。
+ * 机制全量保留（自查见各注）：活列表门控（active prop 停自刷/恢复即刷/窗口
+ * 恢复可见即刷）、并入角标（点击/回顶一次性并入，悬停暂停移开 2s 自动恢复）、
+ * deepLink 搜索深链（回实时 + 清筛选 + 预填标题）、历史日分段加载（150+150，
+ * 不触底自动加载）、请求序号守卫 loadSeq（慢响应不覆盖新状态）、Esc 逐级退
+ * （搜索词 → 收起展开行 → 焦点回列表）、键盘 0=全部 / 1..7=组筛选 / j/k 移动 /
+ * Enter 展开 / R 刷新 / P 暂停 / / 聚焦搜索、错误 ≠ 空（旧数据保留 + 错误条 +
+ * 重试，绝不落入空态）、空态出口（onGoDashboard / onGoAnchor）。
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
+import { DISPOSITION_OUTCOMES } from '@shared/ipc'
 import type { Disposition } from '@shared/ipc'
 import { DispositionRow, dispositionKey } from '../components/DispositionRow'
-import type { DispositionSettingsAnchor } from '../components/DispositionRow'
+import {
+  DISPOSITION_GROUPS,
+  OUTCOME_LABELS,
+  dispositionGroupOf
+} from '../components/DispositionRow'
+import type { DispositionGroupId, DispositionSettingsAnchor } from '../components/DispositionRow'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorBar } from '../components/ErrorBar'
 import { LiveBadge } from '../components/LiveBadge'
@@ -55,23 +65,11 @@ const FLASH_MS = 1_600
 /** 卡头「查询中…」指示延迟出现阈值（与历史页同款，ia §5.1 progressive-loading） */
 const BUSY_INDICATOR_MS = 1_000
 
-/** outcome 分组（chips 单选）；组内为该组包含的 outcome 集合（R7-W1 资产原样） */
-const OUTCOME_GROUPS = [
-  { id: 'all', label: '全部', outcomes: null },
-  { id: 'push', label: '推送结果', outcomes: ['pushed', 'push-failed', 'muted'] },
-  {
-    id: 'blocked',
-    label: '已拦截',
-    outcomes: ['filtered', 'old-below-threshold', 'pinned', 'excluded', 'similar-swallowed']
-  },
-  { id: 'miss', label: '未命中', outcomes: ['miss', 'semantic-miss', 'semantic-below-threshold'] },
-  { id: 'hold', label: '挂起中', outcomes: ['deferred', 'deferred-skip', 'semantic-pending'] }
-] as const
+/** 去向筛选值：'all' = 不按组过滤；其余为 7 组 id（DISPOSITION_GROUPS） */
+type GroupFilter = 'all' | DispositionGroupId
 
-type GroupId = (typeof OUTCOME_GROUPS)[number]['id']
-
-/** 数字键 1..5 → 分组（键盘表；单键无修饰，与 Cmd+1..5 全局切页不冲突） */
-const GROUP_KEYS: GroupId[] = OUTCOME_GROUPS.map((g) => g.id)
+/** 数字键 → 分组（键盘表；1..7 = 七组，0 = 全部；单键无修饰，与 Cmd+1..5 全局切页不冲突） */
+const GROUP_KEYS: DispositionGroupId[] = DISPOSITION_GROUPS.map((g) => g.id)
 
 /** 计数千分位（dispositions.md §2.2：数字一律 mono + tabular-nums 防抖动） */
 function fmtNum(n: number): string {
@@ -80,6 +78,11 @@ function fmtNum(n: number): string {
 
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+/** 减速动效偏好（legend 回顶平滑滚动让位，jumpToRecord 同款口径） */
+function prefersReducedMotion(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
 /** 监控台「✗ 推送失败」→ 本页的搜索深链载荷（App 层构造） */
@@ -114,8 +117,11 @@ export function Dispositions(props: DispositionsProps) {
   const [error, setError] = useState<string | null>(null)
   /** 数据截至（最近一次成功读取时刻；暂停期常驻标注） */
   const [asOf, setAsOf] = useState<string | null>(null)
+  /** 页头 chip「今日 N 条处置」：dispositionsDay(today) 落盘计数（null=未取到，
+      读取失败隐藏 chip，不伪造 0） */
+  const [todayCount, setTodayCount] = useState<number | null>(null)
 
-  const [group, setGroup] = useState<GroupId>('all')
+  const [group, setGroup] = useState<GroupFilter>('all')
   const [sourceId, setSourceId] = useState('')
   /** 空 = 实时最近（内存环）；有值 = 查该本地日的持久化流水 */
   const [day, setDay] = useState('')
@@ -123,6 +129,8 @@ export function Dispositions(props: DispositionsProps) {
   dayRef.current = day
   /** 请求序号守卫（R7-W1 资产）：切日/手动/自刷并发时，慢响应不得覆盖新状态 */
   const loadSeq = useRef(0)
+  /** 今日计数请求序号守卫（与列表守卫独立：chip 迟到不碍列表） */
+  const todaySeq = useRef(0)
 
   const [searchInput, setSearchInput] = useState('')
   const [query, setQuery] = useState('')
@@ -147,6 +155,9 @@ export function Dispositions(props: DispositionsProps) {
   const flashTimerRef = useRef<number | null>(null)
 
   const today = localDate()
+  /** 页头 chip 的取数日（跨午夜会话：随 today 重取，ref 供定时器/回调取现值） */
+  const todayRef = useRef(today)
+  todayRef.current = today
   const isDay = day !== ''
 
   // 活列表门控用的即时引用（监听器/回调避免闭包过期）
@@ -213,7 +224,7 @@ export function Dispositions(props: DispositionsProps) {
         setAsOf(new Date().toISOString())
         applyFresh(fresh, targetDay, faceSwitch)
       } catch (e) {
-        // 错误 ≠ 空：旧数据保留（错误条在 Zone C），绝不伪造空态（audit #1）
+        // 错误 ≠ 空：旧数据保留（错误条在状态条），绝不伪造空态（audit #1）
         if (seq !== loadSeq.current) return
         setError(errText(e))
       } finally {
@@ -226,6 +237,29 @@ export function Dispositions(props: DispositionsProps) {
     [applyFresh]
   )
 
+  /** 页头 chip「今日 N 条处置」：dispositionsDay(今日) 落盘文件计数（独立请求，
+      与列表数据面解耦——实时环只保 200 条且跨日，落盘文件才是当日全量口径；
+      失败置 null 隐藏 chip，不显示假 0） */
+  const loadTodayCount = useCallback((dateLocal: string): void => {
+    const seq = ++todaySeq.current
+    void window.api
+      .dispositionsDay(dateLocal)
+      .then((list) => {
+        if (seq !== todaySeq.current) return
+        setTodayCount(list.length)
+      })
+      .catch(() => {
+        if (seq !== todaySeq.current) return
+        setTodayCount(null)
+      })
+  }, [])
+
+  /** 统一刷新（手动按钮 / R 键）：列表 + 今日计数两个数据面一起拉 */
+  const refreshAll = useCallback((): void => {
+    void load(dayRef.current)
+    loadTodayCount(todayRef.current)
+  }, [load, loadTodayCount])
+
   // 数据面切换（含首载与「回实时」）；历史日分段条数重置
   useEffect(() => {
     void load(day, { faceSwitch: true })
@@ -234,15 +268,33 @@ export function Dispositions(props: DispositionsProps) {
     setShown(SEGMENT_SIZE)
   }, [day])
 
+  // 首载取一次今日计数（挂载即取；后续随自刷/手动刷新/恢复活跃续命）
+  useEffect(() => {
+    loadTodayCount(todayRef.current)
+  }, [loadTodayCount])
+
   const groupOutcomes = useMemo(() => {
-    const g = OUTCOME_GROUPS.find((x) => x.id === group)
-    return g !== undefined && g.outcomes !== null ? new Set<string>(g.outcomes) : null
+    if (group === 'all') return null
+    const g = DISPOSITION_GROUPS.find((x) => x.id === group)
+    return g != null ? new Set<string>(g.outcomes) : null
   }, [group])
 
   const sourceOptions = useMemo(() => {
     const ids = new Set<string>()
     for (const d of items) ids.add(d.sourceId)
     return [...ids].sort()
+  }, [items])
+
+  /** 7 组分布计数（分布条 / legend / chips 三者同源：当前数据面已加载全量 items，
+      不另起请求；与主表筛选前的分母一致） */
+  const groupCounts = useMemo(() => {
+    const counts = new Map<DispositionGroupId, number>()
+    for (const g of DISPOSITION_GROUPS) counts.set(g.id, 0)
+    for (const d of items) {
+      const gid = dispositionGroupOf(d.outcome).id
+      counts.set(gid, (counts.get(gid) ?? 0) + 1)
+    }
+    return counts
   }, [items])
 
   /** 筛选在已加载全量数据上计算（含分段未渲染部分，dispositions.md §3.4） */
@@ -287,23 +339,28 @@ export function Dispositions(props: DispositionsProps) {
     if (selIdx >= rendered.length) setSelIdx(rendered.length === 0 ? -1 : rendered.length - 1)
   }, [rendered.length, selIdx])
 
-  // 实时面 10s 自刷：页面不活跃 / 窗口隐藏 / 暂停期一律不刷（挂机降负）
+  // 实时面 10s 自刷：页面不活跃 / 窗口隐藏 / 暂停期一律不刷（挂机降负）；
+  // 今日计数 chip 同节拍续命（同一本地 IPC 廉益）
   useEffect(() => {
     if (!active || isDay || paused) return
     const timer = window.setInterval(() => {
       if (document.hidden) return
       void load(dayRef.current)
+      loadTodayCount(todayRef.current)
     }, AUTO_REFRESH_MS)
     return () => window.clearInterval(timer)
-  }, [active, isDay, paused, load])
+  }, [active, isDay, paused, load, loadTodayCount])
 
   const prevActiveRef = useRef(active)
   useEffect(() => {
     const was = prevActiveRef.current
     prevActiveRef.current = active
-    // 恢复活跃（keep-alive 切回）立即刷一次
-    if (!was && active) void load(dayRef.current)
-  }, [active, load])
+    // 恢复活跃（keep-alive 切回）立即刷一次（列表 + 今日计数）
+    if (!was && active) {
+      void load(dayRef.current)
+      loadTodayCount(todayRef.current)
+    }
+  }, [active, load, loadTodayCount])
 
   // 窗口从托盘恢复可见：实时面立即刷一次（自刷定时器在 hidden 期不触发）
   useEffect(() => {
@@ -311,10 +368,11 @@ export function Dispositions(props: DispositionsProps) {
       if (document.hidden) return
       if (!active || dayRef.current !== '' || pausedRef.current) return
       void load(dayRef.current)
+      loadTodayCount(todayRef.current)
     }
     document.addEventListener('visibilitychange', onVisibility)
     return () => document.removeEventListener('visibilitychange', onVisibility)
-  }, [active, load])
+  }, [active, load, loadTodayCount])
 
   // 搜索防抖（300ms；IME 组合中的输入不会触发单键快捷键，见键盘层）
   useEffect(() => {
@@ -409,6 +467,18 @@ export function Dispositions(props: DispositionsProps) {
     if (rec != null) toggleKey(dispositionKey(rec))
   }
 
+  /** legend pill / 筛选 chip 共用的组切换（单选 + 再点取消） */
+  function toggleGroup(g: DispositionGroupId): void {
+    setGroup((prev) => (prev === g ? 'all' : g))
+  }
+
+  /** legend pill 点击：设该组筛选 + 回顶（概念稿 dispoLegend 行为；回顶顺带
+      触发活列表的「回顶 = 并入」） */
+  function legendClick(g: DispositionGroupId): void {
+    toggleGroup(g)
+    scrollRef.current?.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
+  }
+
   /** 轨迹点击：滚动 + 高亮到对应行（分段未渲染到的先扩段） */
   function jumpToRecord(target: Disposition): void {
     const idx = filtered.findIndex((d) => dispositionKey(d) === dispositionKey(target))
@@ -423,9 +493,7 @@ export function Dispositions(props: DispositionsProps) {
       scrollRef.current
         ?.querySelector(`[data-disp-index="${idx}"]`)
         ?.scrollIntoView({
-          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
-            ? 'auto'
-            : 'smooth',
+          behavior: prefersReducedMotion() ? 'auto' : 'smooth',
           block: 'center'
         })
     })
@@ -500,19 +568,22 @@ export function Dispositions(props: DispositionsProps) {
         e.preventDefault()
         moveSel(-1)
       } else if (key === 'Enter') {
-        // 焦点在行按钮上时由原生 click 展开，不双触发
-        if (el instanceof HTMLElement && el.closest('.disp-row-main') != null) return
+        // 焦点在行上时由行自身 onKeyDown 展开（tr 契约），不双触发
+        if (el instanceof HTMLElement && el.closest('[data-disp-index]') != null) return
         if (selIdx >= 0) toggleAt(selIdx)
       } else if (lower === 'r') {
         e.preventDefault()
-        if (!busy && !faceLoading) void load(dayRef.current)
+        if (!busy && !faceLoading) refreshAll()
       } else if (lower === 'p') {
         // 仅实时数据面有自刷可暂停
         if (dayRef.current === '') {
           e.preventDefault()
           setAutoPaused((v) => !v)
         }
-      } else if (key >= '1' && key <= '5') {
+      } else if (key === '0') {
+        e.preventDefault()
+        setGroup('all')
+      } else if (key >= '1' && key <= '7') {
         e.preventDefault()
         setGroup(GROUP_KEYS[Number(key) - 1])
       }
@@ -525,7 +596,7 @@ export function Dispositions(props: DispositionsProps) {
     ? `筛选 ${fmtNum(filtered.length)} / ${fmtNum(items.length)}`
     : `${fmtNum(items.length)} 条`
 
-  /** 卡头 aux：当前数据面窗口（历史页「窗口 …」同构；计数由筛选行 tb-count 承载） */
+  /** 表头 aux：当前数据面窗口（历史页「窗口 …」同构；计数由筛选行右锚承载） */
   const headAux = isDay
     ? `窗口 ${formatDayLabel(day, today)} · 落盘文件`
     : '窗口 实时 · 最近 200 条'
@@ -622,7 +693,7 @@ export function Dispositions(props: DispositionsProps) {
     )
   }
 
-  /** 跨午夜 sticky 日期分隔（实时面；历史日单日无分隔） */
+  /** 跨午夜 sticky 日期分隔（实时面；历史日单日无分隔）——表内渲染为跨列行 */
   const rowsWithSeps = useMemo(() => {
     const out: Array<{ sep: string | null; rec: Disposition }> = []
     let last = ''
@@ -640,13 +711,23 @@ export function Dispositions(props: DispositionsProps) {
 
   return (
     <div className="page page-dispositions" ref={rootRef}>
-      {/* Zone A · 页头（页题 = 侧栏导航 label「去向」，B-2 页头契约） */}
+      {/* 页头：eyebrow + 衬线大题 + 副题（类数取真实 outcome 全集）+ 今日计数 chip
+          + 数据面徽标 + 自刷暂停 / 刷新 */}
       <PageHeader
         title="去向"
-        subtitle="每条帖子的判定结果 · 为什么没推送，在这里查"
+        eyebrow="Dispositions"
+        subtitle={`这是可观测性，不是垃圾场 —— ${DISPOSITION_OUTCOMES.length} 类处置原因，每条帖子都有交代`}
         paused={!active}
         actions={
           <>
+            {todayCount != null && (
+              <span
+                className="count-chip num"
+                title="今日落盘流水（pipeline/今日.jsonl）的真实计数；实时列表只保最近 200 条且可跨日，两者口径独立"
+              >
+                今日 {fmtNum(todayCount)} 条处置
+              </span>
+            )}
             <LiveBadge
               state={isDay ? 'disk' : paused ? 'paused' : 'live'}
               label={isDay ? `${formatDayLabel(day, today)} · 落盘文件` : '实时 · 最近 200 条'}
@@ -669,10 +750,10 @@ export function Dispositions(props: DispositionsProps) {
             )}
             <button
               type="button"
-              className={`btn${busy ? ' refreshing' : ''}`}
+              className="btn"
               disabled={faceLoading}
-              onClick={() => void load(day)}
-              title="立即读取最新判定记录（快捷键 R）"
+              onClick={refreshAll}
+              title="立即读取最新判定记录与今日计数（快捷键 R）"
             >
               <IconRefresh size={14} />
               刷新
@@ -681,13 +762,132 @@ export function Dispositions(props: DispositionsProps) {
         }
       />
 
-      {/* 判定记录列表卡（§B-6 与历史页同构：卡头 → 卡内筛选条 → 状态条 →
-          唯一滚动区 → 分段加载条；工具条不再外置成卡） */}
-      <section className="card card-disp-list">
-        <div className="card-head">
-          <span className="card-head-group">
-            <span className="card-title">判定记录</span>
-            <span className="card-title-aux">{headAux}</span>
+      {/* 分布段：.dist 7 段堆叠分布条（组占比宽）+ .legend 可点 pill（组名 + 计数；
+          与下方筛选 chips、表原因列同一映射联动；计数 = 当前数据面已加载全量） */}
+      <section className="panel dist-panel" aria-label="去向分布（按 7 组）">
+        <div className="dist" aria-hidden="true">
+          {DISPOSITION_GROUPS.map((g) => {
+            const n = groupCounts.get(g.id) ?? 0
+            if (n === 0) return null
+            return (
+              <i
+                key={g.id}
+                className={`g-${g.id}`}
+                style={{ '--w': String(n) } as CSSProperties}
+                title={`${g.label} ${fmtNum(n)} 条`}
+              />
+            )
+          })}
+        </div>
+        <div className="legend" role="group" aria-label="按去向组筛选（点击筛选，再点取消）">
+          {DISPOSITION_GROUPS.map((g, i) => {
+            const n = groupCounts.get(g.id) ?? 0
+            const on = group === g.id
+            return (
+              <button
+                type="button"
+                key={g.id}
+                className={`lg g-${g.id}${on ? ' on' : ''}`}
+                aria-pressed={on}
+                title={`筛选「${g.label}」（${g.outcomes.map((o) => OUTCOME_LABELS[o]).join('、')}）· 快捷键 ${i + 1} · 再点一次取消`}
+                onClick={() => legendClick(g.id)}
+              >
+                <i className={`rdot g-${g.id}`} aria-hidden="true" />
+                {g.label} <b className="num">{fmtNum(n)}</b>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+
+      {/* 筛选条 .bar 行一：搜索 / 7 组 chips（+ 全部）/ 清除筛选 */}
+      <div className="bar">
+        <label className="search-wrap">
+          <IconSearch size={14} />
+          <input
+            ref={searchRef}
+            className="ipt"
+            placeholder="快速定位：标题 / 解释 …"
+            aria-label="搜索判定记录"
+            title="匹配标题与解释全文（快捷键 /）"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+        </label>
+        <div className="filter-chips" role="group" aria-label="去向分组筛选（单选，再点取消）">
+          <button
+            type="button"
+            className={`filter-chip${group === 'all' ? ' on' : ''}`}
+            aria-pressed={group === 'all'}
+            title="不按去向组过滤（快捷键 0）"
+            onClick={() => setGroup('all')}
+          >
+            全部
+          </button>
+          {DISPOSITION_GROUPS.map((g, i) => (
+            <button
+              type="button"
+              key={g.id}
+              className={`filter-chip${group === g.id ? ' on' : ''}`}
+              aria-pressed={group === g.id}
+              title={`筛选「${g.label}」（${g.outcomes.map((o) => OUTCOME_LABELS[o]).join('、')}）· 快捷键 ${i + 1} · 再点一次取消`}
+              onClick={() => toggleGroup(g.id)}
+            >
+              {g.label}
+            </button>
+          ))}
+        </div>
+        {filterActive && (
+          <button
+            type="button"
+            className="disp-link"
+            onClick={clearFilters}
+            title="恢复默认：全部分组 · 全部来源 · 清空搜索"
+          >
+            清除筛选
+          </button>
+        )}
+      </div>
+
+      {/* 筛选条 .bar 行二：来源下拉 / 日期（空 = 实时；有值 = 该日落盘）/ 回实时 / 计数 */}
+      <div className="bar">
+        <select
+          className="sel disp-source"
+          value={sourceId}
+          onChange={(e) => setSourceId(e.target.value)}
+          aria-label="按来源筛选"
+        >
+          <option value="">全部来源</option>
+          {sourceOptions.map((id) => (
+            <option key={id} value={id}>
+              {sourceLabel(id)}
+            </option>
+          ))}
+        </select>
+        <input
+          type="date"
+          className="ipt dt"
+          value={day}
+          max={today}
+          onChange={(e) => setDay(e.target.value)}
+          aria-label="按日期查落盘记录"
+          title="留空 = 实时视图；选择日期 = 该日落盘文件（保留 7 天）"
+        />
+        {isDay && (
+          <button type="button" className="btn" onClick={backToLive}>
+            回实时
+          </button>
+        )}
+        <span className="tb-count num">{countText}</span>
+      </div>
+
+      {/* 主表面板：面板头（窗口口径 + 查询指示）→ 状态条（错误 / 并入 / 口径提示）
+          → 唯一滚动区 .disp-scroll（活列表规则）→ 分段加载条 */}
+      <section className="panel disp-panel">
+        <div className="panel-h">
+          <span className="panel-h-group">
+            <h3>判定记录</h3>
+            <span className="panel-h-aux">{headAux}</span>
             {busyVisible && (
               <span className="busy-ind">
                 <IconRefresh size={12} />
@@ -695,81 +895,13 @@ export function Dispositions(props: DispositionsProps) {
               </span>
             )}
           </span>
-        </div>
-        <div className="filter-bar">
-          <div className="tb-row">
-            <div className="log-chips" role="group" aria-label="去向分组筛选（单选）">
-              {OUTCOME_GROUPS.map((g) => (
-                <button
-                  type="button"
-                  key={g.id}
-                  className={`log-chip${group === g.id ? ' on' : ''}`}
-                  aria-pressed={group === g.id}
-                  onClick={() => setGroup(g.id)}
-                >
-                  {g.label}
-                </button>
-              ))}
-            </div>
-            <span className="tb-count num">{countText}</span>
-          </div>
-          <div className="tb-row">
-            <select
-              className="input disp-source"
-              value={sourceId}
-              onChange={(e) => setSourceId(e.target.value)}
-              aria-label="按来源筛选"
-            >
-              <option value="">全部来源</option>
-              {sourceOptions.map((id) => (
-                <option key={id} value={id}>
-                  {sourceLabel(id)}
-                </option>
-              ))}
-            </select>
-            <input
-              type="date"
-              className="input disp-date"
-              value={day}
-              max={today}
-              onChange={(e) => setDay(e.target.value)}
-              aria-label="按日期查落盘记录"
-              title="留空 = 实时视图；选择日期 = 该日落盘文件（保留 7 天）"
-            />
-            {isDay && (
-              <button type="button" className="btn" onClick={backToLive}>
-                回实时
-              </button>
-            )}
-            <span className="search-box">
-              <IconSearch size={12} />
-              <input
-                ref={searchRef}
-                className="input"
-                placeholder="搜索标题或原因…"
-                aria-label="搜索判定记录"
-                title="匹配标题与原因全文（快捷键 /）"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-              />
-            </span>
-            {filterActive && (
-              <button
-                type="button"
-                className="btn"
-                onClick={clearFilters}
-                title="恢复默认：全部分组 · 全部来源 · 清空搜索"
-              >
-                重置筛选
-              </button>
-            )}
-          </div>
+          <span className="ph-tag">Pipeline</span>
         </div>
 
-        {/* Zone C · 状态条（错误 / 并入 / 口径提示，互斥栈叠） */}
+        {/* 状态条（错误 / 并入 / 口径提示互斥栈叠；空态不占位） */}
         {strip != null && <div className="disp-strip">{strip}</div>}
 
-        {/* Zone D · 判定记录列表（唯一滚动区） */}
+        {/* 唯一滚动区（行为按 ia §5.1 活列表规则） */}
         <div
           className="disp-scroll"
           ref={scrollRef}
@@ -797,26 +929,43 @@ export function Dispositions(props: DispositionsProps) {
           ) : items.length === 0 || rendered.length === 0 ? (
             renderEmpty()
           ) : (
-            rowsWithSeps.map(({ sep, rec }, i) => (
-              <Fragment key={dispositionKey(rec)}>
-                {sep != null && <div className="day-sep">── {sep} ──</div>}
-                <DispositionRow
-                  record={rec}
-                  index={i}
-                  expanded={expanded.has(dispositionKey(rec))}
-                  selected={i === selIdx}
-                  flash={flashKey != null && flashKey === dispositionKey(rec)}
-                  track={trackByTitle.get(rec.title) ?? [rec]}
-                  onToggle={() => {
-                    // 指针点击同步 roving 选中位（阶段 1 HitList 同范式）
-                    setSelIdx(i)
-                    toggleKey(dispositionKey(rec))
-                  }}
-                  onTrackJump={jumpToRecord}
-                  onGoAnchor={props.onGoAnchor}
-                />
-              </Fragment>
-            ))
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th className="th-time">时间</th>
+                  <th className="th-src">来源</th>
+                  <th>帖子 · 解释</th>
+                  <th className="th-reason">原因</th>
+                  <th className="th-caret" aria-label="展开指示" />
+                </tr>
+              </thead>
+              <tbody>
+                {rowsWithSeps.map(({ sep, rec }, i) => (
+                  <Fragment key={dispositionKey(rec)}>
+                    {sep != null && (
+                      <tr className="day-sep-row">
+                        <td colSpan={5}>── {sep} ──</td>
+                      </tr>
+                    )}
+                    <DispositionRow
+                      record={rec}
+                      index={i}
+                      expanded={expanded.has(dispositionKey(rec))}
+                      selected={i === selIdx}
+                      flash={flashKey != null && flashKey === dispositionKey(rec)}
+                      track={trackByTitle.get(rec.title) ?? [rec]}
+                      onToggle={() => {
+                        // 指针点击同步 roving 选中位（阶段 1 HitList 同范式）
+                        setSelIdx(i)
+                        toggleKey(dispositionKey(rec))
+                      }}
+                      onTrackJump={jumpToRecord}
+                      onGoAnchor={props.onGoAnchor}
+                    />
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
         {isDay && items.length > 0 && (

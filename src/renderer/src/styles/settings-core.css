@@ -1,8 +1,9 @@
 /* ── 设置页骨架（Zone A 子导航 pill 列 + Zone B 六组滚动 + Zone C 吸底保存栏）──
-   R12 版式（简报 §R12.2-5）：子导航「去卡片化」——透明面上的 pill 列表，与主侧栏
-   nav 同语言（wash 底 + 600 字，不用左竖条——竖条专属数据行 .row-selected）；
-   列宽 152→200；内容列限宽 680→760；页面限宽居中随 --content-max。
-   裁决 3：dirty 指示两模式统一琥珀 --warn 族，禁红。
+   Watchtower 换装（SPEC §5.4）：子导航「去卡片化」——透明面上的 pill 列表，
+   与主侧栏 nav 同语言（hover surface-hi / 选中 surface-3 色阶 + 600 字，不用
+   左竖条——竖条专属数据行 .row-selected）；内容列限宽 760；页面限宽居中随
+   --content-max。保存栏贴底全宽毛玻璃（概念 savebar：bg 82% 透明 + blur，
+   浮层阴影退役）。dirty 指示两主题统一琥珀 --warn 族，禁红。
    页自身不滚（覆盖 .page 的 overflow/padding）：滚动下放给 Zone B 唯一容器；
    relative 为整页错误覆盖层（.settings-error）的定位锚。 */
 .page-settings {
@@ -53,23 +54,38 @@
     color var(--t-fast) var(--ease-std);
 }
 .snav-item:hover:not(:disabled) {
-  background: var(--card-alt);
+  background: var(--surface-hi);
   color: var(--fg);
 }
 .snav-item:active:not(:disabled) {
-  background: color-mix(in srgb, var(--text-3) 14%, transparent);
+  background: color-mix(in srgb, var(--fg) 12%, transparent); /* 按压档，同壳层 --rail-press */
 }
-/* 选中态 = pill wash（与侧栏 nav / radios-card 同一族，无竖条；wash 底上 fg 实算 14.47） */
+/* 选中态（概念 anchor .on）：surface-3 色阶 + fg + 600——与主侧栏 nav 选中
+   同语言（SPEC §5.4-1）；fg on surface-3 深 13.09 / 浅 12.41 实算 */
 .snav-item.active {
-  background: var(--primary-wash);
-  color: var(--color-foreground);
+  background: var(--surface-3);
+  color: var(--fg);
   font-weight: 600;
 }
 .snav-item:disabled {
   opacity: 0.45;
   cursor: default;
 }
-/* 组级 dirty 圆点（12 段 → 组映射驱动）：裁决 3——未保存=中间态 → 琥珀 --warn 档，
+/* 编号（步骤 M，概念 .anchor `<b>01</b>` 形制）：mono micro-label 档、faint；
+   选中态升 text-2 与组名同亮一档（faint on surface-3 深 4.16 <4.5，随行 remap） */
+.snav-num {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--text-3);
+  transition: color var(--t-fast) var(--ease-std);
+}
+.snav-item.active .snav-num {
+  color: var(--text-2);
+}
+/* 组级 dirty 圆点（13 段 → 组映射驱动）：裁决 3——未保存=中间态 → 琥珀 --warn 档，
    两模式统一禁红；与侧栏 .dirty-dot 同语义同档 */
 .snav-dot {
   margin-left: auto;
@@ -78,6 +94,38 @@
   height: 8px;
   border-radius: 50%;
   background: var(--warn);
+}
+
+/* ── 编号组头（步骤 M，概念 .sec h3：衬线小节题 + mono 编号 + 底线）──────
+   概念 17px 归 fs-16 字阶（组头档）；衬线走 --font-display（授权位 3，
+   primitives 头注）。编号同子导航 .snav-num 档；desc 第二行释义接底线之下，
+   与原 .group-sub 同档（fs-12/text-3） */
+.sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-lg);
+  margin: 0;
+  padding-bottom: var(--space-md);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-display);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--fg);
+  line-height: var(--lh-base);
+}
+.sec-num {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--text-3);
+}
+.sec-sub {
+  margin: var(--space-sm) 0 0;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
 }
 
 /* Zone B · 唯一滚动容器：组间距 32px 在 .settings-col；底部 88px 让位吸底保存栏；
@@ -231,7 +279,11 @@
 }
 
 /* ── 保存栏（Zone C 吸底，三态互斥）───────────────────────────────
-   「托盘上漂浮的控件条」：raised 底 + shadow-xl + edge-top；圆角随令牌放大 */
+   Watchtower 概念 savebar 语言（SPEC §5.4-2）：贴底全宽毛玻璃——bg 82% 透明
+   底 + backdrop blur + 顶线分隔；去圆角、去边框（仅存 border-top）与浮层
+   阴影（--shadow-xl / --edge-top 随「托盘」语言一并退役）。
+   步骤 M 对位概念 `justify-content:flex-end`：按钮组（放弃修改 / 保存设置）
+   贴右，状态文案占左侧弹性列（窄屏换行时钮组仍靠右）。 */
 
 .savebar {
   position: sticky;
@@ -240,21 +292,25 @@
   z-index: 95;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
   gap: var(--space-lg);
   /* 负边距吃掉 .settings-scroll 的右 padding，撑满滚动容器内宽 */
   margin: var(--space-lg) calc(-1 * var(--space-lg)) 0 0;
   padding: var(--space-lg) var(--space-2xl);
-  border: 1px solid var(--color-border);
-  border-bottom: 0;
-  border-radius: var(--r-card) var(--r-card) 0 0;
-  background: var(--raised);
-  box-shadow: var(--shadow-xl), var(--edge-top);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(10px);
 }
 
 /* 状态区三态：dirty（互斥优先） / ok（已保存·时刻） / err（保存失败可重试）。
-   裁决 3：dirty 两模式统一 --warn-text 琥珀 + 600，禁红 */
+   裁决 3：dirty 两模式统一 --warn-text 琥珀 + 600，禁红。
+   flex:1 把按钮组推到右缘（概念右对齐按钮组） */
 .sb-status {
+  flex: 1 1 auto;
+  min-width: 200px;
   font-size: var(--fs-13);
   color: var(--text-2);
 }
@@ -272,8 +328,10 @@
   color: var(--text-3);
 }
 
-/* 放弃修改 · 行内确认（L2 立即不可逆：首击后原地变形，非弹窗） */
+/* 放弃修改 · 行内确认（L2 立即不可逆：首击后原地变形，非弹窗）。
+   flex:1 占满 savebar 行——文案左、确认/保留两钮右（与常规态按钮同贴右缘） */
 .sb-confirm {
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -286,9 +344,10 @@
   font-size: var(--fs-12);
 }
 
-/* danger 确认态（实底）：底 --danger-solid-bg（两模式 #DC2626）；
-   文字 --on-danger（#FFFFFF 4.83:1 实测）；hover --hover-danger-bg。
-   与 primary 蓝明确区分，两按钮永不邻位同强（继承）。 */
+/* danger 确认态（实底，SPEC §5.4-7）：底 --danger-solid-bg（→ --err：深 #F0574E /
+   浅 #BE222A）；文字 --on-danger（深 #290B0A 5.39 / 浅 #FFFFFF 6.08 实算）；
+   hover --hover-danger-bg（深加白 #F26F67 / 浅加黑 #A90017，theme.css 修正⑧）。
+   与 primary 琥珀明确区分，两按钮永不邻位同强（继承）。 */
 .btn-danger-solid {
   background: var(--danger-solid-bg);
   border-color: transparent;

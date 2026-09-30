@@ -1,65 +1,71 @@
 /**
- * 历史命中页（R10 阶段 3，history.md 三区骨架，整页重写）：
- * Z0 页题（PageHeader：更新于 HH:mm:ss + 统一刷新——两个数据面一次重拉）
- * → Z1 可折叠统计画像卡（固定近 14 天口径：四指标 + 14 天 sparkbar + 方式占比
- * + 来源 Top5 / 关键词榜展开区 + 零命中概要行常显；折叠记忆 localStorage）
- * → Z2 命中记录卡（card-grow 吃满剩余高：筛选工具条 + 服务端分页列表 + 分页栏；
- * 本页唯一滚动区在列表）。整页不滚动，高度不足由 card-grow 的 min-height 兜底
- * 自然回退（监控台同机制）。
+ * 历史命中页（Watchtower 步骤 K，概念稿 history 屏一比一重做）：
+ * 页头（eyebrow「History」+ 衬线大题 + 副题 + 右侧计数 chip「近 7 天 · N 条」
+ * 与统一刷新）→ 筛选条 .bar 两行（行一：搜索 / 命中方式 chips / 来源下拉 /
+ * 日期区间起止；行二：WinKey 快捷窗口 chips + 重置）→ .hist-grid 主表 + 右栏
+ * （HistoryRail 四块面板：7 日趋势 / TOP 关键词 / 价格分布 / 高峰时段热力）。
  *
- * 双窗口口径规则（audit #4 的解，全页最高优先级文案）：Z1 卡头 aux 恒显
- * 「近 14 天固定窗口 · 不随下方筛选变化」（title 讲设计意图），Z2 卡头 aux 恒显
- * 当前筛选窗口——列表筛选变化时 Z1 数字纹丝不动。
+ * 拖拽（概念 fwMakeDrag/localStorage 的 React 直译，useGripDrag 见
+ * HistoryRail.tsx）：grip-y 左右调右栏宽（232-460px，fw-rail-w，双击复位 292）；
+ * grip-x 上下调表高（220px-自然高，fw-hist-h，双击复位）。
  *
- * 加载态（audit #5 / §5.2）：非首载（筛选/翻页/防抖/刷新）保留旧数据 + 列表
- * 压暗 + 卡头「查询中…」（>1s 才出现），禁整屏替换；首载无旧数据才允许文字型
- * 占位。错误 ≠ 空（§5.3）：列表/统计各自错误条 + 重试 + 旧数据保留，失败绝不
- * 落入「没有历史命中」空态；来源下拉备料失败不再静默（尾部不可选项说明）。
- *
- * 保留机制：搜索 300ms 防抖、筛选变化回第一页、越界自动收口、请求序号守卫
- * （列表与统计各一套）、IME 组合不触发单键。行渲染消费阶段 1 的共用 HitRow
- * （含投票、通道化后静音文案），本地复刻段已删除（audit #12）。
- * 键盘（§4.1）：/ 聚焦搜索、Esc 清空/还焦、PageUp/Down 翻页、j/k 与 ↑/↓ 行
- * 移动、Enter 打开焦点行原帖、页码框 Enter 跳页（Pager 内）。
+ * 机制全量保留（自查见各注）：请求序号守卫×2（列表/统计，右栏热力自带第三套）、
+ * 搜索 300ms 防抖 + IME 组合不触发、筛选变化回第一页、越界自动收口、加载三态
+ * （首载文字型 / 非首载保留旧数据 + 压暗 + >1s「查询中…」/ 错误≠空：错误条 +
+ * 重试 + 旧数据保留）、空态三态（默认窗口空 / 筛选后空 / 本页空）、键盘表
+ * （/ 聚焦搜索、Esc 清空/还焦、PageUp/Down 翻页、j/k 行移动、Enter 开焦点行，
+ * 行渲染 HitRow table 变体，roving 契约 j/k/Enter/data-hit-index 原样映射到
+ * 表格行，scroll-margin-top 让位粘性表头）、initialDate 深链（日报「命中明细」
+ * 单日窗口预填）、WinKey 快捷窗口 chips、pickDay 单日窗口（右栏趋势点柱接入）、
+ * 折叠记忆（关键词榜展开态，localStorage fw.history.statsCollapsed——旧 Z1
+ * 统计卡折叠记忆的续命位）、来源下拉备料失败不静默（尾部不可选项 + 失焦重试）。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import type { HitQueryResult, StatsResult } from '@shared/ipc'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorBar } from '../components/ErrorBar'
 import { HitRow, hitRowKey } from '../components/HitRow'
+import { HistoryRail, useGripDrag } from '../components/HistoryRail'
 import { PageHeader } from '../components/PageHeader'
 import { Pager, fmtNum } from '../components/Pager'
-import { StatSparkbar } from '../components/StatSparkbar'
-import { IconChevronDown, IconRefresh, IconSearch } from '../components/icons'
+import { IconRefresh, IconSearch } from '../components/icons'
 import { localDate } from '../lib/time'
 import { sourceLabel } from '../lib/status'
 
-/** 统计区窗口（天，与主进程 getStats 缺省一致；显式传避免两侧漂移） */
+/** 统计区窗口（天，右栏趋势取其近 7 天切片、关键词榜用全窗口；与主进程
+    getStats 缺省一致，显式传避免两侧漂移） */
 const STATS_DAYS = 14
 /** 搜索框防抖（ms） */
 const SEARCH_DEBOUNCE_MS = 300
 /** 「查询中…」指示延迟出现阈值（ia §5.1 progressive-loading） */
 const BUSY_INDICATOR_MS = 1_000
-/** 关键词命中榜默认展示条数（超出折叠「另有 N 个未展示 + 展开全部」） */
-const KEYWORD_RANK_LIMIT = 8
-/** 统计折叠记忆的 localStorage 键（history.md §4.2-6） */
-const STATS_COLLAPSED_KEY = 'fw.history.statsCollapsed'
 /** 「全部」窗口的起始日（从最早落盘记录查起；主进程同口径下限） */
 const ALL_FROM = '2000-01-01'
 /** 默认页大小档（Pager 三档之一） */
 const DEFAULT_PAGE_SIZE = 50
 
+/* ── 拖拽记忆的 localStorage 键（概念稿原键名直译）────────────────── */
+const RAIL_W_KEY = 'fw-rail-w'
+const HIST_H_KEY = 'fw-hist-h'
+/** 右栏宽与表高的拖拽边界（概念稿原值：宽 232-460 复位 292；高下限 220） */
+const RAIL_W_MIN = 232
+const RAIL_W_MAX = 460
+const RAIL_W_DEFAULT = 292
+const HIST_H_MIN = 220
+
 type MatchedBy = 'literal' | 'semantic' | 'rule' | 'matchall'
 
-const MB_OPTIONS: { value: MatchedBy; label: string }[] = [
-  { value: 'literal', label: '字面' },
-  { value: 'semantic', label: '语义' },
-  { value: 'rule', label: '规则' },
-  { value: 'matchall', label: '全匹配' }
+/** 命中方式分档（现有真实口径四档；概念「关键词/价格/AI 语义」按映射纪律
+    （步骤 G 裁决）落本命名——字面→关键词、规则→价格、语义→AI 语义，不新造档） */
+const MB_OPTIONS: { value: MatchedBy; label: string; title: string }[] = [
+  { value: 'literal', label: '字面', title: '筛选/取消筛选字面（关键词）命中' },
+  { value: 'rule', label: '规则', title: '筛选/取消筛选价格规则命中' },
+  { value: 'semantic', label: '语义', title: '筛选/取消筛选 AI 语义命中' },
+  { value: 'matchall', label: '全匹配', title: '筛选/取消筛选来源级全匹配命中' }
 ]
 
-/** 日期快捷 chips（单选；自定义激活时展开两个 date input） */
+/** 日期快捷 chips（单选；自定义激活时起止 date input 即本窗口） */
 type WinKey = 'today' | 'd7' | 'd14' | 'd30' | 'all' | 'custom'
 
 const WIN_OPTIONS: { key: WinKey; label: string; title?: string }[] = [
@@ -71,20 +77,21 @@ const WIN_OPTIONS: { key: WinKey; label: string; title?: string }[] = [
   { key: 'custom', label: '自定义' }
 ]
 
-/** 数据驱动的宽度变量（--w）类型出口：比例/像素宽度是数据不是 token，样式仍由类承载 */
-type BarVars = CSSProperties & { '--w'?: string }
+/** 各窗口的页头计数 chip 文案（概念「近 7 天 · 241 条」的动态口径版） */
+const WIN_CHIP: Record<WinKey, string> = {
+  today: '今天',
+  d7: '近 7 天',
+  d14: '近 14 天',
+  d30: '近 30 天',
+  all: '全部',
+  custom: ''
+}
 
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
-
-/** n/total 百分比文案；total=0 → '—' */
-function pct(n: number, total: number): string {
-  if (total <= 0) return '—'
-  return `${Math.round((n / total) * 100)}%`
-}
 
 /** 近 N 天的起始本地日期（含端点：today-(N-1) .. today） */
 function daysAgoLocal(n: number): string {
@@ -93,7 +100,7 @@ function daysAgoLocal(n: number): string {
   return localDate(d)
 }
 
-/** 含端点的天数（窗口 aux 用）；无效区间按 1 天计 */
+/** 含端点的天数（面板头 aux 用）；无效区间按 1 天计 */
 function dayCountInclusive(from: string, to: string): number {
   const a = Date.parse(`${from}T00:00:00`)
   const b = Date.parse(`${to}T00:00:00`)
@@ -125,159 +132,6 @@ function useDebounced<T>(value: T, delayMs: number): T {
     return () => window.clearTimeout(timer)
   }, [value, delayMs])
   return debounced
-}
-
-/** 折叠记忆（默认折叠，history.md §7 细化 1；读写失败按默认） */
-function readStatsCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(STATS_COLLAPSED_KEY) !== '0'
-  } catch {
-    return true
-  }
-}
-
-// ---- Z1 统计画像子块 ---------------------------------------------------------
-
-/** 四命中方式占比：堆叠比例条（宽度 = 占比）+ 图例行（数字 + 比例） */
-function MatchedByBreakdown(props: { stats: StatsResult }) {
-  const { byMatchedBy, total } = props.stats
-  const rows: { key: MatchedBy; label: string; count: number }[] = [
-    { key: 'literal', label: '字面', count: byMatchedBy.literal },
-    { key: 'semantic', label: '语义', count: byMatchedBy.semantic },
-    { key: 'rule', label: '规则', count: byMatchedBy.rule },
-    { key: 'matchall', label: '全匹配', count: byMatchedBy.matchall }
-  ]
-  return (
-    <div>
-      <div className="stackbar">
-        {rows.map((r) =>
-          r.count > 0 ? (
-            <span
-              key={r.key}
-              className={`stack-seg ${r.key}`}
-              style={{ '--w': pct(r.count, total) } as BarVars}
-              title={`${r.label} ${fmtNum(r.count)}（${pct(r.count, total)}）`}
-            />
-          ) : null
-        )}
-      </div>
-      <div className="legend">
-        {rows.map((r) => (
-          <span key={r.key}>
-            <span className={`lg-dot ${r.key}`} />
-            {r.label} <span className="num">{fmtNum(r.count)}</span>（{pct(r.count, total)}）
-          </span>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-/** 来源分布 Top 5（条形 + 计数；展开区） */
-function SourceRank(props: { stats: StatsResult }) {
-  const { bySource, total } = props.stats
-  const top = bySource.slice(0, 5)
-  const srcMax = Math.max(1, ...top.map((s) => s.count))
-  return (
-    <div>
-      <div className="cb-title">
-        来源分布 Top {Math.min(5, bySource.length)}
-        {bySource.length > 5 ? `（共 ${bySource.length} 个）` : ''}
-      </div>
-      <div className="rank-list">
-        {top.map((s) => (
-          <div className="rank-item" key={s.sourceId}>
-            <span className="rk-name" title={sourceLabel(s.sourceId)}>
-              {sourceLabel(s.sourceId)}
-            </span>
-            <span
-              className="rk-bar"
-              style={{ '--w': `${Math.round((s.count / srcMax) * 90)}px` } as BarVars}
-            />
-            <span className="rk-val num" title={`${s.count} 条（${pct(s.count, total)}）`}>
-              {fmtNum(s.count)}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-/** 关键词命中榜（只列命中词，降序；超 8 条折叠「另有 N 个未展示 + 展开全部」；
-    零命中词不在此列——概要行常显承载，避免折叠时藏住修剪决策入口） */
-function KeywordRank(props: { stats: StatsResult; kwExpanded: boolean; onToggleKw: () => void }) {
-  const hitKeywords = props.stats.keywordHits.filter((k) => k.zeroHit !== true)
-  const shown = props.kwExpanded ? hitKeywords : hitKeywords.slice(0, KEYWORD_RANK_LIMIT)
-  const kwMax = Math.max(1, ...hitKeywords.map((k) => k.count))
-  return (
-    <div>
-      <div className="cb-title">关键词命中榜</div>
-      <div className="rank-list">
-        {shown.map((k) => (
-          <div className="rank-item" key={k.keyword} title={`命中 ${k.count} 次`}>
-            <span className="rk-name">{k.keyword}</span>
-            <span
-              className="rk-bar"
-              style={{ '--w': `${Math.round((k.count / kwMax) * 90)}px` } as BarVars}
-            />
-            <span className="rk-val num">{fmtNum(k.count)}</span>
-          </div>
-        ))}
-        {hitKeywords.length > KEYWORD_RANK_LIMIT && (
-          <div className="rank-more">
-            <span>
-              {props.kwExpanded
-                ? `共 ${hitKeywords.length} 个`
-                : `· 另有 ${hitKeywords.length - KEYWORD_RANK_LIMIT} 个未展示`}
-            </span>
-            <button type="button" className="disp-link" onClick={props.onToggleKw}>
-              {props.kwExpanded ? '收起' : '展开全部'}
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/** 零命中概要行（折叠时常显——流 4 的行动入口不因折叠而隐藏）；
-    锚点深链在设置页阶段 5 就绪前降级为切设置页 */
-function ZeroRow(props: { stats: StatsResult; onGoSettings?: () => void }) {
-  const { keywordHits } = props.stats
-  if (keywordHits.length === 0) return null
-  const zero = keywordHits.filter((k) => k.zeroHit === true)
-  if (zero.length === 0) {
-    return (
-      <div className="zero-row">
-        <span>配置的命中词在窗口内均有过命中</span>
-      </div>
-    )
-  }
-  return (
-    <div className="zero-row">
-      <span>零命中关键词 {zero.length} 个 —— 窗口内从未命中，考虑移除或改写：</span>
-      {zero.map((k) => (
-        <span
-          key={k.keyword}
-          className="zero-chip"
-          title="统计窗口内零命中：考虑移除或改写该关键词"
-        >
-          {k.keyword} · 未命中
-        </span>
-      ))}
-      {props.onGoSettings != null && (
-        <button
-          type="button"
-          className="disp-link"
-          title="打开 设置 → 监控内容 → 关键词"
-          onClick={props.onGoSettings}
-        >
-          去调整关键词
-        </button>
-      )}
-    </div>
-  )
 }
 
 // ---- 页面 -------------------------------------------------------------------
@@ -322,18 +176,16 @@ export function History(props: {
   const [updatedAt, setUpdatedAt] = useState<string | null>(null)
   /** 手动刷新的转圈（点击置位，两数据面都落定后自动清除） */
   const [spin, setSpin] = useState(false)
-  /** 卡头「查询中…」指示（>1s 才出现） */
+  /** 面板头「查询中…」指示（>1s 才出现） */
   const [busyVisible, setBusyVisible] = useState(false)
-
-  // 折叠态与榜单展开
-  const [statsCollapsed, setStatsCollapsed] = useState(readStatsCollapsed)
-  const [kwExpanded, setKwExpanded] = useState(false)
 
   /** 请求序号守卫：慢响应不得覆盖更新的查询状态（列表与统计各一套） */
   const reqSeq = useRef(0)
   const statsSeq = useRef(0)
 
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
   const [selIdx, setSelIdx] = useState(-1)
@@ -402,7 +254,7 @@ export function History(props: {
       })
       .catch((e: unknown) => {
         if (seq !== reqSeq.current) return
-        // 错误 ≠ 空：旧结果保留（错误条在筛选行下），绝不落入「没有历史命中」空态
+        // 错误 ≠ 空：旧结果保留（错误条在面板头之下），绝不落入「没有历史命中」空态
         setListError(errText(e))
         setLoading(false)
         setHasLoaded(true)
@@ -467,19 +319,7 @@ export function History(props: {
     setMb((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]))
   }
 
-  function toggleStats(): void {
-    setStatsCollapsed((v) => {
-      const next = !v
-      try {
-        window.localStorage.setItem(STATS_COLLAPSED_KEY, next ? '1' : '0')
-      } catch {
-        /* 隐私模式等写失败：本次会话内仍生效，不记忆 */
-      }
-      return next
-    })
-  }
-
-  /** 统一刷新：重拉统计与列表两个数据面 */
+  /** 统一刷新：重拉统计与列表两个数据面（右栏热力随 reloadTick 同步重拉） */
   function refresh(): void {
     setSpin(true)
     setReloadTick((t) => t + 1)
@@ -494,10 +334,23 @@ export function History(props: {
     setText('')
   }
 
-  /** sparkbar 点柱 = 单日窗口（from=to=该日），日期 chips 落到「自定义」 */
+  /** 右栏趋势点柱 = 单日窗口（from=to=该日），日期 chips 落到「自定义」 */
   function pickDay(day: string): void {
     setCustomFrom(day)
     setCustomTo(day)
+    setWin('custom')
+  }
+
+  /** 编辑起/止日期 = 进入「自定义」窗口（另一端预填当前生效窗口，不从空区间开始） */
+  function editDateBound(bound: 'from' | 'to', value: string): void {
+    if (value === '') return
+    if (bound === 'from') {
+      setCustomFrom(value)
+      setCustomTo(to)
+    } else {
+      setCustomFrom(from)
+      setCustomTo(value)
+    }
     setWin('custom')
   }
 
@@ -512,7 +365,8 @@ export function History(props: {
     setWin('custom')
   }, [props.initialDate])
 
-  // 键盘行移动（HitList 同范式：roving 由 data-hit-index 承载）
+  // 键盘行移动（roving 由 data-hit-index 承载；行是 HitRow table 变体的 <tr>，
+  // 查询/滚动与旧列表契约同款）
   function moveSel(delta: number): void {
     const n = result.items.length
     if (n === 0) return
@@ -526,13 +380,6 @@ export function History(props: {
     })
   }
 
-  /** 选中行内的按钮代点（Enter 开原帖走真实点击，语义零复制） */
-  function clickInRow(idx: number, selector: string): void {
-    scrollRef.current
-      ?.querySelector<HTMLButtonElement>(`[data-hit-index="${idx}"] ${selector}`)
-      ?.click()
-  }
-
   function handleListKeyDown(e: ReactKeyboardEvent<HTMLDivElement>): void {
     if (e.nativeEvent.isComposing) return
     const key = e.key
@@ -543,8 +390,15 @@ export function History(props: {
       e.preventDefault()
       moveSel(-1)
     } else if (key === 'Enter') {
+      // 焦点已在行内时，行自身的 onKeyDown 已激活（开抽屉），不重复代点
+      if (e.target instanceof Element && e.target.closest('[data-hit-index]') != null) return
       e.preventDefault()
-      if (selIdx >= 0) clickInRow(selIdx, '.hit-title')
+      if (selIdx >= 0) {
+        // 选中行主体的真实点击（语义零复制：走 tr 的 onClick = openDrawer）
+        scrollRef.current
+          ?.querySelector<HTMLElement>(`[data-hit-index="${selIdx}"]`)
+          ?.click()
+      }
     }
   }
 
@@ -592,24 +446,17 @@ export function History(props: {
   const dirty =
     win !== 'd7' || sourceId !== '' || mb.length > 0 || text !== '' || debouncedText !== ''
 
-  const failPct = stats !== null ? Math.round(stats.pushFailRate * 100) : 0
-
-  /** 14 天窗口铺满（byDay 只含有命中日；旧 → 新，供 sparkbar） */
-  const sparkDays = useMemo(() => {
-    const byDate = new Map((stats?.byDay ?? []).map((d) => [d.date, d.count]))
-    const out: { date: string; count: number }[] = []
-    for (let i = STATS_DAYS - 1; i >= 0; i--) {
-      const date = daysAgoLocal(i)
-      out.push({ date, count: byDate.get(date) ?? 0 })
-    }
-    return out
-  }, [stats])
-
-  /** Z2 卡头 aux：恒显当前筛选窗口（与统计 14 天固定窗口解耦——两数字不打架） */
+  /** 面板头 aux：恒显当前筛选窗口（与统计固定窗口解耦——两数字不打架） */
   const windowAux =
     win === 'all'
       ? `窗口 全部 · 共 ${fmtNum(result.total)} 条`
       : `窗口 ${from.slice(5)} ～ ${to.slice(5)} · ${dayCountInclusive(from, to)} 天 · 共 ${fmtNum(result.total)} 条`
+
+  /** 页头计数 chip：窗口名动态（概念「近 7 天 · 241 条」；自定义窗口给日期段） */
+  const countChip =
+    win === 'custom'
+      ? `${from.slice(5)}～${to.slice(5)} · ${fmtNum(result.total)} 条`
+      : `${WIN_CHIP[win]} · ${fmtNum(result.total)} 条`
 
   /** 列表空态三态（§5.1）：默认窗口空 / 筛选后空 / 本页为空（越界收口兜底） */
   function renderEmpty(): ReactNode {
@@ -659,314 +506,368 @@ export function History(props: {
     )
   }
 
+  /* ── 拖拽（概念稿 fwMakeDrag 的 React 直译）─────────────────────────
+     grip-y：railW = clamp(232,460, grid.right - clientX) → grid 的 --rail-w
+     （列宽由 CSS 变量承载，232-460 / 复位 292 / 持久化 fw-rail-w）。
+     grip-x：h = clamp(220,自然高, clientY - panel.top + 4) → panel.style.height
+     （持久化 fw-hist-h；挂 .has-height 让内滚区放开默认 max-height 上限）。
+     读写全 try/catch；恢复时不按挂载瞬间的「自然高」截断（数据异步到达，
+     挂载时面板尚矮——与概念静态页的差异，存值本身就是合法拖出来的高度）。 */
+  const gripYHandlers = useGripDrag(
+    (e) => {
+      const grid = gridRef.current
+      if (grid == null) return
+      const w = Math.round(
+        Math.min(RAIL_W_MAX, Math.max(RAIL_W_MIN, grid.getBoundingClientRect().right - e.clientX))
+      )
+      grid.style.setProperty('--rail-w', `${w}px`)
+      try {
+        window.localStorage.setItem(RAIL_W_KEY, String(w))
+      } catch {
+        /* 隐私模式等写失败：本次会话内仍生效，不记忆 */
+      }
+    },
+    () => {
+      gridRef.current?.style.setProperty('--rail-w', `${RAIL_W_DEFAULT}px`)
+      try {
+        window.localStorage.removeItem(RAIL_W_KEY)
+      } catch {
+        /* ignore */
+      }
+    }
+  )
+
+  /** 自然高捕捉：未设显式高度时的面板实高（拖高上限；复位/清空后重捕捉） */
+  const naturalHRef = useRef(0)
+  const gripXHandlers = useGripDrag(
+    (e) => {
+      const panel = panelRef.current
+      if (panel == null) return
+      if (naturalHRef.current === 0) {
+        naturalHRef.current =
+          panel.style.height === '' ? (panel.offsetHeight || 2000) : 2000
+      }
+      const h = Math.min(
+        naturalHRef.current || 2000,
+        Math.max(HIST_H_MIN, e.clientY - panel.getBoundingClientRect().top + 4)
+      )
+      panel.style.height = `${Math.round(h)}px`
+      panel.classList.add('has-height')
+      try {
+        window.localStorage.setItem(HIST_H_KEY, String(Math.round(h)))
+      } catch {
+        /* ignore */
+      }
+    },
+    () => {
+      const panel = panelRef.current
+      if (panel == null) return
+      panel.style.height = ''
+      panel.classList.remove('has-height')
+      naturalHRef.current = 0
+      try {
+        window.localStorage.removeItem(HIST_H_KEY)
+      } catch {
+        /* ignore */
+      }
+    }
+  )
+
+  // 记忆恢复（概念 tryRestore 的直译；宽夹取 [232,460]，高夹取下限 220）
+  useLayoutEffect(() => {
+    try {
+      const w = Math.min(
+        RAIL_W_MAX,
+        Math.max(RAIL_W_MIN, Number(window.localStorage.getItem(RAIL_W_KEY)) || RAIL_W_DEFAULT)
+      )
+      gridRef.current?.style.setProperty('--rail-w', `${w}px`)
+    } catch {
+      /* ignore */
+    }
+    try {
+      const h = Number(window.localStorage.getItem(HIST_H_KEY))
+      const panel = panelRef.current
+      if (!Number.isNaN(h) && h >= HIST_H_MIN && panel != null) {
+        panel.style.height = `${Math.round(h)}px`
+        panel.classList.add('has-height')
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   return (
     <div className="page page-history" ref={rootRef}>
-      {/* Z0 · 页题区：页面身份 + 两个数据面的统一刷新与数据时刻 */}
+      {/* Z0 · 页题区：页面身份 + 窗口计数 chip + 两个数据面的统一刷新与数据时刻 */}
       <PageHeader
         title="历史命中"
-        subtitle="全部命中记录与统计画像 · 数据保存在本机，手动刷新查看最新"
+        eyebrow="History"
+        subtitle="每一条命中都有迹可循 · 点击行查看完整判定链"
         updatedAt={updatedAt}
         stale={false}
         updatedTitle="两个数据面（统计与记录）上次成功读取的时间"
         paused={props.active === false}
         actions={
-          <button
-            type="button"
-            className={`btn${spin ? ' refreshing' : ''}`}
-            disabled={spin}
-            onClick={refresh}
-            title="重新读取统计画像与命中记录"
-          >
-            <IconRefresh size={14} />
-            刷新
-          </button>
+          <>
+            <span
+              className="count-chip num"
+              title="当前查询窗口的命中总数（跟随筛选即时更新）"
+            >
+              {countChip}
+            </span>
+            <button
+              type="button"
+              className={`btn${spin ? ' busy' : ''}`}
+              disabled={spin}
+              onClick={refresh}
+              title="重新读取统计画像与命中记录"
+            >
+              {spin ? null : <IconRefresh size={14} />}
+              刷新
+            </button>
+          </>
         }
       />
 
-      {/* Z1 · 统计画像卡：固定近 14 天口径，不随下方列表筛选变化 */}
-      <section className="card">
-        <div className="card-head">
-          <span className="card-head-group">
-            <span className="card-title">统计画像</span>
-            <span
-              className="card-title-aux"
-              title="统计是长期画像（帮你修剪关键词、看来源结构），列表是查询视图；两者口径独立，数字不同属正常"
-            >
-              近 {STATS_DAYS} 天固定窗口 · 不随下方筛选变化
-            </span>
-          </span>
+      {/* 筛选条 .bar 行一：搜索 / 命中方式 / 来源 / 日期区间起止 */}
+      <div className="bar">
+        <label className="search-wrap">
+          <IconSearch size={14} />
+          <input
+            ref={searchRef}
+            className="ipt"
+            placeholder="快速定位：标题 / 关键词 …"
+            aria-label="搜索标题、命中词、规则名"
+            title="按子串匹配，300ms 防抖；快捷键 /"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+        </label>
+        <div className="filter-chips" role="group" aria-label="命中方式（多选）">
           <button
             type="button"
-            className="stat-detail-toggle"
-            aria-expanded={!statsCollapsed}
-            title={
-              statsCollapsed
-                ? '展开查看来源分布与关键词命中榜'
-                : '隐藏来源分布与关键词命中榜，只留指标与趋势'
-            }
-            onClick={toggleStats}
+            className={`filter-chip${mb.length === 0 ? ' on' : ''}`}
+            aria-pressed={mb.length === 0}
+            title="不按命中方式过滤（全部）"
+            onClick={() => setMb([])}
           >
-            {statsCollapsed ? '来源分布 · 关键词榜' : '收起来源与榜单'}
-            <IconChevronDown size={12} />
+            全部
           </button>
-        </div>
-        {statsError != null && (
-          <ErrorBar
-            message={`统计读取失败：${statsError}${stats != null ? '—— 以下为上次成功读取的数据' : ''}`}
-            onRetry={refresh}
-          />
-        )}
-        {statsBusy && stats == null && statsError == null && (
-          /* 首载谱系同款（§C-10）：旋转图标 + 文案，不做骨架 */
-          <div className="empty disp-loading">
-            <IconRefresh size={12} />
-            正在读取统计…
-          </div>
-        )}
-        {stats != null && (
-          <>
-            <div className="metrics">
-              <div className="metric" title="近 14 天落盘命中总数">
-                <div className="k">总命中</div>
-                <div className="v num">{fmtNum(stats.total)}</div>
-              </div>
-              <div
-                className={`metric${failPct > 0 ? ' warn' : ''}`}
-                title="推送尝试中 notifyError 非空的占比"
-              >
-                <div className="k">推送失败率</div>
-                <div className="v num">{stats.total === 0 ? '—' : `${failPct}%`}</div>
-              </div>
-              <div
-                className="metric"
-                title={`近 ${STATS_DAYS} 天中有 ${stats.byDay.length} 天出现过命中`}
-              >
-                <div className="k">有命中天数</div>
-                <div className="v num">{stats.byDay.length} 天</div>
-              </div>
-              <div
-                className="metric"
-                title="近 14 天产出过命中的来源个数（含已删除但留有历史数据的来源）"
-              >
-                <div className="k">来源数</div>
-                <div className="v num">{stats.bySource.length}</div>
-              </div>
-            </div>
-            <div className="chart-row">
-              <div className="chart-block">
-                <div className="cb-title">每日命中（近 {STATS_DAYS} 天）</div>
-                <StatSparkbar days={sparkDays} onPickDay={pickDay} />
-              </div>
-              <div className="chart-block">
-                <div className="cb-title">命中方式占比</div>
-                <MatchedByBreakdown stats={stats} />
-              </div>
-            </div>
-            {!statsCollapsed && (
-              <div className="stats-detail">
-                {stats.total === 0 ? (
-                  <div className="src-empty">
-                    近 14 天没有任何命中记录。命中在监控运行且关键词 / 兴趣 / 规则匹配时产生。
-                  </div>
-                ) : (
-                  <div className="rank-cols">
-                    <SourceRank stats={stats} />
-                    <KeywordRank
-                      stats={stats}
-                      kwExpanded={kwExpanded}
-                      onToggleKw={() => setKwExpanded((v) => !v)}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-            <ZeroRow stats={stats} onGoSettings={props.onGoSettings} />
-          </>
-        )}
-      </section>
-
-      {/* Z2 · 命中记录卡（card-grow 吃满剩余高；本页主任务区，唯一滚动在列表） */}
-      <section className="card card-grow">
-        <div className="card-head">
-          <span className="card-head-group">
-            <span className="card-title">命中记录</span>
-            <span className="card-title-aux">{windowAux}</span>
-            {busyVisible && (
-              <span className="busy-ind">
-                <IconRefresh size={12} />
-                查询中…
-              </span>
-            )}
-          </span>
-        </div>
-        <div className="filter-bar">
-          <div className="tb-row">
-            <div className="log-chips" role="group" aria-label="日期窗口（单选）">
-              {WIN_OPTIONS.map((w) => (
-                <button
-                  type="button"
-                  key={w.key}
-                  className={`log-chip${win === w.key ? ' on' : ''}`}
-                  aria-pressed={win === w.key}
-                  title={w.title}
-                  onClick={() => {
-                    // 进入自定义：预填当前窗口，不从空区间开始
-                    if (w.key === 'custom' && win !== 'custom') {
-                      setCustomFrom(from)
-                      setCustomTo(to)
-                    }
-                    setWin(w.key)
-                  }}
-                >
-                  {w.label}
-                </button>
-              ))}
-            </div>
-            {win === 'custom' && (
-              <span className="input-row">
-                <input
-                  type="date"
-                  className="input"
-                  value={customFrom}
-                  max={today}
-                  onChange={(e) => setCustomFrom(e.target.value)}
-                  aria-label="起始日期（含）"
-                />
-                <span className="card-count">至</span>
-                <input
-                  type="date"
-                  className="input"
-                  value={customTo}
-                  max={today}
-                  onChange={(e) => setCustomTo(e.target.value)}
-                  aria-label="截止日期（含）"
-                />
-              </span>
-            )}
-            <select
-              className="input disp-source"
-              value={sourceId}
-              onChange={(e) => setSourceId(e.target.value)}
-              onBlur={() => {
-                // 备料失败：失焦立即重试一次；连续失败保持提示不升级打扰
-                if (sourceOptionsFailed) loadSourceOptions()
-              }}
-              aria-label="按来源筛选"
+          {MB_OPTIONS.map((o) => (
+            <button
+              type="button"
+              key={o.value}
+              className={`filter-chip${mb.includes(o.value) ? ' on' : ''}`}
+              aria-pressed={mb.includes(o.value)}
+              title={o.title}
+              onClick={() => toggleMb(o.value)}
             >
-              <option value="">全部来源</option>
-              {sourceOptions.map((id) => (
-                <option key={id} value={id}>
-                  {sourceLabel(id)}
-                </option>
-              ))}
-              {sourceOptionsFailed && (
-                <option disabled value="__sourceLoadFailed__">
-                  （来源清单读取失败，仅显示历史出现过的来源）
-                </option>
+              {o.label}
+            </button>
+          ))}
+        </div>
+        <select
+          className="sel hist-source"
+          value={sourceId}
+          onChange={(e) => setSourceId(e.target.value)}
+          onBlur={() => {
+            // 备料失败：失焦立即重试一次；连续失败保持提示不升级打扰
+            if (sourceOptionsFailed) loadSourceOptions()
+          }}
+          aria-label="按来源筛选"
+        >
+          <option value="">全部来源</option>
+          {sourceOptions.map((id) => (
+            <option key={id} value={id}>
+              {sourceLabel(id)}
+            </option>
+          ))}
+          {sourceOptionsFailed && (
+            <option disabled value="__sourceLoadFailed__">
+              （来源清单读取失败，仅显示历史出现过的来源）
+            </option>
+          )}
+        </select>
+        <input
+          type="date"
+          className="ipt dt"
+          value={win === 'all' ? '' : from}
+          max={today}
+          aria-label="起始日期（含）"
+          title={
+            win === 'all'
+              ? '「全部」窗口不设起始界限（显示为空）；选取日期即切换到「自定义」'
+              : '起始日期（含）；编辑即切换到「自定义」窗口'
+          }
+          onChange={(e) => editDateBound('from', e.target.value)}
+        />
+        <span className="date-sep" aria-hidden="true">
+          →
+        </span>
+        <input
+          type="date"
+          className="ipt dt"
+          value={win === 'all' ? '' : to}
+          min={from}
+          max={today}
+          aria-label="截止日期（含）"
+          title="截止日期（含）；编辑即切换到「自定义」窗口"
+          onChange={(e) => editDateBound('to', e.target.value)}
+        />
+      </div>
+
+      {/* 筛选条 .bar 行二：WinKey 快捷窗口 chips（机制保留，并入 bar）+ 重置 */}
+      <div className="bar">
+        <div className="filter-chips" role="group" aria-label="日期窗口（单选）">
+          {WIN_OPTIONS.map((w) => (
+            <button
+              type="button"
+              key={w.key}
+              className={`filter-chip${win === w.key ? ' on' : ''}`}
+              aria-pressed={win === w.key}
+              title={w.title}
+              onClick={() => {
+                // 进入自定义：预填当前窗口，不从空区间开始
+                if (w.key === 'custom' && win !== 'custom') {
+                  setCustomFrom(from)
+                  setCustomTo(to)
+                }
+                setWin(w.key)
+              }}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+        {dirty && (
+          <button
+            type="button"
+            className="btn"
+            onClick={resetFilters}
+            title="恢复默认：近 7 天 · 全部来源 · 全部命中方式"
+          >
+            重置筛选
+          </button>
+        )}
+      </div>
+
+      {/* 主体 .hist-grid：左命中记录表（可拖高）+ 右统计栏（可拖宽） */}
+      <div className="hist-grid" ref={gridRef}>
+        <section
+          className="panel hist-panel"
+          ref={panelRef}
+          title="命中记录 · 底缘可上下拖动调高（双击复位）"
+        >
+          <div className="panel-h">
+            <span className="panel-h-group">
+              <h3>命中记录</h3>
+              <span className="panel-h-aux" title="当前筛选窗口（统计栏是固定窗口，两者口径独立）">
+                {windowAux}
+              </span>
+              {busyVisible && (
+                <span className="busy-ind">
+                  <IconRefresh size={12} />
+                  查询中…
+                </span>
               )}
-            </select>
-            <div className="log-chips" role="group" aria-label="命中方式（多选）">
-              {MB_OPTIONS.map((o) => (
-                <button
-                  type="button"
-                  key={o.value}
-                  className={`log-chip${mb.includes(o.value) ? ' on' : ''}`}
-                  aria-pressed={mb.includes(o.value)}
-                  title={`筛选/取消筛选${o.label}命中`}
-                  onClick={() => toggleMb(o.value)}
-                >
-                  {o.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="tb-row">
-            <span className="search-box">
-              <IconSearch size={12} />
-              <input
-                ref={searchRef}
-                className="input"
-                placeholder="搜索标题、命中词、规则名"
-                aria-label="搜索标题、命中词、规则名"
-                title="按子串匹配，300ms 防抖；快捷键 /"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-              />
             </span>
-            {dirty && (
-              <button
-                type="button"
-                className="btn"
-                onClick={resetFilters}
-                title="恢复默认：近 7 天 · 全部来源 · 全部命中方式"
-              >
-                重置筛选
-              </button>
+            <span className="ph-tag">Hits</span>
+          </div>
+          {listError != null && (
+            <ErrorBar
+              message={`命中记录读取失败：${listError}${
+                result.items.length > 0 ? ' · 以上为上次成功读取的数据' : ''
+              }`}
+              onRetry={refresh}
+            />
+          )}
+          <div
+            className={`hist-scroll${loading && hasLoaded ? ' list-dim' : ''}`}
+            ref={scrollRef}
+            tabIndex={0}
+            aria-busy={loading ? true : undefined}
+            aria-label="历史命中表：j/k 或上下键移动，Enter 查看命中详情，PageUp/Down 翻页"
+            onKeyDown={handleListKeyDown}
+          >
+            {!hasLoaded ? (
+              // 首载（无旧数据）= 旋转图标 + 文案（三态谱系 §C-10）；本地 IPC
+              // 快速返回，不做骨架
+              <div className="empty disp-loading">
+                <IconRefresh size={12} />
+                正在读取历史记录…
+              </div>
+            ) : listError != null && result.items.length === 0 ? (
+              <EmptyState
+                title="读取失败"
+                hint={listError}
+                action={
+                  <button type="button" className="btn" onClick={refresh}>
+                    重试
+                  </button>
+                }
+              />
+            ) : result.items.length === 0 ? (
+              renderEmpty()
+            ) : (
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>帖子标题</th>
+                    <th>来源</th>
+                    <th>规则</th>
+                    <th>价格</th>
+                    <th>时间</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.items.map((hit, i) => {
+                    const stamp = hit.notifiedAt ?? hit.topic.lastActiveAt
+                    return (
+                      <HitRow
+                        key={hitRowKey(hit)}
+                        variant="table"
+                        hit={hit}
+                        index={i}
+                        time={formatHistoryStamp(stamp)}
+                        timeTitle={formatHistoryTitle(stamp)}
+                        selected={i === selIdx}
+                        onRowPointerDown={() => setSelIdx(i)}
+                      />
+                    )
+                  })}
+                </tbody>
+              </table>
             )}
           </div>
-        </div>
-        {listError != null && (
-          <ErrorBar
-            message={`命中记录读取失败：${listError}${
-              result.items.length > 0 ? ' · 以上为上次成功读取的数据' : ''
-            }`}
-            onRetry={refresh}
+          <Pager
+            page={page}
+            pageCount={pageCount}
+            total={result.total}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
           />
-        )}
-        <div
-          className={`hit-scroll${loading && hasLoaded ? ' list-dim' : ''}`}
-          ref={scrollRef}
-          tabIndex={0}
-          aria-busy={loading ? true : undefined}
-          aria-label="历史命中列表：j/k 或上下键移动，Enter 打开原帖，PageUp/Down 翻页"
-          onKeyDown={handleListKeyDown}
-        >
-          {!hasLoaded ? (
-            // 首载（无旧数据）= 旋转图标 + 文案（三态谱系 §C-10：与去向页/日报页
-            // 同款 disp-loading 范式）；本地 IPC 快速返回，不做骨架
-            <div className="empty disp-loading">
-              <IconRefresh size={12} />
-              正在读取历史记录…
-            </div>
-          ) : listError != null && result.items.length === 0 ? (
-            <EmptyState
-              title="读取失败"
-              hint={listError}
-              action={
-                <button type="button" className="btn" onClick={refresh}>
-                  重试
-                </button>
-              }
-            />
-          ) : result.items.length === 0 ? (
-            renderEmpty()
-          ) : (
-            result.items.map((hit, i) => {
-              const stamp = hit.notifiedAt ?? hit.topic.lastActiveAt
-              return (
-                <HitRow
-                  key={hitRowKey(hit)}
-                  hit={hit}
-                  index={i}
-                  time={formatHistoryStamp(stamp)}
-                  timeWide
-                  timeTitle={formatHistoryTitle(stamp)}
-                  selected={i === selIdx}
-                  onRowPointerDown={() => setSelIdx(i)}
-                />
-              )
-            })
-          )}
-        </div>
-        <Pager
-          page={page}
-          pageCount={pageCount}
-          total={result.total}
-          pageSize={pageSize}
-          onPageChange={setPage}
-          onPageSizeChange={setPageSize}
+          <div
+            className="grip-x"
+            title="上下拖动调高 · 双击复位"
+            {...gripXHandlers}
+          />
+        </section>
+
+        <HistoryRail
+          stats={stats}
+          statsError={statsError}
+          statsBusy={statsBusy}
+          onRefresh={refresh}
+          onPickDay={pickDay}
+          onGoSettings={props.onGoSettings}
+          pageHits={result.items}
+          reloadTick={reloadTick}
+          today={today}
+          gripY={<div className="grip-y" title="左右拖动调宽 · 双击复位" {...gripYHandlers} />}
         />
-      </section>
+      </div>
     </div>
   )
 }

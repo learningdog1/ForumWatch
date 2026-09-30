@@ -80,8 +80,10 @@ if (!gotSingleInstanceLock) {
   // mac activate（Dock 点击 / 系统重激活）重开主窗口
   app.on('activate', () => showMainWindow())
 
-  // 关窗语义在 window.ts（preventDefault + hide 进托盘），这里全部窗口关闭
-  // 后**不退出**：托盘常驻，win 上同样常驻；退出只走托盘菜单 / before-quit 路径。
+  // 关窗语义在 window.ts：默认（closeBehavior='tray'，步骤 D 起可配）preventDefault
+  // + hide 进托盘；'quit' 时 window.ts 放行 close 并自行 app.quit()（否则会僵在
+  // 下面的 no-op 上）。这里全部窗口关闭后**不退出**：托盘常驻，win 上同样常驻；
+  // 退出只走托盘菜单 / before-quit 路径。
   app.on('window-all-closed', () => {
     /* 有意 no-op */
   })
@@ -108,10 +110,10 @@ if (!gotSingleInstanceLock) {
   })
 
   void app.whenReady().then(() => {
-    // R12.7：界面固定浅色（「霁蓝平台」以浅色为唯一交付面）。CSS 层已把暗档
-    // 覆盖块停用为主防线；此处同时钉住原生面（菜单/通知等走 AppKit 外观）。
-    // 解除钉死：themeSource 改回 'system' 且恢复渲染层三处 @media 原样。
-    nativeTheme.themeSource = 'light'
+    // 瞭望塔双主题（R20 全量重设计）：原生面跟随系统，渲染层 data-theme 由
+    // lib/theme.ts 独立解析（dark 默认 / light / system 三档）——「跟随系统」档依赖
+    // prefers-color-scheme 不被钉死（R12.7 固定浅色的钉子已废除）。
+    nativeTheme.themeSource = 'system'
     migrateLegacyUserData() // D1：更名首启迁移，先于一切 userData 读取
     const broadcaster = createBroadcaster()
     const runtime = initRuntime(broadcaster)
@@ -119,7 +121,9 @@ if (!gotSingleInstanceLock) {
     loggerRef = runtime.logger
 
     registerIpcHandlers(runtime, broadcaster)
-    createMainWindow()
+    // 步骤 D：注入关窗行为访问器（close 时现读 store，配置热更新）；
+    // 缺省注入 = 'tray'，但显式接线让装配语义一目了然
+    createMainWindow({ getCloseBehavior: () => runtime.store.get().closeBehavior })
     createTray(runtime)
     attachPowerHooks(runtime)
     runtime.startup()

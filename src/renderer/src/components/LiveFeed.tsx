@@ -1,14 +1,21 @@
 /**
- * 最近命中（Zone C，dashboard.md §3.3）：本会话命中流的阅读面，行渲染全部
- * 委托共用 HitRow。活列表规则（ia §5.1，阅读优先于新鲜度）：
+ * 实时命中流（Watchtower 步骤 J，概念稿 .feed/.feed-row 形制）：监控台右栏的
+ * 命中阅读面。活列表机制自 HitList.tsx（步骤 J 前身，已退役）整体迁入，行为
+ * 逐条保留（ia §5.1，阅读优先于新鲜度）：
  * - 「正在阅读」= 列表 scrollTop > 8px，或 10 秒内有过滚动/点击/键盘交互。
  * - 阅读中到达的命中不插入 DOM：以「冻结锚」（变更前的顶行 key）把新到行
  *   挡在渲染之外，只进角标计数（语境句 + role=status，不抢焦点，+99 封顶）；
- *   点击角标或滚回顶部一次性并入（新行批量入场动画）。锚被 200 环挤出时
- *   （阅读中涌入超环容量）放弃冻结整列表并入，避免丢行。
- * - 列表在顶且无交互 → 新命中直接前插（现状行为，useApi 单源订阅不变更）。
- * 键盘（§6.1）：j/k、↑/↓ 移动选中行，Enter 打开原帖，1/2 投 👍/👎；
- * 容器是唯一 Tab 停靠点（roving 由内部 data-hit-index 承载）。
+ *   点击角标或滚回顶部一次性并入。锚被 200 环挤出时放弃冻结整列表并入。
+ * - 列表在顶且无交互 → 新命中直接前插（useApi 单源订阅，onHit 事件驱动）。
+ * - 键盘（§6.1）：j/k、↑/↓ 移动选中行，Enter 激活选中行（feed 行 = 打开命中
+ *   详情抽屉），1/2 投 👍/👎（feed 行投票在抽屉内，无目标时静默 no-op）；
+ *   容器是唯一 Tab 停靠点（roving 由内部 data-hit-index 承载）。
+ *
+ * NEW 徽标（步骤 J）：真实事件驱动——自订阅 window.api.onHit，事件到达的行
+ * 7 秒内挂 fresh（HitRow feed 变体渲染 .new-tag）；过期由定时器链收口重渲染。
+ * 滑入动画（概念 .feed-row.enter）：纯 CSS 挂在 .feed.is-live 容器上，仅本页
+ * active 时生效（keep-alive hidden 页 display:none 会压掉动画中间帧；行按
+ * key 复用不重挂载，已入列的旧行不会重播）。
  * 空态三态联动保留：从未命中（去设置）/ 本会话无新（立即轮询，暂停时禁用）。
  */
 import { useEffect, useRef, useState } from 'react'
@@ -25,21 +32,31 @@ const INTERACTION_WINDOW_MS = 10_000
 const BADGE_CAP = 99
 /** 内存环容量（与 useApi.MAX_HITS 同口径；卡头 aux 环满提示用） */
 const RING_SIZE = 200
+/** onHit 事件后 NEW 徽标保留时长（概念稿演示节奏 7s，对齐真实事件判定） */
+const FRESH_MS = 7000
 
-export function HitList(props: {
-  /** 新→旧（useApi 单源下发） */
+/** 一次事件到达的记录：freshUntil（NEW 徽标到期）+ arrivedAt（滑入动画基准） */
+interface Arrival {
+  freshUntil: number
+  arrivedAt: number
+}
+
+export function LiveFeed(props: {
+  /** 新→旧（useApi 单源下发，onHit 事件前插） */
   hits: HitRecord[]
   /** 持久累计命中数（EngineStatus.totalHits）：与内存列表口径不同，空态联动展示 */
   totalHits: number
+  /** keep-alive 活跃性：hidden 页停用滑入动画（display:none 压动画中间帧） */
+  active?: boolean
   onRunNow: () => void
   runNowDisabled: boolean
   /** 命中面读取失败原因（错误 ≠ 空：旧数据保留，错误条叠卡顶） */
   error?: string | null
   /** 错误条重试（重新拉取全量） */
   onRetry?: () => void
-  /** 从未命中空态的「去设置监控内容」出口（App 层切页；锚点深链待设置页阶段） */
+  /** 从未命中空态的「去设置监控内容」出口（App 层切页 + 设置锚点深链） */
   onGoSettings?: () => void
-  /** 推送失败 ✗ 深链（阶段 2 接线）：跳去向页搜索该帖标题——排障动线一跳化 */
+  /** 推送失败 ✗ 深链：跳去向页搜索该帖标题——排障动线一跳化 */
   onPushErrorClick?: (hit: HitRecord) => void
 }) {
   const { hits } = props
@@ -50,6 +67,51 @@ export function HitList(props: {
   const prevTopRef = useRef<string | null>(null)
   const [anchorId, setAnchorId] = useState<string | null>(null)
   const [selIdx, setSelIdx] = useState(-1)
+  /** onHit 事件到达登记（key → 到达信息）；驱动 NEW 徽标的事件驱动真实判定 */
+  const arrivalsRef = useRef<Map<string, Arrival>>(new Map())
+  /** 到期收口的重渲染信号（Map 是 ref 不触发渲染，靠这个 tick） */
+  const [, setArrivalTick] = useState(0)
+  const expiryTimerRef = useRef<number | null>(null)
+
+  // onHit 订阅：仅用于 NEW 徽标与滑入动画的事件登记（列表数据仍走 props.hits
+  // 单源——App 层 useApi 已按事件前插，这里不重复维护数据）
+  useEffect(() => {
+    const off = window.api.onHit((h) => {
+      const now = Date.now()
+      arrivalsRef.current.set(hitRowKey(h), { freshUntil: now + FRESH_MS, arrivedAt: now })
+      scheduleExpiry()
+      setArrivalTick((t) => t + 1)
+    })
+    return () => {
+      off()
+      if (expiryTimerRef.current != null) window.clearTimeout(expiryTimerRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** 最早到期时刻的定时器链：到点清理过期登记并重渲染（徽标消失） */
+  function scheduleExpiry(): void {
+    const next = earliestExpiry()
+    if (next == null) return
+    if (expiryTimerRef.current != null) window.clearTimeout(expiryTimerRef.current)
+    expiryTimerRef.current = window.setTimeout(() => {
+      expiryTimerRef.current = null
+      const now = Date.now()
+      for (const [key, a] of arrivalsRef.current) {
+        if (a.freshUntil <= now) arrivalsRef.current.delete(key)
+      }
+      scheduleExpiry()
+      setArrivalTick((t) => t + 1)
+    }, Math.max(0, next - Date.now()))
+  }
+
+  function earliestExpiry(): number | null {
+    let min: number | null = null
+    for (const a of arrivalsRef.current.values()) {
+      if (min == null || a.freshUntil < min) min = a.freshUntil
+    }
+    return min
+  }
 
   const anchorIdx = anchorId == null ? -1 : hits.findIndex((h) => hitRowKey(h) === anchorId)
   const frozen = anchorId != null && anchorIdx > 0
@@ -110,11 +172,13 @@ export function HitList(props: {
     })
   }
 
-  /** 选中行内的按钮代点（Enter 开原帖 / 1、2 投票走真实点击，三态语义零复制） */
+  /** 选中行内目标的代点（Enter 激活行本体 = feed 行打开抽屉；1/2 投票走真实
+      按钮，feed 行投票在抽屉内、无目标时 querySelector 落空即 no-op） */
   function clickInRow(idx: number, selector: string): void {
-    scrollRef.current
-      ?.querySelector<HTMLButtonElement>(`[data-hit-index="${idx}"] ${selector}`)
-      ?.click()
+    const row = scrollRef.current?.querySelector(`[data-hit-index="${idx}"]`)
+    if (row == null) return
+    if (selector === '') (row as HTMLElement).click()
+    else row.querySelector<HTMLButtonElement>(selector)?.click()
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>): void {
@@ -129,7 +193,7 @@ export function HitList(props: {
       moveSel(-1)
     } else if (key === 'Enter') {
       e.preventDefault()
-      if (selIdx >= 0) clickInRow(selIdx, '.hit-title')
+      if (selIdx >= 0) clickInRow(selIdx, '')
     } else if (key === '1') {
       e.preventDefault()
       if (selIdx >= 0) clickInRow(selIdx, '[data-vote="positive"]')
@@ -143,6 +207,12 @@ export function HitList(props: {
   useEffect(() => {
     if (selIdx >= visible.length) setSelIdx(visible.length === 0 ? -1 : visible.length - 1)
   }, [visible.length, selIdx])
+
+  const now = Date.now()
+  const isFresh = (key: string): boolean => {
+    const a = arrivalsRef.current.get(key)
+    return a != null && now < a.freshUntil
+  }
 
   const badge =
     newCount > 0 ? (
@@ -163,31 +233,32 @@ export function HitList(props: {
     ) : null
 
   return (
-    <section className="card card-hits">
-      <div className="card-head">
-        <span className="card-head-group">
-          <span className="card-title">最近命中</span>
-          {visible.length > 0 && <span className="card-count num">{visible.length} 条</span>}
-          <span className="card-title-aux">
+    <section className="panel panel-feed">
+      <div className="panel-h">
+        <span className="panel-h-group">
+          <h3>实时命中流</h3>
+          {visible.length > 0 && <span className="panel-count num">{visible.length} 条</span>}
+          <span className="panel-h-aux">
             本会话 · 最多 {RING_SIZE} 条 · 重启后清空
             {hits.length >= RING_SIZE
               ? ` · 已满 ${RING_SIZE} · 更早记录被挤出，完整历史见「历史命中」`
               : ''}
           </span>
         </span>
+        <span className="ph-tag">Live Feed</span>
         {badge}
       </div>
       {props.error != null && (
         <ErrorBar
-          message={`最近命中读取失败：${props.error} · 已有 ${hits.length} 条仍显示`}
+          message={`实时命中读取失败：${props.error} · 已有 ${hits.length} 条仍显示`}
           onRetry={props.onRetry}
         />
       )}
       <div
-        className="hit-scroll"
+        className={`feed${props.active !== false ? ' is-live' : ''}`}
         ref={scrollRef}
         tabIndex={0}
-        aria-label="最近命中列表：j/k 或上下键移动，Enter 打开原帖，1/2 投反馈"
+        aria-label="实时命中流：j/k 或上下键移动，Enter 打开命中详情，1/2 投反馈"
         onScroll={handleScroll}
         onKeyDown={handleKeyDown}
         onPointerDown={() => {
@@ -228,17 +299,23 @@ export function HitList(props: {
             />
           )
         ) : (
-          visible.map((hit, i) => (
-            <HitRow
-              key={hitRowKey(hit)}
-              hit={hit}
-              index={i}
-              time={formatClock(hit.notifiedAt ?? hit.topic.lastActiveAt)}
-              selected={i === selIdx}
-              onRowPointerDown={() => setSelIdx(i)}
-              onPushErrorClick={props.onPushErrorClick}
-            />
-          ))
+          visible.map((hit, i) => {
+            const key = hitRowKey(hit)
+            return (
+              <HitRow
+                key={key}
+                hit={hit}
+                variant="feed"
+                fresh={isFresh(key)}
+                index={i}
+                time={formatClock(hit.notifiedAt ?? hit.topic.lastActiveAt)}
+                timeTitle={hit.notifiedAt ?? hit.topic.lastActiveAt ?? undefined}
+                selected={i === selIdx}
+                onRowPointerDown={() => setSelIdx(i)}
+                onPushErrorClick={props.onPushErrorClick}
+              />
+            )
+          })
         )}
       </div>
     </section>

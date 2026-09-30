@@ -1,17 +1,27 @@
 /**
- * 全局样式：明亮大气桌面工具风（R12「霁蓝平台」，见 theme.css 头注释与
- * design/r11/DESIGN-BRIEF.md R12 修订章节）。
+ * 全局样式（Watchtower 瞭望塔换装，design/redesign/watchtower/SPEC.md）。
  * 变量见 theme.css；全部手写，零框架、零图标库、零外部资源。
  *
  * 纪律：字号/间距/圆角/阴影一律走令牌；数字排版 tnum；
  * 交互件 120-280ms 过渡 + :focus-visible ring 常显。
+ *
+ * import 保序（SPEC §4.3）：theme → base → primitives → overlays → shell →
+ * settings-core → dashboard → events → reports → settings-monitor →
+ * settings-notify。reports.css 必须位于 primitives.css 之后——.report-tabs .btn 盖
+ * .quick .btn 的特指度依赖此序（CURRENT-UI-MAP §0）；reports 由 events.css
+ * 机械拆出（SPEC §4），两文件同时常载（跨页共用类留守 events.css）。
+ * overlays.css = 浮层底座（toast/抽屉/遮罩，步骤 E），置于 primitives 之后
+ * 即无特指度竞争；抽屉内类锚定 .drawer 作用域，与 events.css 的去向行
+ * .d-title 互不串味。
  */
 @import './theme.css';
 @import './styles/base.css';
 @import './styles/primitives.css';
+@import './styles/overlays.css';
 @import './styles/shell.css';
 @import './styles/settings-core.css';
 @import './styles/dashboard.css';
 @import './styles/events.css';
+@import './styles/reports.css';
 @import './styles/settings-monitor.css';
 @import './styles/settings-notify.css';

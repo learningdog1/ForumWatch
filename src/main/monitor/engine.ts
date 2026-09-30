@@ -39,7 +39,8 @@
  *   deps 未注入生成器 = 恒无锐评，行为与升级前完全一致。
  *
  * per-source 运行态（SourceRuntime，内存）：health / lastSuccessAt / lastError /
- * consecutiveFailures / cooldownUntilMs——同一退避曲线 computeBackoffMs（含
+ * consecutiveFailures / cooldownUntilMs / lastPollDurationMs（轮询耗时观测）——
+ * 同一退避曲线 computeBackoffMs（含
  * ChallengeError：health='challenged' 但同样进冷却，避免每轮硬撞 Cloudflare）。
  * 失败只影响该 source；持久化部分（baselineDone / totalHits / maxSeenTopicId）
  * 走 state.getFor/setFor。
@@ -240,7 +241,15 @@ export const AI_OUTAGE_ALERT_AFTER_MS = 10 * 60_000
  * 规则/语义理由/锐评（锐评在 match 时已生成，flush 直接用不再重打 LLM）。
  */
 interface DeferredHit {
-  payload: HitMessageInput & { matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall' }
+  payload: HitMessageInput & {
+    matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall'
+    /**
+     * 语义命中置信度（界面重构步骤 B）：挂起 payload 自含 flush 所需全量，
+     * score 随 reason 一起带走——flush 收口的 HitRecord.semanticScore 不因
+     * 即时/挂起两条路径而异。非语义命中恒 null（与 HitRecord 同口径）。
+     */
+    semanticScore: number | null
+  }
   /** 首次挂起时刻（epoch ms；24h 超时 prune 的基准，重试不刷新） */
   addedAt: number
   /** flush 推送失败计数；达 DEFERRED_FLUSH_MAX_ATTEMPTS 落终态出队 */
@@ -260,6 +269,7 @@ function deferredHitRecord(
     matchedKeywords: p.matchedKeywords,
     matchedBy: p.matchedBy,
     semanticReason: p.semanticReason ?? null,
+    semanticScore: p.matchedBy === 'semantic' ? (p.semanticScore ?? null) : null,
     matchedRule: p.matchedBy === 'rule' ? (p.matchedRule ?? null) : null,
     commentary: p.commentary ?? null,
     notifiedAt,
@@ -369,6 +379,12 @@ interface SourceRuntime {
   prevEffectiveNewCount: number
   /** 第 2 页补抓累计次数（DEC-8 观测面，内存：SourceStatus.page2Fetches；重启清零） */
   page2Fetches: number
+  /**
+   * 最近一次轮询耗时毫秒（界面重构步骤 B 观测面，内存：SourceStatus.
+   * lastPollDurationMs）。口径见 pollSource 计时点注释：成功抓取写入、失败清
+   * null、冷却跳过/配置层失败保留上一值；重启后 null（无历史耗时可继承）。
+   */
+  lastPollDurationMs: number | null
 }
 
 export interface EngineDeps {
@@ -482,10 +498,11 @@ export class MonitorEngine {
    * 阈值**——过闸是既成事实），直接按已判 hit 走 processHit 重试；推送成功/
    * 转静音清除；帖子滚出首页随轮末清理回收（pruneRetryMaps，F5）。与
    * pendingNotifyErrors 是两套机制：后者是全部命中共用的「失败原因去重 emit」
-   * 表，前者只服务语义档的 verdict 复用。缓存值只存 reason：重试路径不读
-   * score（不再过闸），无需保存。
+   * 表，前者只服务语义档的 verdict 复用。缓存值存 reason 与 score：score 在
+   * 重试路径不过闸（过闸是既成事实），仅为重试轮 HitRecord.semanticScore 的
+   * 透传保真而保存（界面重构步骤 B）。
    */
-  private readonly semanticVerdicts = new Map<string, { reason: string | null }>()
+  private readonly semanticVerdicts = new Map<string, { reason: string | null; score: number | null }>()
   /**
    * 免打扰/digest 挂起队列（R6-W1q，DEC-11）：全局去重键 → DeferredHit。
    * 挂起帖**不入 seen**（坑6：入了会被下轮当旧帖/已处理吞掉）、不 recordHit
@@ -799,7 +816,20 @@ export class MonitorEngine {
     // 内部失败也计——观测的是"补抓被触发"这个引擎侧事实）。
     const wantPage2 =
       rt.prevEffectiveNewCount >= PAGE2_TRIGGER_EFFECTIVE_NEW && rt.health === 'ok'
-    const topics = await adapter.fetchLatest({ pages: wantPage2 ? 2 : 1 })
+    // 轮询耗时计时（界面重构步骤 B，SourceStatus.lastPollDurationMs）：每次抓取
+    // 前后取可注入时钟差，只计 adapter.fetchLatest 网络抓取本身（AI 评估/推送等
+    // 管线耗时与"轮询快慢"无关）。口径：成功写入 rt.lastPollDurationMs（钳非负
+    // 防时钟回拨）；抓取失败清 null（无有效耗时，防陈旧值冒充最新观测——失败态
+    // 由 lastError 呈现）；冷却跳过/配置层失败的轮次不触碰（保留上一值）。
+    const fetchStartMs = this.now()
+    let topics: Topic[]
+    try {
+      topics = await adapter.fetchLatest({ pages: wantPage2 ? 2 : 1 })
+    } catch (err) {
+      rt.lastPollDurationMs = null
+      throw err
+    }
+    rt.lastPollDurationMs = Math.max(0, this.now() - fetchStartMs)
     if (wantPage2) rt.page2Fetches++
 
     // sourceId 盖章（处理前）：adapter 不感知来源归属（D2/D3）
@@ -990,6 +1020,7 @@ export class MonitorEngine {
             cfg,
             'rule',
             null,
+            null,
             ruleMatch.label,
             ruleMatch.ruleId
           )
@@ -1024,7 +1055,7 @@ export class MonitorEngine {
       if (semanticActive) {
         const cachedVerdict = this.semanticVerdicts.get(key)
         if (cachedVerdict !== undefined) {
-          await this.processHit(topic, [], cfg, 'semantic', cachedVerdict.reason)
+          await this.processHit(topic, [], cfg, 'semantic', cachedVerdict.reason, cachedVerdict.score)
           continue
         }
         aiPending.push(topic)
@@ -1178,7 +1209,7 @@ export class MonitorEngine {
           }
           this.semanticUndecidedSince.delete(seenKeyFor(sourceId, topic.id)) // 裁决落定：清计时
           if (verdict.hit && verdict.score >= semanticThreshold) {
-            await this.processHit(topic, [], cfg, 'semantic', verdict.reason)
+            await this.processHit(topic, [], cfg, 'semantic', verdict.reason, verdict.score)
           } else {
             // hit=false，或 hit=true 但置信度 < semanticThreshold（R5-P2b）：
             // 都按不相关处理——入 seen 不再重评、不推送、语义理由不写任何记录。
@@ -1355,7 +1386,8 @@ export class MonitorEngine {
         prevUnseenKeys: new Set(),
         lastPageMaxId: null,
         prevEffectiveNewCount: 0,
-        page2Fetches: 0
+        page2Fetches: 0,
+        lastPollDurationMs: null
       }
       this.runtimes.set(sourceId, rt)
       this.status.totalHits += this.deps.state.getFor(sourceId).totalHits
@@ -1475,7 +1507,9 @@ export class MonitorEngine {
         cooldownUntil:
           rt.cooldownUntilMs === null ? null : new Date(rt.cooldownUntilMs).toISOString(),
         // R5-P2a / DEC-8：第 2 页补抓累计（内存；旧快照读者容忍缺失，这里恒下发）
-        page2Fetches: rt.page2Fetches
+        page2Fetches: rt.page2Fetches,
+        // 界面重构步骤 B：最近一次轮询耗时（内存；旧快照读者容忍缺失，这里恒下发）
+        lastPollDurationMs: rt.lastPollDurationMs
       })
       if (HEALTH_SEVERITY[rt.health] > HEALTH_SEVERITY[health]) health = rt.health
       consecutiveFailures = Math.max(consecutiveFailures, rt.consecutiveFailures)
@@ -1698,6 +1732,9 @@ export class MonitorEngine {
    * 规则管线，matchedKeywords 恒空数组，matchedRule 带规则 label——id 无 label
    * 时即 id，rules.ts 的 RuleMatch.label 已归一；matchedRuleId 带规则 id，供
    * router 的 when.ruleId 路由用——两字段同源同生，label ≠ id 时路由只认 id）。
+   * semanticScore（界面重构步骤 B）：仅 semantic 命中透传 SemanticVerdict.score
+   * （0-1 置信度，观测字段——路由/阈值都不读它，闸在 evaluateSemantic 已过）；
+   * 其余命中方式恒 null。随 HitRecord.semanticScore 落盘、进挂起 payload。
    * commentary：sendHit 之前生成（无论推送是否会被静音——HitRecord/内存环仍要
    * 展示）；恒 string|null，不留 undefined、不写空串（见 maybeGenerateCommentary）。
    * 相似降噪闸在锐评生成**之前**（吞并的帖子不打 LLM、不白耗调用）。
@@ -1708,6 +1745,7 @@ export class MonitorEngine {
     cfg: AppConfig,
     matchedBy: 'literal' | 'semantic' | 'rule' | 'matchall' = 'literal',
     semanticReason: string | null = null,
+    semanticScore: number | null = null,
     matchedRule: string | null = null,
     matchedRuleId: string | null = null
   ): Promise<void> {
@@ -1782,6 +1820,7 @@ export class MonitorEngine {
             matchedRule: matchedBy === 'rule' ? matchedRule : null,
             matchedRuleId: matchedBy === 'rule' ? matchedRuleId : null,
             semanticReason,
+            semanticScore: matchedBy === 'semantic' ? semanticScore : null,
             matchedBy
           },
           addedAt: deferNow,
@@ -1831,12 +1870,13 @@ export class MonitorEngine {
         return
       }
       // 语义命中额外缓存 verdict（D4 坑⑥，F2）：下轮绕过 AI 批直接重试本判定
-      if (matchedBy === 'semantic') this.semanticVerdicts.set(key, { reason: semanticReason })
+      if (matchedBy === 'semantic') this.semanticVerdicts.set(key, { reason: semanticReason, score: semanticScore })
       const hit: HitRecord = {
         topic,
         matchedKeywords,
         matchedBy,
         semanticReason,
+        semanticScore: matchedBy === 'semantic' ? semanticScore : null,
         matchedRule: matchedBy === 'rule' ? matchedRule : null,
         commentary,
         notifiedAt: null,
@@ -1867,6 +1907,7 @@ export class MonitorEngine {
       matchedKeywords,
       matchedBy,
       semanticReason,
+      semanticScore: matchedBy === 'semantic' ? semanticScore : null,
       matchedRule: matchedBy === 'rule' ? matchedRule : null,
       commentary,
       notifiedAt,

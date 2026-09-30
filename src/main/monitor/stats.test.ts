@@ -48,6 +48,7 @@ describe('computeStats（R7-W3 统计面板聚合）', () => {
     const r = computeStats([], { includeKeywords: ['vps', '香港', 'Mega'] })
     expect(r.total).toBe(0)
     expect(r.byDay).toEqual([])
+    expect(r.pushedByDay).toEqual([])
     expect(r.byMatchedBy).toEqual({ literal: 0, semantic: 0, rule: 0, matchall: 0 })
     expect(r.bySource).toEqual([])
     expect(r.pushFailRate).toBe(0)
@@ -109,6 +110,46 @@ describe('computeStats（R7-W3 统计面板聚合）', () => {
     )
     expect(r.total).toBe(3)
     expect(r.byDay).toEqual([
+      { date: '2026-09-18', count: 1 },
+      { date: '2026-09-17', count: 1 }
+    ])
+  })
+
+  it('pushedByDay：同日混合（成功/失败/静音）只计推送成功；notifiedAt 非空但 notifyError 非空也不算', () => {
+    const r = computeStats(
+      [
+        // 推送成功 ×2；a 的 lastActiveAt 在另一天——日期按 notifiedAt（推送时间）归日
+        hit({ id: 'a', notifiedAt: '2026-09-18T10:00:00', lastActiveAt: '2026-09-10T12:00:00' }),
+        hit({ id: 'b', notifiedAt: '2026-09-18T11:30:00' }),
+        // 推送失败（引擎失败路径形状：notifiedAt=null + notifyError 非空）
+        hit({ id: 'c', notifiedAt: null, notifyError: 'telegram: timeout', lastActiveAt: '2026-09-18T12:00:00' }),
+        // 防御形状：notifyError 非空时即便 notifiedAt 非空也不算成功
+        hit({ id: 'd', notifiedAt: '2026-09-18T12:30:00', notifyError: 'bark: 404' }),
+        // 静音：notifiedAt=null（按 lastActiveAt 归日进 byDay，但不进 pushedByDay）
+        hit({ id: 'e', notifiedAt: null, lastActiveAt: '2026-09-18T12:00:00' })
+      ],
+      { includeKeywords: [] }
+    )
+    expect(r.byDay).toEqual([{ date: '2026-09-18', count: 5 }])
+    expect(r.pushedByDay).toEqual([{ date: '2026-09-18', count: 2 }])
+  })
+
+  it('pushedByDay：零推送日不占位（有命中但无成功推送的日期缺席）、新→旧排序', () => {
+    const r = computeStats(
+      [
+        // 09-16：有命中、全部静音 → byDay 有、pushedByDay 无
+        hit({ id: 'a', notifiedAt: null, lastActiveAt: '2026-09-16T12:00:00' }),
+        hit({ id: 'b', notifiedAt: '2026-09-18T09:00:00' }),
+        hit({ id: 'c', notifiedAt: '2026-09-17T09:00:00' })
+      ],
+      { includeKeywords: [] }
+    )
+    expect(r.byDay).toEqual([
+      { date: '2026-09-18', count: 1 },
+      { date: '2026-09-17', count: 1 },
+      { date: '2026-09-16', count: 1 }
+    ])
+    expect(r.pushedByDay).toEqual([
       { date: '2026-09-18', count: 1 },
       { date: '2026-09-17', count: 1 }
     ])

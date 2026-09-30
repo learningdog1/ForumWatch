@@ -15,6 +15,8 @@ import { formatClock } from '../lib/time'
 interface PageHeaderProps {
   /** 页题（h1，每页唯一） */
   title: string
+  /** 眉题：页题上方的小号大写拉丁/日期标签行（概念稿 .eyebrow 形制）；不传则 DOM 与原状一致 */
+  eyebrow?: string
   /** 副题：一句话说清本页价值 */
   subtitle?: string
   /** 数据更新时间（ISO 字符串）；null=尚无数据 */
@@ -45,6 +47,9 @@ export function PageHeader(props: PageHeaderProps) {
   return (
     <header className="pagehead">
       <div className="pagehead-main">
+        {props.eyebrow != null && props.eyebrow !== '' && (
+          <div className="page-eyebrow">{props.eyebrow}</div>
+        )}
         <h1 className="page-title">{props.title}</h1>
         {props.subtitle != null && <div className="page-subtitle">{props.subtitle}</div>}
         {updatedAt != null && updatedAt !== '' && (

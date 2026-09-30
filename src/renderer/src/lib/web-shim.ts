@@ -15,6 +15,9 @@
  *
  * 认证:服务端配了 token 时,401 会触发一次 prompt 输入并存 localStorage
  * ('fw.webToken'),此后请求带 Bearer 头、SSE 带 ?token= 查询参数。
+ *
+ * 环境标记:实际安装时在 window 打 __FW_WEB__ = true,isWebMode()/webPort()
+ * 导出给 UI 判「桌面 vs 浏览器」(UA 法在嵌入式浏览器会误判,见 Titlebar)。
  */
 import type {
   CategoryReportEvent,
@@ -286,12 +289,29 @@ export function createWebApi(): DesktopApi {
 
 /**
  * 入口副作用(main.tsx 顶部 import):浏览器环境(无 preload)安装 Web 版 api。
- * Electron 里 preload 先行装好 window.api → 本函数 no-op。
+ * Electron 里 preload 先行装好 window.api → 本函数 no-op(也不打标记)。
+ * 实际安装时在 window 打 __FW_WEB__ 标记,供 isWebMode() 判「桌面 vs 浏览器」。
  */
 export function installWebApiIfAbsent(): void {
   if (typeof window === 'undefined') return
-  const w = window as { api?: DesktopApi }
+  const w = window as { api?: DesktopApi; __FW_WEB__?: boolean }
   if (w.api === undefined) {
     w.api = createWebApi()
+    w.__FW_WEB__ = true
   }
+}
+
+/**
+ * 是否 web-shim 浏览器模式:读安装标记。必须渲染时现读、不能缓存模块级值——
+ * 安装发生在 main.tsx render 前,但组件模块的 import 早于安装执行,模块级
+ * 求值只会读到安装前的 false。(不用 UA 判:嵌入式浏览器宿主是 Electron 应用
+ * 时 UA 继承宿主的 'Electron/' 令牌,会把浏览器误判成桌面。)
+ */
+export function isWebMode(): boolean {
+  return (window as { __FW_WEB__?: boolean }).__FW_WEB__ === true
+}
+
+/** 浏览器模式下的访问端口(location.port);默认端口(80/443)为 '',归一 null(不拼假端口) */
+export function webPort(): string | null {
+  return location.port !== '' ? location.port : null
 }

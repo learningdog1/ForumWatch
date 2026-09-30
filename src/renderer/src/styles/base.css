@@ -1,7 +1,7 @@
-/* 基础层（R12 霁蓝平台）：reset / body 排版 / 全局焦点环 / 滚动条 / sr-only /
-   reduced-motion。令牌见 theme.css；组件零硬编码色值（一切实底色块文字走
-   --color-on-primary/--on-danger）。R12：亮轨取代墨轨——侧栏不再反色，
-   body/输入/浮层令牌统一自适应两套表面。 */
+/* 基础层（Watchtower 瞭望塔换装）：reset / body 排版 / 全局焦点环 / 滚动条 /
+   sr-only / reduced-motion。令牌见 theme.css；组件零硬编码色值（一切实底色块
+   文字走 --color-on-primary/--on-danger）。body/输入/浮层令牌统一随
+   data-theme 双主题换相（深色基线 + 浅色覆盖，theme.ts 管理）。 */
 
 * {
   box-sizing: border-box;
@@ -34,9 +34,9 @@ textarea,
   user-select: text;
 }
 
-/* 微交互：键盘焦点环常显（纪律继承：2px 环 offset 2px，浅 #1D4ED8 / 暗 #7FB2F8
-   ——即 var(--ring) 两模式实测 ≥6:1；输入类控件有自己的 focus 样式不叠加。
-   R12：亮轨不再需要反色焦点环，.sidebar 覆盖移除——rail-bar 与 ring 同相位） */
+/* 微交互：键盘焦点环常显（纪律继承：2px 环 offset 2px）——var(--ring) 衍生自
+   --focus-ring = accent（深 9.25 / 浅 5.13，SPEC §2 修正④）；输入类控件有
+   自己的 focus 样式不叠加 */
 :focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
@@ -46,16 +46,24 @@ textarea,
   outline: none;
 }
 
+/* 滚动条（概念稿配方）：细条观感 = 2px 透明边 + content-box 裁切；thumb 走
+   表面阶梯（surface-3 / hover surface-hi，装饰档豁免见 theme.css 头注）；
+   轨道透明 */
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb);
-  border-radius: 5px;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--text-3) 65%, transparent);
+  background: var(--surface-hi);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 ::-webkit-scrollbar-corner {
   background: transparent;

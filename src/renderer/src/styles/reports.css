@@ -1,0 +1,628 @@
+/* 日报域（reports）：由 events.css 机械拆出（Watchtower SPEC §4；拆分提交零改写，
+   值调整/换装全部属后续日报域阶段，SPEC §5.3）。
+   依赖登记（SPEC §4.3）：
+   ① 本文件为 events.css 日报页段逐字搬移，未改写任何规则值；唯一新增是本头注释；
+   ② keyframes 依赖 btn-spin（primitives.css）/ fade-in（base.css），本文件无自有
+      keyframes；
+   ③ 留守依赖：.card-grow > .errorbar / .list-dim / .disp-loading 仍在 events.css
+      （跨页共用，两文件同时在载即继续生效）；
+   ④ .disp-link 本体在 events.css（三页共用：DispositionRow/History/ReportDoc；
+      本文件只有复合选择器 .doc-trunc .disp-link）。
+   引入顺序约束：本文件必须在 primitives.css 之后引入（global.css 已登记）——
+   .report-tabs .btn 盖 .quick .btn 的特指度依赖此序（CURRENT-UI-MAP §0）。
+   窄屏段为 events.css 720px 块中日报规则的独立成块搬移（SPEC §4.2-B；
+   .chart-row/.rank-cols 两条归属见 events.css 留守段，.substatus 已迁回
+   dashboard.css 单份——终审双定义清理）。
+   ── 瞭望塔换装 · 日报域阶段（SPEC §5.3；拆分提交零改写之后的第二阶段）──
+   值调整记录：
+   ① .report-title → 衬线授权位 2：--font-display + 600（700 只授权 KPI 大数字）；
+   ② .report-tabs / .report-rail 浮条：surface 底 + border + shadow-md（替
+      shadow-sm / shadow-sm+edge-top 组合）；
+   ③ 选中与 hover 全面转概念色阶语言：新增 .report-tabs .btn.active 覆写、
+      .report-date hover=surface-hi / 压下=rail-press / 选中=surface-3（hover/
+      选中均携 --text-3 升档 remap，SPEC §3.4——faint 禁落 surface-3/surface-hi）；
+   ④ .report-head 头带清除（对齐共享层 .card-head「无头带、层次交给底线」裁决）；
+   ⑤ .tpl-cat 中性化（surface-2 + fg）、.doc-chip hover=surface-hi+fg、
+      .doc-link → accent-text（hover fg + 实下划线）、列表符 → accent、
+      .report-newver hover/压下中性化；
+   ⑥ 原「暗域复测护栏」块（自 events.css:1382-1398 随迁）整体删除（SPEC §5.3-9）：
+      三条规则的目标态（.tpl-cat 中性、.doc-chip:hover surface-hi+fg、
+      .report-newver:hover）在新 token 体系下天然达标；其算式按 R12 azure wash
+      实算（wash 底上 azure 文字 ≈4.35 <4.5），azure 体系退役后已失效，留此存档。 */
+/* ── 日报页（reports.md：日期栏 + 日报卡）────────────────────────── */
+
+.page-reports {
+  display: grid;
+  /* R12 呼吸档：日期栏 148→172（12 圆角行内距后日期文案不再挤） */
+  grid-template-columns: 172px minmax(0, 1fr);
+  /* 行轨三行（R17 加档位 tab）：页头行 + tab 行自然高 + 内容行吃满剩余 */
+  grid-template-rows: auto auto 1fr;
+  gap: var(--space-xl);
+  align-items: stretch;
+  min-height: 100%;
+  width: 100%;
+  margin: 0 auto;
+}
+/* 页级页头横跨两列（§B-2）：日报页页题是「日报」，日期归卡头。
+   grid-row:1 显式锚定页头在 tab 行之上（tab 在 DOM 里先于各 pane 的 PageHeader
+   出现，自动放置会把 tab 排到页头上方——显式行号同时修正窄屏单列堆叠序） */
+.page-reports .pagehead {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+/* 档位 tab 行（R17 分类阶段报告）：横跨两列的页级分段选择（.quick 共享
+   chip 语言；选中档覆写见下），浮条 = surface 底 + border + shadow-md */
+.report-tabs {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  align-self: start;
+  padding: var(--space-xs);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-md);
+}
+.report-tabs .btn {
+  min-height: 32px; /* 回 md 档：页级分段比 quick 预设行重一档 */
+  padding: 6px 14px;
+  font-size: var(--fs-13);
+}
+/* 选中档（SPEC §5.3-3，概念 chip.on）：surface-3 色阶 + fg。与共享层
+   .quick .btn.active 同特指度 (0,3,0)，靠本文件在 primitives.css 之后引入
+   的顺序胜出——同上条 .report-tabs .btn 的既有手法 */
+.report-tabs .btn.active {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+/* 档期栏空态（一期都没有）：弱化占位行，非可点 */
+.report-rail-empty {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* Zone A · 日期栏：今天恒置顶 + 全部历史（展开后栏内自身滚动）+ 跳到日期。
+   浮条语言（SPEC §5.3-2）：surface 底 + 1px border + shadow-md 扩散影 */
+.report-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-md);
+}
+.report-rail-title {
+  padding: var(--space-xs) var(--space-md) var(--space-sm);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-3);
+}
+/* 日期列表读失败（§2.6-2）：错误行替代「更早」区域的位置 */
+.report-rail > .errorbar {
+  margin: var(--space-xs) 0;
+}
+/* 展开更早后栏内滚动（独立导航列，非嵌套内容区——reports.md §4.1） */
+.report-rail-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+/* 行高 44px 红线：日期行是第三套导航，同样达标 */
+.report-date {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  min-height: var(--hit);
+  padding: 8px var(--space-md);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-13);
+  font-weight: 500; /* R12 副题也是内容：日期行 12/400 → 13/500（与主 nav 同档） */
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.report-date .label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: var(--r-pill);
+  transition:
+    background-color var(--t-base) var(--ease-std),
+    color var(--t-base) var(--ease-std);
+}
+.report-date .sub {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.report-date:hover {
+  background: var(--surface-hi);
+  color: var(--fg);
+  --text-3: var(--text-2); /* §3.4-1 hover 升档：.sub 元信息随行提亮（faint on surface-hi <4.5） */
+}
+.report-date:active {
+  background: var(--rail-press); /* 压下档与侧栏 nav 同语言（日期行=第三套导航） */
+}
+/* 选中态（SPEC §5.3-4）：行底 surface-3 色阶定位 + 实底 accent 圆片
+   （--btn-primary-bg 衍生）+ 字 accent-ink（深 9.18 / 浅 5.05）；
+   --text-3 升档 remap：faint 落 surface-3 属禁区（§3.4-2，.row-selected 同手法） */
+.report-date.active {
+  background: var(--surface-3);
+  color: var(--color-foreground);
+  font-weight: 600;
+  --text-3: var(--text-2);
+}
+.report-date.active .label {
+  background: var(--btn-primary-bg);
+  color: var(--color-on-primary);
+  padding: 2px var(--space-lg);
+}
+.report-date.active:hover {
+  color: var(--color-foreground);
+}
+/* 「跳到日期」选中了无日报日：临时插入行，描边区分（reports.md §4.1） */
+.report-date.noreport {
+  border: 1px dashed var(--line);
+}
+.report-rail-sep {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md) var(--space-xs);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.report-rail-more {
+  flex: none;
+  margin: var(--space-sm) var(--space-xs) 0;
+}
+.report-rail-jump {
+  flex: none;
+  flex-wrap: wrap; /* 栏宽 172 放不下「图标+文案+完整日期」同行，date 不足即换行独占 */
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-xs) 0;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.report-rail-jump svg {
+  flex: none;
+}
+.report-rail-jump .input {
+  /* 硬性下限：窄栏宁可整框换行，不允许把 YYYY/MM/DD 截成缺年份（视觉比对 04 屏 low 项） */
+  min-width: 128px;
+  flex: 1 1 128px;
+  padding: 2px var(--space-sm);
+}
+
+/* Zone B1 · 卡头：两级标题（日题 display 档 + 元信息行）+ 操作组；
+   页面身份（h1「日报」）上提 PageHeader，日期只是「这张卡的标题」（§B-2） */
+.report-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+}
+.report-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  /* R12 内距升档：与 primitives 卡头同 12/24 呼吸 */
+  padding: var(--space-lg) var(--space-2xl);
+  border-bottom: 1px solid var(--line);
+  /* 无头带（对齐共享层 .card-head 裁决，概念 panel-h）：层次交给底线 */
+  background: transparent;
+  border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0;
+}
+.report-head-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+.report-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+/* 卡头日题：衬线授权位 2（SPEC §2.7/§5.3-1）——--font-display + 600
+   （serif 视觉重量足够；700 只授权 KPI 大数字），22/lh-display/ls-display 不变 */
+.report-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  line-height: var(--lh-display);
+  letter-spacing: var(--ls-display);
+  color: var(--fg);
+}
+.report-busy {
+  flex: none;
+  color: var(--text-3);
+}
+.report-busy svg {
+  display: block;
+  animation: btn-spin 0.9s linear infinite;
+}
+.report-summary {
+  flex: none;
+  padding: 0 var(--space-md);
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  white-space: nowrap;
+}
+.report-summary.muted {
+  color: var(--text-3);
+}
+.report-meta {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+/* 「可能不完整」元信息：点击滚到文末截断提示行（§5.4 完整性） */
+button.report-meta {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（§C-6）：弱化档的加深档 = fg，下划线转实线 */
+button.report-meta:hover {
+  color: var(--fg);
+  text-decoration-style: solid;
+}
+.report-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+/* 重新生成行内确认条（全应用唯一确认场景，§2.5；替换卡头元信息行显示）。
+   落面禁区（§3.4-2）：容器底 warn-chip 是语义 12% wash，.esc-hint 12px 小字
+   走 faint 深色实算 3.96 <4.5（浅 4.70 过）——同选择器就地 remap
+   --text-3 → text-2（.row-selected 同款手法）：muted on wash 深 5.40 /
+   浅 6.08 ✓（本 session python 复算，§7.2） */
+.report-confirm {
+  --text-3: var(--text-2); /* 局部 remap：.esc-hint 升档落到达标档 */
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  font-size: var(--fs-13);
+  animation: fade-in var(--t-base) var(--ease-out);
+}
+.report-confirm .esc-hint {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* 文档版活列表角标（§3.2）：一次性淡入，点击/回顶并入；glide 档；
+   常态 ok 弱底徽条（新版=成功信号），hover 收进品牌 wash 语言 */
+.report-newver {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-md) var(--space-2xl) 0;
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: var(--r-ctl);
+  background: var(--ok-chip);
+  color: var(--ok-text);
+  font: inherit;
+  font-size: var(--fs-13);
+  cursor: pointer;
+  animation: fade-in var(--t-glide) var(--ease-out);
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+/* hover 中性化（SPEC §5.3-10，替品牌 wash hover）：surface-hi + fg；
+   边框随标准 hover 档（常态 ok 35% 边保留在上方基础规则里） */
+.report-newver:hover {
+  background: var(--surface-hi);
+  border-color: var(--border-hover);
+  color: var(--fg);
+}
+.report-newver:active {
+  background: var(--surface-3); /* 压下档 = 色阶提一档（chip.on 同源） */
+}
+
+/* 生成反馈（行内三态，§2.3） */
+.report-feedback {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-2xl) 0;
+}
+.report-feedback svg {
+  flex: none;
+}
+.report-feedback .btn {
+  min-height: 28px; /* sm 档（行内反馈恢复路径） */
+  padding: 3px 10px;
+  font-size: var(--fs-12);
+}
+
+/* Zone B3 · 正文阅读区：滚动容器（横向留白在容器，纵向留白在 .doc——
+   让分组 chips 粘顶不透内容，reports.md §3.4-2） */
+.report-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-3xl);
+  outline: none;
+}
+.report-body > .empty {
+  padding: var(--space-3xl) 0;
+}
+
+/* 日报正文（ReportDoc 渲染）：全应用唯一「松」区（R12.4）——
+   doc 列 560→640px 更从容 · 正文 14px · 行高 1.7（检索 ux：body line-height 1.5–1.75） */
+.doc {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--space-2xl) 0 var(--space-3xl);
+  font-size: var(--fs-14);
+  line-height: var(--lh-read);
+}
+/* 小节题：字阶目标值 16（§1.5 落定），组前距拉松成「章节感」 */
+.doc-h2 {
+  margin: var(--space-3xl) 0 var(--space-md);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--fg);
+  line-height: var(--lh-tight);
+  scroll-margin-top: var(--hit); /* 分组 chip 定位时让出粘性条 */
+}
+.doc-h2:first-of-type {
+  margin-top: var(--space-xl);
+}
+.doc-h3 {
+  margin: var(--space-xl) 0 var(--space-sm);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-2);
+  line-height: var(--lh-tight);
+}
+.doc-p {
+  margin: 0 0 var(--space-lg);
+  font-size: var(--fs-14);
+  color: var(--text-2);
+  line-height: var(--lh-read);
+  text-wrap: pretty;
+}
+.doc-list {
+  margin: 0 0 var(--space-lg);
+  padding-left: var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.doc-list li {
+  font-size: var(--fs-14);
+  color: var(--text-2);
+  line-height: var(--lh-read);
+  overflow-wrap: anywhere;
+}
+/* 列表符号：琥珀信号档（SPEC §5.3-5；图形用实算：深 on surface 9.25 / 浅 5.13） */
+.doc-list li::marker {
+  color: var(--accent);
+}
+.doc strong {
+  font-weight: 600;
+  color: var(--fg);
+}
+/* 行内代码：mono + 弱底（chip-bg 口径）+ 功能分隔描边 */
+.doc-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  background: var(--card-alt);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+/* 链接：琥珀强调文字档 --accent-text（浅色中性 wash 场景 5.28 ✓，SPEC §5.3-8）
+   + 点状下划线；域名白名单在主进程裁决，被拒时正下方提示 */
+.doc-link-wrap {
+  position: relative;
+  display: inline-block;
+}
+.doc-link {
+  color: var(--accent-text);
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease-std);
+}
+/* hover 增强式（§C-6 同方向）：琥珀链加深至 fg + 下划线转实线 */
+.doc-link:hover {
+  color: var(--fg);
+  text-decoration-style: solid;
+}
+.doc-link-hint {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 2;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  color: var(--err-text);
+}
+/* 尾注弱化（§5.3-2）：fs-12 灰 + 上边框分隔；「—— 」前缀由伪元素补回 */
+.doc-note {
+  margin-top: var(--space-2xl);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  line-height: var(--lh-base);
+}
+.doc-note::before {
+  content: '—— ';
+}
+/* 模板行结构化（§3.2：同 wash 语言）：时间 mono+tnum / 分类 wash chip / 标题 / 方式灰 */
+.tpl-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+.tpl-time {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  flex: none;
+}
+.tpl-cat {
+  display: inline-block;
+  padding: 0 var(--space-lg);
+  border-radius: var(--r-pill);
+  background: var(--surface-2); /* 中性化（SPEC §5.3-6）：分类是内容不是品牌信号 */
+  color: var(--fg);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  white-space: nowrap;
+  flex: none;
+}
+.tpl-title {
+  min-width: 0;
+  color: var(--fg);
+}
+.tpl-how,
+.tpl-remark {
+  color: var(--text-3);
+  font-size: var(--fs-12);
+}
+/* 分组导航 chips（块数 > 24 时，§3.4-2）：粘性一行、横向滚动 */
+.doc-chips {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: var(--space-sm);
+  overflow-x: auto;
+  padding: var(--space-sm) 0;
+  margin-bottom: var(--space-md);
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.doc-chip {
+  flex: none;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px var(--space-md);
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--mute-chip);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.doc-chip:hover {
+  background: var(--surface-hi); /* SPEC §5.3-7：中性 hover（替品牌 wash） */
+  color: var(--fg);
+}
+.doc-chip:active {
+  background: var(--surface-3); /* 压下档 = 色阶提一档（chip.on 同源） */
+}
+/* 截断提示（§3.4-3）：warn 语义但非错误——中性灰 + 虚线框，附「查看该日命中明细」深链 */
+.doc-trunc {
+  margin-top: var(--space-2xl);
+  padding: var(--space-md);
+  border: 1px dashed color-mix(in srgb, var(--warn) 55%, transparent);
+  border-radius: var(--r-ctl);
+  background: var(--warn-chip);
+  color: var(--warn-text);
+  font-size: var(--fs-12);
+  line-height: var(--lh-read);
+}
+.doc-trunc .disp-link {
+  min-height: 0;
+  font-size: var(--fs-12);
+  margin-left: var(--space-xs);
+  color: inherit;
+}
+/* 大数据量：屏外块跳过布局与绘制（千行模板日报滚动与百行无异，§3.4-1） */
+.cv-block {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 32px;
+}
+.cv-block-list {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 400px;
+}
+
+@media (max-width: 720px) {
+  .page-reports {
+    grid-template-columns: minmax(0, 1fr);
+    /* 单列堆叠后显式行轨失效，日期栏/卡片各归自然行 */
+    grid-template-rows: none;
+  }
+  .report-tabs {
+    flex-wrap: wrap; /* 四档 tab 窄屏折行，不横向溢出 */
+  }
+  .report-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .report-rail-title,
+  .report-rail-sep {
+    width: 100%;
+    border-top: 0;
+    margin: 0;
+    padding: 0 var(--space-md); /* 旧别名 --space-2 清零（同值 --space-md） */
+  }
+  .report-rail-list {
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  .report-rail-jump {
+    width: 100%;
+  }
+  .report-date {
+    width: auto;
+  }
+}

@@ -88,6 +88,23 @@ describe('sanitizeConfig', () => {
     ).toBe('telegram-only')
   })
 
+  it("closeBehavior（步骤 D）：只认 'tray' | 'quit'——合法值保留、非法回退、缺省补 tray（默认=ADR 8.4 行为不变）", () => {
+    expect(sanitizeConfig(cfg({ closeBehavior: 'tray' })).closeBehavior).toBe('tray')
+    expect(sanitizeConfig(cfg({ closeBehavior: 'quit' })).closeBehavior).toBe('quit')
+    expect(
+      sanitizeConfig(cfg({ closeBehavior: 'exit' as AppConfig['closeBehavior'] })).closeBehavior
+    ).toBe('tray')
+    expect(
+      sanitizeConfig(cfg({ closeBehavior: undefined as unknown as AppConfig['closeBehavior'] }))
+        .closeBehavior
+    ).toBe('tray')
+    expect(sanitizeConfig(cfg({ closeBehavior: null as unknown as AppConfig['closeBehavior'] }))
+      .closeBehavior).toBe('tray')
+    // 缺省（DEFAULT / 旧配置缺失）补 'tray'
+    expect(DEFAULT_APP_CONFIG.closeBehavior).toBe('tray')
+    expect(sanitizeConfig(cfg()).closeBehavior).toBe('tray')
+  })
+
   it('channels：telegram 凭据 trim、enabled 布尔化、id slug 化去重（R6-W1）', () => {
     const out = sanitizeConfig(
       cfg({
@@ -1341,6 +1358,8 @@ describe('ConfigStore', () => {
       pollIntervalSec: 30,
       proxyUrl: 'http://127.0.0.1:7890',
       proxyScope: 'all',
+      // 步骤 D：save→load 往返不丢 closeBehavior（sanitize 白名单完整性，坑4）
+      closeBehavior: 'quit',
       channels: [{ id: 'telegram', type: 'telegram', enabled: true, botToken: '111:abc', chatId: '-100200' }],
       notifyEnabled: false,
       launchAtLogin: true
@@ -1348,6 +1367,7 @@ describe('ConfigStore', () => {
     new ConfigStore(configPath).save(custom)
     const loaded = new ConfigStore(configPath).load()
     expect(loaded).toEqual(sanitizeConfig(custom))
+    expect(loaded.closeBehavior).toBe('quit')
     expect(loaded.includeKeywords).toEqual(['vps', 'nas'])
     expect(tg0(loaded.channels).chatId).toBe('-100200')
     // 盘上是带 schemaVersion 的信封

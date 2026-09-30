@@ -678,6 +678,29 @@ describe('失败与健康流转', () => {
     expect(spy).toHaveBeenLastCalledWith(60) // 配置值
   })
 
+  it('lastPollDurationMs（界面重构步骤 B）：成功轮写入抓取耗时毫秒；失败轮清 null；冷却轮保留；恢复后重写', async () => {
+    // impl 内推进假时钟，模拟耗时的成功抓取（计时口径 = fetchLatest 前后时钟差；
+    // scheduler 未 start，无挂起计时器，advance 不会误触发额外轮询）
+    const h = build({ impl: async () => { advanceMs(1500); return [topic('1')] } })
+    await h.engine.pollOnce() // 基线成功
+    expect(h.engine.getStatus().sources[0]!.lastPollDurationMs).toBe(1500)
+
+    h.fetchLatest.mockRejectedValue(new Error('network down'))
+    await h.engine.pollOnce() // 抓取失败 → 清 null（无有效耗时，防陈旧值冒充最新观测）
+    expect(h.engine.getStatus().sources[0]!.lastPollDurationMs).toBeNull()
+
+    await h.engine.pollOnce() // 冷却跳过轮：不触碰该字段 → 保留上一值（仍为 null）
+    expect(h.engine.getStatus().sources[0]!.health).toBe('backoff')
+    expect(h.engine.getStatus().sources[0]!.lastPollDurationMs).toBeNull()
+
+    advanceMs(computeBackoffMs(1, 60_000)) // 跨过冷却
+    h.fetchLatest.mockImplementation(async () => { advanceMs(200); return [topic('1')] })
+    await h.engine.pollOnce() // 恢复成功 → 重新写入本轮耗时
+    const st = h.engine.getStatus()
+    expect(st.sources[0]!.health).toBe('ok')
+    expect(st.sources[0]!.lastPollDurationMs).toBe(200)
+  })
+
   it('失败轮 seen/state 不动：去重集与 baseline 不被破坏', async () => {
     const h = build({ impl: async () => [topic('1'), topic('2')] })
     await h.engine.pollOnce() // 基线
@@ -1075,6 +1098,31 @@ describe('语义评估管线（D4）', () => {
     expect(st.ai).toMatchObject({ configured: true, effectiveMode: 'semantic', degraded: 'none', callsToday: 1 })
   })
 
+  it('semanticScore（界面重构步骤 B）：语义命中透传 verdict.score 数值；字面命中恒 null', async () => {
+    const evaluate = vi.fn(
+      async (_topics: Topic[], _interests: string[]) =>
+        new Map<string, SemanticVerdict>([['nodeseek:3', { hit: true, score: 0.87, reason: '与自建主机兴趣明确相关' }]])
+    )
+    const h = build({
+      impl: async () => [topic('1')],
+      config: { ai: aiConfig({ matchMode: 'both' }) },
+      evaluator: { evaluate }
+    })
+    await h.engine.pollOnce() // 基线
+    h.fetchLatest.mockImplementation(async () => [
+      topic('2', { title: '羊毛大促' }), // 字面命中（both：literal 先走，不进 AI 批）
+      topic('3', { title: '出手一台家用小主机' }), // 语义候选 → score 0.87 过闸（阈值 0）
+      topic('1')
+    ])
+    await h.engine.pollOnce()
+
+    const hits = h.engine.getRecentHits()
+    expect(hits.map((x) => x.topic.id)).toEqual(['2', '3']) // 推送顺序旧→新
+    // 非语义命中恒 null（旧 JSONL 数据无该字段 = 等价无，同款缺省口径）
+    expect(hits[0]).toMatchObject({ matchedBy: 'literal', semanticScore: null })
+    expect(hits[1]).toMatchObject({ matchedBy: 'semantic', semanticScore: 0.87 }) // score 透传
+  })
+
   it('verdict hit:false：入 seen（与字面未命中同待遇），下轮不再重评', async () => {
     const evaluate = vi.fn(
       async (_topics: Topic[], _interests: string[]) =>
@@ -1330,6 +1378,7 @@ describe('语义命中推送失败的 verdict 缓存（D4 坑⑥ / F2）与轮�
       matchedBy: 'semantic',
       matchedKeywords: [],
       semanticReason: '与自建主机相关', // 缓存的 reason 透传
+      semanticScore: 1, // 缓存的 score 同样透传（界面重构步骤 B），不因重试轮丢失
       notifiedAt: expect.any(String),
       notifyError: null
     })

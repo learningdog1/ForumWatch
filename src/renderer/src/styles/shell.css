@@ -1,19 +1,104 @@
-/* ── 应用外壳（R12「霁蓝平台」§R12.2）：亮轨侧栏 + pill 导航 + 内容限宽居中 ──
-   侧栏翻亮：--rail-* 两模式与内容同向（浅=白面亮于窗底一档；暗=深灰蓝比内容
-   更深一档），「恒深墨轨」概念作废。轨内文字仍只走 rail 族色（两模式各自定义）。
-   导航选中语言 = wash pill 底 + 600 字 + 品牌色图标——左 3px 竖条语言专属数据行
-   （primitives .row-selected），两套语言分家。内容列以 --content-max 限宽居中，
+/* ── 应用外壳（Watchtower 步骤 H，SPEC §3.3 + 概念稿 titlebar/sidebar 段）──
+   外壳纵列：Titlebar（46px 宿主，darwin hiddenInset 红绿灯原生浮于其上）在上，
+   sidebar + content 的行结构包进 .shell 行容器。侧栏与内容同向（--rail-* 衍生自
+   表面阶梯：surface 底 / muted 字 / surface-hi hover / surface-3 选中 / accent
+   选中图标）；轨内文字仍只走 rail 族色。导航分组标签（概念 .ngl）+ footer 多行
+   （运行状态 / 推送通道 / 遥控命令 / 版本）。内容列以 --content-max 限宽居中，
    宽窗不吃灰、窄窗保 24px 呼吸。 */
 
 .app {
   display: flex;
+  flex-direction: column; /* Titlebar 在上，主行结构（sidebar+content）在 .shell */
   height: 100vh;
   overflow: hidden;
 }
 
+/* ━─ 标题栏（概念 .titlebar :48；darwin hiddenInset 步骤 D 已切，红绿灯原生
+   浮在本条上——本层只做 46px 宿主与 drag 区，不画假灯）━━━━━━━━━━━━━ */
+.titlebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xl);
+  height: 46px; /* 概念形制字面值（非色值，布局锁定位） */
+  padding: 0 var(--space-xl);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  /* 整条可拖拽移窗；右侧交互件容器与 chip 就地 no-drag（浏览器模式该属性
+     天然无效，不炸） */
+  -webkit-app-region: drag;
+}
+
+/* darwin 红绿灯占位：原生按钮由系统渲染，只留空间（约 70px = 3 灯 + 间距）；
+   非 darwin / 浏览器模式不渲染本节点 */
+.titlebar .t-lights {
+  flex: none;
+  width: 70px;
+}
+
+.titlebar .t-name {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  letter-spacing: 0.02em; /* 概念 .t-name 字面值（布局值，非色值） */
+  color: var(--fg);
+}
+
+.titlebar .t-sub {
+  margin-left: var(--space-sm);
+  padding-left: var(--space-xl);
+  border-left: 1px solid var(--border);
+  font-size: var(--fs-12);
+  color: var(--text-3); /* faint on surface 合法（落面禁区仅 surface-3/hover） */
+}
+
+.titlebar .t-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px; /* 概念 .t-right 字面值（先例：primitives .bar gap 10px） */
+  -webkit-app-region: no-drag;
+}
+
+/* 「Web 管理 :端口」chip（概念 .chip-mono）：仅浏览器模式（web-shim）渲染——
+   桌面进程不跑 web server，不显示假 chip。mono fs-12 + surface-2 + border +
+   4px 小件圆角（§2.8 收档，概念 6px）；muted on surface-2 深 6.35 / 浅 6.25 ✓ */
+.titlebar .t-web-chip {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: var(--space-sm) var(--space-md);
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+
+/* 运行状态 pill 的 warn/err 点档（primitives .pill-dot 只有 ok(.live)/off 两档；
+   与 deriveRunState 的 key→色映射对齐——backoff=warn / challenged=err，稳态
+   无脉冲；.titlebar 作用域 (0,2,0) 盖过 primitives (0,1,0)，不动 primitives） */
+.titlebar .pill {
+  -webkit-app-region: no-drag;
+}
+.titlebar .pill-dot.warn {
+  background: var(--warn);
+  animation: none;
+}
+.titlebar .pill-dot.err {
+  background: var(--err);
+  animation: none;
+}
+
+/* ━─ 主行容器（概念 .shell :63）：sidebar + content 原行结构整体内嵌 ━━━━━━ */
+.shell {
+  flex: 1;
+  min-height: 0; /* 高度链：.app 列 → .shell 行 → .content 列，flex 收缩不断 */
+  display: flex;
+}
+
 .sidebar {
   flex: none;
-  width: 216px; /* R12 大气档：184→216，nav 文案与图标砖留呼吸 */
+  width: 218px; /* 概念 §3.1：216→218，nav 文案与图标砖留呼吸 */
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
@@ -22,7 +107,8 @@
   border-right: 1px solid var(--rail-line);
 }
 
-/* brand 区：图标砖 + 名称/副标。砖底用轨内 wash 档，图标走品牌图形色（≥3:1） */
+/* brand 区：图标砖 + 名称/副标。概念裸 accent logo——磁贴结构保留、
+   去底去影，图标直接走 --rail-bar（=accent 琥珀） */
 .brand {
   display: flex;
   align-items: center;
@@ -40,9 +126,9 @@
   width: 36px;
   height: 36px;
   border-radius: var(--r-ctl);
-  background: var(--rail-active-bg); /* pill 同款 wash 底 */
+  background: transparent;
   color: var(--rail-bar);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
 }
 
 .brand-text {
@@ -52,7 +138,7 @@
   min-width: 0;
 }
 
-/* brand-name 16/600（700 只留给三处 display 位的纪律不变） */
+/* brand-name 16/600（700 只授权 KPI 大数字的纪律，SPEC §2.7） */
 .brand-name {
   font-weight: 600;
   font-size: var(--fs-16);
@@ -71,14 +157,25 @@
   gap: var(--space-xs);
 }
 
-/* 查看区 / 设置区的唯一分隔线 */
+/* 分组标签（概念 .ngl :69：10.5/600/大字距/faint → 字阶收敛 fs-12 + ls-label
+   micro-label 令牌——.page-eyebrow 对概念 .eyebrow(.14em) 的同款映射先例；
+   faint 走 text-3，on rail-bg(=surface) 合法） */
+.nav-group-label {
+  padding: var(--space-lg) var(--space-lg) var(--space-sm);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--text-3);
+}
+
+/* 查看区 / 设置区的唯一分隔线（保留在系统组前） */
 .nav-sep {
   margin: var(--space-md) var(--space-md);
   border-top: 1px solid var(--rail-line);
 }
 
-/* 行高 44px 红线；R12 pill 语言：正文 14/500，hover 亮面，active wash 底 +
-   600 字 + 品牌色图标（不再有左竖条——那是数据行语言） */
+/* 行高 44px 红线；pill 语言：正文 14/500，hover surface-hi 提亮，active 选中
+   surface-3 色阶 + 600 字 + 琥珀图标（概念 nav-item .on） */
 .nav-btn {
   position: relative;
   display: flex;
@@ -129,25 +226,55 @@
   background: var(--warn);
 }
 
+/* ━─ 侧栏 footer 多行（概念 .side-foot :73：运行状态 / 推送通道 / 命令 / 版本）──
+   窄行距纵列；行结构 flex + dot + ellipsis 标签 */
 .sidebar-foot {
   margin-top: auto;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--space-md);
-  padding: var(--space-lg) var(--space-md) 2px;
+  padding: var(--space-lg) var(--space-md) var(--space-sm);
   border-top: 1px solid var(--rail-line);
   color: var(--rail-fg-2);
   font-size: var(--fs-12);
+  line-height: var(--lh-tight);
   cursor: default;
 }
+
+/* ① 运行状态行（原 sidebar-foot 单行结构原样收编）与 ② 推送通道行同形 */
+.sidebar-foot-run,
+.sidebar-foot-ch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  min-width: 0;
+}
+.sidebar-foot-ch:not(.tone-ok) {
+  color: var(--text-3); /* 未配置 / 未知：faint 态（on rail-bg=surface 合法） */
+}
+
+/* ③ 遥控命令行：消费 primitives 附件层 .cmds .cmd（mono 小字 chip），此处
+   只留与上一行的微距 */
+.sidebar-foot-cmds {
+  margin-top: var(--space-xs);
+}
+
+/* ④ 版本行：faint（.num 已给 mono），两主题均成立 */
+.sidebar-foot-version {
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-foot-label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* 轨内 tone 点走 --rail-tone-*（R12 值=当模式点档，浅轨用浅档——「恒暗档」纪律
-   随墨轨一起作废；点+文字同现语义不动） */
+/* 轨内 tone 点走 --rail-tone-*（衍生自语义点档：ok/err/warn/info；
+   点+文字同现语义不动） */
 .sidebar .tone-running,
 .sidebar .tone-ok {
   --tone: var(--rail-tone-ok);

@@ -349,6 +349,14 @@ export interface StatsResult {
   total: number
   /** 有命中的日期，新→旧 */
   byDay: StatsDayCount[]
+  /**
+   * 每日已推送数，新→旧，只含有推送成功的日期（零推送日不占位；与 byDay
+   * 按 date 对齐时缺日自行补零）。口径：当日推送成功数 = notifiedAt 非空且
+   * notifyError 为空的命中（静音与失败都不算）；日期派生与 byDay 同款
+   * （notifiedAt 优先，回退 topic.lastActiveAt——推送成功的记录 notifiedAt
+   * 非空，天然按推送时间归日）。可选字段：旧 reader / web-shim 兜底值不带。
+   */
+  pushedByDay?: StatsDayCount[]
   /** 四档命中方式计数（R13-2 起 + matchall 来源级全匹配） */
   byMatchedBy: { literal: number; semantic: number; rule: number; matchall: number }
   /** 来源分布，count 降序 */

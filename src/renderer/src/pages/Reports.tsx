@@ -426,6 +426,7 @@ function HitsReportPane(props: { onGoHistory?: (date: string) => void }) {
       {/* Z0 · 页头（§B-2 页头契约）：页题 = 侧栏 label「日报」；日报是每日快照，
           stale 判定整页关闭（90s 口径是监控台的事件节奏，不适用本页） */}
       <PageHeader
+        eyebrow="Reports"
         title="日报"
         subtitle="按日汇总的命中与去向，支持重新生成与推送"
         updatedAt={loadedAt}
@@ -848,6 +849,7 @@ function CategoryReportPane(props: { kind: CategoryReportKind }) {
   return (
     <>
       <PageHeader
+        eyebrow="Reports"
         title={CATEGORY_KIND_TITLE[kind]}
         subtitle="按分类对全量话题存档的阶段性总结，支持手动生成与推送"
         updatedAt={loadedAt}

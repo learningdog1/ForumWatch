@@ -1,16 +1,18 @@
-/* 共享件层（R12 霁蓝平台 §R12.1/R12.3）：组头 / L2 实体行 / 卡片 / 空态·错误条 /
-   按钮族 / 输入族 / chip·pill / 页头 / 单选卡组 / 选中行规范类。
+/* 共享件层（Watchtower 瞭望塔换装，SPEC §3.3）：组头 / L2 实体行 / 卡片 /
+   空态·错误条 / 按钮族 / 输入族 / chip·pill / 页头 / 单选卡组 / 选中行规范类。
    样式全部引用 theme.css 令牌，零硬编码色值；一切实底色块文字只走
-   var(--color-on-primary) / var(--on-danger)。
-   交互件四态齐备：hover（颜色/阴影，不移位）· active（translateY .5px 按压反馈）·
+   var(--accent-ink)（= --color-on-primary）/ var(--on-danger)。
+   交互件四态齐备：hover（颜色，不移位）· active（translateY 1px 按压反馈）·
    :focus-visible（全局环，输入类自有样式）· 禁用（opacity .45 机制保留）。
-   R12 语言要点：圆角随令牌升 16/12；卡头/字段/实体行内边距升档；wash 上的强调
-   文字统一 --primary-text（绿让位蓝）；跨域三裁决落此文件——①.radios-card 唯一
-   定义、②.row-selected 选中行规范类、③dirty 琥珀（在 shell/settings-core）。 */
+   换装语言要点：层次靠表面阶梯 + 1px 低透明边框（卡片平面化，shadow-sm 已
+   no-op）；中性件选中/hover 走 surface-3 / surface-hi 色阶提升（wash 语言退役
+   为兼容层）；页题/组头衬线见 theme.css 头注授权位。 */
 
-/* 组头 16px > 卡题 14px > 标签 13px > hint 12px 四级节奏不变；组头与释义两行成组 */
+/* 组头 16px > 卡题 14px > 标签 13px > hint 12px 四级节奏不变；组头与释义两行成组。
+   衬线授权位 3（SPEC §2.7）：--font-display + 600，概念设置小节题的对位 */
 .group-head {
   margin: 0 0 var(--space-sm);
+  font-family: var(--font-display);
   font-size: var(--fs-16);
   font-weight: 600;
   color: var(--fg);
@@ -129,22 +131,16 @@
   inset: -10px -4px;
 }
 
-/* ── 选中行规范类（R12.3 裁决 2：键盘/鼠标「选中行」全应用统一一种语言）──
-   wash 底 + 左侧 3px 主色条 + 内衬 1px ring 弱描边，全部 box-shadow 实现不改盒模。
-   HitRow 已挂（class="hit selected row-selected"）；dashboard 的 .hit.selected 与
-   events 的 roving 行请收敛为加此类并删域内重复定义（领域上下文可继续加非语言属性）。
-   R12.6 wash 文字收口（共享层纪律）：品牌 wash 底上最低文字档 = --text-2——暗档
-   text-3 在 wash 上 3.96~4.56 不达 4.5，故本类把 --text-3 就地 remap 到 --text-2
-   （行内 var(--text-3) 的摘要/时间戳自动升档，域文件零改动）。同理一切挂
-   --primary-wash 的共享件（.radios-card 选中、.quick/.input-row .btn.active、.chip、
-   .ent-btn.active）wash 上只准 fg / text-2 / --primary-text / tone 文字档，禁
-   text-3；wash 不叠铺 --raised 浮层（raised 面的选中态用 fg/primary-text 档）。 */
+/* ── 选中行规范类（键盘/鼠标「选中行」全应用统一一种语言）──
+   概念选中 = 色阶提升 + 描边：surface-3 底 + 1px border-strong 内衬，全部
+   box-shadow 实现不改盒模。HitRow 已挂（class="hit selected row-selected"）。
+   --text-3 remap 必须保留（SPEC §3.3/§3.4 落面禁区）：faint on surface-3
+   深 4.16 / 浅 4.28 <4.5，行内 var(--text-3) 的摘要/时间戳须升档 text-2。
+   同手法适用于一切 hover 底用 surface-hi 的行容器（SPEC §3.4 规则 1）。 */
 .row-selected {
   --text-3: var(--text-2); /* 局部 remap：子元素 var(--text-3) 落到达标档 */
-  background: var(--primary-wash);
-  box-shadow:
-    inset 3px 0 0 var(--color-primary),
-    inset 0 0 0 1px color-mix(in srgb, var(--ring) 35%, transparent);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
 /* 待删除态（L1 删除不弹确认）：四件套——行底 --err-chip 红弱底（保留：待删除是
@@ -214,17 +210,17 @@
   color: var(--text-2);
 }
 
-/* ── 卡片（R12：纯白大圆角卡 + 装饰描边 + 柔和双层阴影，bento 档）── */
+/* ── 卡片（平面化：表面 + 1px 低透明边框分层；shadow-sm 已 no-op，列表语法保留）── */
 
 .card {
   flex: none;
   background: var(--card);
-  border: 1px solid var(--color-border); /* 装饰档（禁承载分隔语义的纪律继承） */
+  border: 1px solid var(--border);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-sm), var(--edge-top);
 }
 
-/* 卡头两级：极浅头带 + 功能分隔线；内距升档 20/16 */
+/* 卡头两级：无头带（概念 panel-h，层次交给底线）；内距 20/16 */
 .card-head {
   display: flex;
   align-items: center;
@@ -232,7 +228,7 @@
   gap: var(--space-md);
   padding: var(--space-lg) var(--space-2xl);
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--card-alt) 60%, transparent);
+  background: transparent;
   border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0;
 }
 
@@ -297,10 +293,11 @@
   gap: var(--space-lg);
   text-align: center;
 }
-/* 插画色 --text-3 + card-alt 圆盘底（纯装饰豁免对比度；层级弱化不走 opacity） */
+/* 插画色 muted + surface-2 圆盘底（纯装饰豁免对比度；层级弱化不走 opacity；
+   信号点 accent 由 icons.tsx IllustrationRadar 自动） */
 .empty-illus {
-  color: var(--text-3);
-  background: var(--card-alt);
+  color: var(--muted);
+  background: var(--surface-2);
   border-radius: 50%;
   padding: 18px;
 }
@@ -319,7 +316,8 @@
   margin-top: var(--space-md);
 }
 
-/* ── 操作按钮（次级卡底+功能描边；主按钮实底走令牌文字；同视图至多一个实底主按钮）── */
+/* ── 操作按钮（默认档：surface-2 底 + 装饰描边 border-strong；主按钮实底琥珀；
+   同视图至多一个实底主按钮）── */
 
 .btn {
   appearance: none;
@@ -330,8 +328,8 @@
   min-height: 32px; /* md 默认档；sm 28 / lg 40 见尺寸档 */
   padding: 6px 14px;
   border-radius: var(--r-ctl);
-  border: 1px solid var(--input-border);
-  background: var(--card);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
   color: var(--fg);
   font: inherit;
   font-weight: 500;
@@ -347,14 +345,13 @@
 .btn svg {
   flex: none;
 }
-/* hover 只走颜色+阴影，不移位不放大（纪律继承；200ms 档随 --t-base） */
+/* hover 只走颜色（surface-3 提亮一档 + border-hover），不移位不放大 */
 .btn:hover:not(:disabled) {
-  background: var(--card-alt);
-  border-color: var(--text-3);
-  box-shadow: var(--shadow-sm);
+  background: var(--surface-3);
+  border-color: var(--border-hover);
 }
 .btn:active:not(:disabled) {
-  transform: translateY(0.5px);
+  transform: translateY(1px);
   box-shadow: none;
 }
 .btn:disabled {
@@ -390,22 +387,21 @@
   animation: btn-spin 0.9s linear infinite;
 }
 
-/* 主按钮：底 --btn-primary-bg（浅 #1D4ED8 / 暗 #6BA8F5），文字一律 --color-on-primary
-   （浅=白 6.70 / 暗=深墨 7.06）——禁硬编码 white；hover 加深/提亮一档 + 阴影升 */
+/* 主按钮：实底琥珀 + accent-ink 文字 + cta 阴影（顶缘高光 + accent 辉光）；
+   hover 走 --hover-primary-bg/-fg（深色加白 / 浅色加黑，theme.css 修正⑥定向） */
 .btn-primary {
-  background: var(--btn-primary-bg);
+  background: var(--accent);
   border-color: transparent;
-  color: var(--color-on-primary);
-  box-shadow: var(--shadow-sm);
+  color: var(--accent-ink);
+  box-shadow: var(--shadow-cta);
 }
 .btn-primary:hover:not(:disabled) {
   background: var(--hover-primary-bg);
   border-color: transparent;
   color: var(--hover-primary-fg);
-  box-shadow: var(--shadow-md);
 }
 .btn-primary:active:not(:disabled) {
-  transform: translateY(0.5px);
+  transform: translateY(1px);
   box-shadow: none;
 }
 
@@ -451,17 +447,6 @@
 .feedback.muted {
   color: var(--text-3);
 }
-/* 状态卡 pill 行的操作反馈：右对齐；✓/✗ 由 SVG 图标承载（无 emoji） */
-.statuscard-head .feedback {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  text-align: right;
-}
-.statuscard-head .feedback svg {
-  flex: none;
-}
 /* 行内反馈的 [重试]（ia §5.4：错误必须带恢复路径） */
 .feedback-retry {
   border: 0;
@@ -487,8 +472,7 @@
   min-width: 0;
   overflow: hidden;
 }
-/* 命中词 chip：全应用唯一品牌透明底档 + 其上强调文字 --primary-text
-   （R12：绿让位蓝，旧「wash 上用 ok-text」写法作废） */
+/* 命中词 chip：中性化（概念 .k 普通档）——surface-3 底 + fg 字，内容不是品牌信号 */
 .chip {
   flex: none;
   max-width: 130px;
@@ -499,10 +483,10 @@
   padding: 0 7px;
   line-height: var(--lh-chip);
   border-radius: var(--r-pill);
-  background: var(--primary-wash);
-  color: var(--primary-text);
+  background: var(--surface-3);
+  color: var(--fg);
 }
-/* 来源徽标（描边幽灵样式，与分类实底 chip 区分；描边 40% 档）。跨域共享类 */
+/* 来源徽标（描边幽灵样式，与分类实底 chip 区分）。跨域共享类 */
 .src-badge {
   flex: none;
   max-width: 92px;
@@ -513,8 +497,9 @@
   padding: 0 var(--space-md);
   line-height: var(--lh-chip);
   border-radius: var(--r-pill);
-  border: 1px solid color-mix(in srgb, var(--text-3) 40%, transparent);
-  color: var(--text-2);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
 }
 
 /* ── 设置表单（字段行左标签 13/500 右控件；hint 12/text-3）──
@@ -557,13 +542,19 @@
   color: var(--warn-text);
 }
 
-/* 输入族：14px 正文 · r-ctl(12) · 内凹感 = 功能描边 + inset 阴影（值收 --inset-field） */
-.input {
+/* 输入族：14px 正文 · r-ctl(8) · surface 底 + input-border 功能边界 + inset 内凹。
+   概念紧凑档别名（.ipt 文本 / .sel 下拉 / .ta 文本域）并入本组选择器——与
+   .input 同一形制与焦点语言（accent 边 + 外环），差异仅尺寸（见下方覆盖块）；
+   三名当前零 tsx 在用，供后续页面重构按概念 34px 档直接挂载 */
+.input,
+.ipt,
+.sel,
+.ta {
   width: 100%;
   padding: 7px 12px;
   border-radius: var(--r-ctl);
   border: 1px solid var(--input-border);
-  background: var(--card);
+  background: var(--surface);
   color: var(--fg);
   font: inherit;
   font-size: var(--fs-14);
@@ -574,7 +565,10 @@
     background-color var(--t-fast) var(--ease-std),
     color var(--t-fast) var(--ease-std);
 }
-.input::placeholder {
+.input::placeholder,
+.ipt::placeholder,
+.sel::placeholder,
+.ta::placeholder {
   color: var(--text-3);
 }
 /* mono 输入（URL/JSON/时间）保持 12 档 */
@@ -586,24 +580,55 @@
 .input.num {
   font-family: var(--font-mono);
 }
-/* 输入自有 focus 语言：边框升 ring + 外环 2px（全局 :focus-visible 不叠加，见 base.css） */
+/* 输入自有 focus 语言：边框升 focus-ring（=accent）+ 外环 2px（全局 :focus-visible
+   不叠加，见 base.css）；复合可辨（SPEC §2 修正⑤）。紧凑档同名并入——
+   .ipt/.sel/.ta 聚焦时 outline:none 以 (0,2,0) 盖过 base.css 全局 :focus-visible
+   环（(0,1,0)），不双环 */
 .input:focus,
+.ipt:focus,
+.sel:focus,
+.ta:focus,
 .tags:focus-within {
   outline: none;
-  border-color: var(--ring);
+  border-color: var(--focus-ring);
   box-shadow: var(--inset-field), 0 0 0 2px color-mix(in srgb, var(--ring) 45%, transparent);
 }
-.input.invalid {
+.input.invalid,
+.ipt.invalid,
+.sel.invalid,
+.ta.invalid {
   border-color: var(--err);
 }
 /* 禁用态：底色 card-alt + 文字 text-3（不压 opacity；.input-disabled 类为既有卡侧契约） */
 .input:disabled,
+.ipt:disabled,
+.sel:disabled,
+.ta:disabled,
 .input-disabled {
   background: var(--card-alt);
   color: var(--text-3);
   border-color: color-mix(in srgb, var(--input-border) 55%, transparent);
   box-shadow: none;
   cursor: default;
+}
+
+/* 概念 34px 紧凑档尺寸覆盖（形制同 .input，仅尺寸/宽度策略不同）：
+   .ipt/.sel 定高 34px · fs-13 · 宽度 auto（由 .grow / .search-wrap / 定宽
+   工具类在布局侧控制）；.ta 文本域全宽、min-height 64px、可纵向拉拽 */
+.ipt,
+.sel {
+  width: auto;
+  height: 34px;
+  padding: 0 var(--space-lg);
+  font-size: var(--fs-13);
+}
+.ta {
+  height: auto;
+  min-height: 64px;
+  padding: var(--space-md) var(--space-lg);
+  font-size: var(--fs-13);
+  line-height: var(--lh-base);
+  resize: vertical;
 }
 
 .input-row {
@@ -638,12 +663,13 @@
   font-size: var(--fs-12);
   color: var(--text-2);
 }
-/* quick-active 与行 hover/选中/导航选中共用唯一 wash 档；文字 --primary-text */
+/* quick-active 与行 hover/选中同语言：surface-3 色阶提升 + border-hover + fg
+   （概念 chip.on；wash 选中语言退役） */
 .quick .btn.active,
 .input-row .btn.active {
-  border-color: var(--color-primary);
-  color: var(--primary-text);
-  background: var(--primary-wash);
+  border-color: var(--border-hover);
+  color: var(--fg);
+  background: var(--surface-3);
 }
 
 .radios {
@@ -743,16 +769,19 @@
   color: var(--text-2);
 }
 
-/* 开关：off 轨 mute-chip + 功能描边；on 轨 ok 绿（运行语义，不随品牌换相）；
-   圆点 var(--card)（两模式在 on/off 轨上均 ≥3:1，零硬编码）+ 细描边保可辨 */
+/* 开关（概念 §3.8）：off 轨 surface-2 + border-strong 装饰描边；on 轨 ok 26% wash
+   over surface-2 + ok 边（运行语义，不随品牌换相）；滑块 off = muted / on = fg
+   （muted 必改自旧 var(--card)——衍生 surface 后与 surface-2 轨道暗色下不可辨）；
+   细描边保可辨，零硬编码。尺寸 38×21 / 滑块 15 对齐概念原值（步骤 G 由
+   40×23 / 17 收拢；轨迹 inner 36 = 2 + 15 + 19 对称，on 位 left 19 不变） */
 .switch {
   position: relative;
   flex: none;
-  width: 40px;
-  height: 23px;
+  width: 38px;
+  height: 21px;
   border-radius: var(--r-pill);
-  border: 1px solid var(--input-border);
-  background: var(--mute-chip);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
   cursor: pointer;
   transition:
     background-color var(--t-base) var(--ease-std),
@@ -764,19 +793,20 @@
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
-  background: var(--card);
+  background: var(--muted);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-3) 30%, transparent);
   transition: left var(--t-base) var(--ease-std);
 }
 .switch[aria-checked='true'] {
-  background: var(--ok);
-  border-color: transparent;
+  background: color-mix(in srgb, var(--ok) 26%, var(--surface-2));
+  border-color: var(--ok);
 }
 .switch[aria-checked='true']::after {
   left: 19px;
+  background: var(--fg);
 }
 .switch:disabled {
   opacity: 0.45;
@@ -789,7 +819,7 @@
   gap: var(--space-md);
 }
 
-/* ── 标签输入（关键词 chip 档：mute-chip 底 + text-2；hover 出现 ✗）── */
+/* ── 标签输入（关键词 chip 档：surface-3 底 + fg，同 .chip 语言；hover 出现 ✗）── */
 
 .tags {
   display: flex;
@@ -815,8 +845,8 @@
   max-width: 240px;
   padding: 2px 4px 2px var(--space-md);
   border-radius: var(--r-pill);
-  background: var(--mute-chip);
-  color: var(--text-2);
+  background: var(--surface-3);
+  color: var(--fg);
   font-size: var(--fs-12);
 }
 .tag .label {
@@ -918,11 +948,25 @@
 .pagehead-main {
   min-width: 0;
 }
-/* 页题：全应用三处 700 display 位之一（R12 大气档）：26/700 + display 负字距 */
+/* 眉题：页题上方小号大写拉丁/日期标签（概念 .eyebrow 10.5/600/.14em/faint
+   收编——9.5-11.5→fs-12、字距落 --ls-label、faint 走 text-3 衍生名，
+   9px 间距收敛 space-md；uppercase 只作用于拉丁，与 ls-label 拉丁口径一致） */
+.page-eyebrow {
+  margin-bottom: var(--space-md);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+/* 页题：衬线授权位 1（SPEC §2.7）——font-display 600（serif 视觉重量足够，
+   700 随衬线退役）+ 26 + display 负字距；700 现只授权 KPI 大数字（mono） */
 .page-title {
   margin: 0;
+  font-family: var(--font-display);
   font-size: var(--fs-26);
-  font-weight: 700;
+  font-weight: 600;
   line-height: var(--lh-display);
   letter-spacing: var(--ls-display);
   color: var(--fg);
@@ -982,4 +1026,406 @@
   flex-basis: 100%;
   font-size: var(--fs-12);
   font-weight: 400;
+}
+
+/* ══ 附件形制类（步骤 G：概念稿工具条 / 筛选 chip / 徽标三档 / 设置行 / 规则卡 /
+   命令 chip / stat 卡壳 / 拖拽分隔条 / 状态 pill / 小型警示标——供后续页面重构
+   直接消费。全部走 theme.css 令牌；圆角按 SPEC §2.8 小件收档（概念 4-6px 一律
+   4px 字面值）；字号按 §2.7 字阶收敛（概念 9.5-11.5 → fs-12）；两主题均成立，
+   各块注内附对比度自查（正文 ≥4.5 / 图形 ≥3）═════════════════════════ */
+
+/* 工具条（概念 .bar）：历史/去向筛选条横容器。gap 10px 为概念形制值（间距阶
+   无 10 档，字面保留——先例：.btn 的 gap 6px） */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-lg);
+}
+
+/* 筛选 chip（概念 .chip 筛选件）：30px 高 pill 按钮——默认 surface 底 +
+   border-strong 装饰边 + muted 字（on surface 深 6.88 / 浅 7.06 ✓），hover 升
+   fg，选中（.on）surface-3 + fg + border-hover（SPEC §5.2-2 统一语言）。
+   命名注：概念稿的 .chip/.chips 在本项目已被「命中词中性 chip」（概念 .k 形，
+   SPEC §3.3，HitRow 在用）占用且形制不同（18px 无边框非交互），筛选形制落
+   .filter-chip(s) 避免撞名改形 */
+.filter-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  min-width: 0;
+}
+.filter-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 var(--space-lg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-12);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-std),
+    border-color var(--t-fast) var(--ease-std),
+    color var(--t-fast) var(--ease-std);
+}
+.filter-chip:hover:not(:disabled) {
+  color: var(--fg);
+}
+.filter-chip.on {
+  background: var(--surface-3);
+  color: var(--fg); /* fg on surface-3 深 13.09 / 浅 12.41 ✓ */
+  border-color: var(--border-hover);
+}
+.filter-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* 键盘焦点走 base.css 全局 :focus-visible accent 环（按钮无自有 focus 样式，
+   不叠加） */
+
+/* 搜索框（概念 .search-wrap）：内嵌图标 + 输入左 padding 32px（图标 left 11）。
+   图标色 text-3 = faint 图形档（on surface 深 5.02 / 浅 5.45 ≥3）；输入挂
+   .ipt 或 .input 均吃让位（:is 免重复） */
+.search-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.search-wrap svg {
+  position: absolute;
+  left: 11px;
+  color: var(--text-3);
+  pointer-events: none;
+}
+.search-wrap :is(.ipt, .input) {
+  padding-left: 32px;
+}
+
+/* 徽标三档（概念 .badge/.b-kw/.b-price/.b-ai）：21px 高小方徽，圆角按 §2.8
+   收 4px（概念 6px 不设新档）。语义映射（步骤 G 裁决，不新造色）：
+   关键词=中性（mute-chip + text-2）、价格=ok 族（ok-chip + ok-text + ok 40%
+   边）、AI=ai 族（ai-chip + ai-text + ai 35% 虚线边；虚线=机器判断，概念
+   §3.6 形制保留）。文字档对自家 12% wash 全 ≥5.2（theme.css 头注实算） */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 21px;
+  padding: 0 var(--space-md);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: var(--fs-12);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.badge.b-kw {
+  background: var(--mute-chip);
+  color: var(--text-2); /* muted on surface-2 深 6.35 / 浅 6.25 ✓ */
+  border-color: var(--border-strong);
+}
+.badge.b-price {
+  background: var(--ok-chip);
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.badge.b-ai {
+  background: var(--ai-chip);
+  color: var(--ai-text);
+  border-color: color-mix(in srgb, var(--ai) 35%, transparent);
+  border-style: dashed;
+}
+
+/* 设置行（概念 .frow/.fl/.fh）：label 150px 固定 + 说明 flex 的横行，虚线
+   分隔同 .ent-expand 井语言。与既有 .field（grid 168px + 实线）并存——本族
+   是概念设置行的紧凑变体，供后续重构选用 */
+.frow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xl);
+  padding: var(--space-lg) 0;
+  border-bottom: 1px dashed var(--line);
+}
+.frow:last-child {
+  border-bottom: none;
+}
+.fl {
+  flex: none;
+  width: 150px;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--fg);
+}
+.fl small {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--fs-12);
+  font-weight: 400;
+  color: var(--text-3);
+}
+.fh {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-12);
+  color: var(--text-3); /* faint on bg/surface 深 5.36/5.02 · 浅 5.00/5.45 ✓（落面禁区外） */
+  line-height: var(--lh-base);
+}
+.fh.mono {
+  font-family: var(--font-mono);
+}
+
+/* 规则卡（概念 .rule）：surface 卡壳 + r-card + 上下留行距。作用域注：类名
+   .rule 同时是 dashboard 命中行的方式修饰符（.hit-how.rule，HitRow.tsx:112
+   在用），裸 .rule 会把卡壳漏进该 span——:not(.hit-how) 圈定卡语义，两用互不
+   干扰（tsx 零改动前提下的最小让路） */
+.rule:not(.hit-how) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xl);
+  margin: var(--space-lg) 0;
+  padding: var(--space-lg) var(--space-xl);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+}
+.rule .rt {
+  flex: 1;
+  min-width: 0;
+}
+.rule .rt > b {
+  font-size: var(--fs-13); /* 概念 13.5 → fs-13（字阶收敛） */
+  font-weight: 600; /* 概念 b 默认 700 → 600（700 仅授权 KPI .metric .v） */
+  color: var(--fg);
+}
+/* 关键词 chip 列（概念 .kws/.k）：mono 小 chip。作用域注：.k 收进 .kws 下——
+   裸 .k 会命中 KPI 标签 .metric .k（监控台/历史页 KPI 区在用，
+   同特指度无法靠顺序稳赢）；概念用法本身即 .kws > .k，按用法收编 */
+.kws {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+.kws .k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  font-weight: 500;
+  line-height: var(--lh-chip);
+  padding: 0 var(--space-md);
+  border-radius: 4px; /* §2.8 小件收档（概念 5px） */
+  background: var(--surface-3);
+  color: var(--fg); /* fg on surface-3 深 13.09 / 浅 12.41 ✓ */
+  white-space: nowrap;
+}
+/* 排除词：err 族 wash + 文字档（err-text on err-chip 深 6.98 / 浅 5.39+ ✓） */
+.kws .k.x {
+  background: var(--err-chip);
+  color: var(--err-text);
+}
+
+/* 命令 chip（概念 .cmd/.cmds）：mono 小字指令单元。作用域注：.cmd 已在
+   settings-notify.css 有域内定义（pill 圆角无描边，RemoteControlCard 在用，
+   该域文件非本步骤可动），本层按概念形制（surface-2 底 + border 描边 + 4px
+   圆角）以 .cmds .cmd 二级特指度提供，对域内 .cmd 零覆盖 */
+.cmds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-md);
+}
+.cmds .cmd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  line-height: var(--lh-chip);
+  padding: 0 var(--space-md);
+  border-radius: 4px; /* §2.8 小件收档（概念 6px） */
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted); /* muted on surface-2 深 6.35 / 浅 6.25 ✓ */
+  white-space: nowrap;
+}
+
+/* stat 卡壳（概念 .stat）：KPI 卡备用壳（现有 .metric 井格仍在役，不替换）。
+   .num：mono fs-32（概念 30 → 字阶收敛）· 600（700 仅授权 .metric .v）·
+   tabular-nums（body 全局 tnum 之外显式随概念）+ ls-display 负字距；
+   .delta：mono fs-12 基档 text-3（on surface 深 5.02 / 浅 5.45 ✓），升 .up →
+   ok-text、降 .down/.bad → err-text（点色档禁作小字，§A-10 继承）；
+   .spark：仅壳（28px svg 宿主），走势填色由消费侧类承担（概念 .sf/.sl 不入
+   共享层，避免无人消费的孤儿色） */
+.stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  padding: var(--space-lg) var(--space-xl);
+}
+.stat .lbl {
+  font-size: var(--fs-12);
+  font-weight: 500;
+  color: var(--muted);
+}
+.stat .num {
+  margin: var(--space-md) 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-32);
+  font-weight: 600;
+  line-height: var(--lh-display);
+  letter-spacing: var(--ls-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.stat .delta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.stat .delta.up {
+  color: var(--ok-text);
+}
+.stat .delta.down,
+.stat .delta.bad {
+  color: var(--err-text);
+}
+.stat .spark {
+  display: block;
+  width: 100%;
+  height: 28px;
+  margin-top: var(--space-md);
+}
+
+/* 拖拽分隔条（概念 .grip-y/.grip-x）：grip-y 左右调宽（col-resize，骑缝
+   left -15 × 16px 命中带）、grip-x 上下调高（row-resize，底缘 10px 命中带）；
+   touch-action:none 供 pointer 拖拽；指示条默认隐身，hover / 拖拽中（.on）
+   现 accent（图形档 on surface 深 9.25 / 浅 5.13 ≥3） */
+.grip-y {
+  position: absolute;
+  left: -15px;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  cursor: col-resize;
+  z-index: 6;
+  touch-action: none;
+}
+.grip-y::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: var(--r-pill);
+  background: transparent;
+  transition: background-color var(--t-fast) var(--ease-std);
+}
+.grip-x {
+  position: absolute;
+  left: var(--space-xl);
+  right: var(--space-xl);
+  bottom: 1px;
+  height: 10px;
+  cursor: row-resize;
+  z-index: 6;
+  touch-action: none;
+  display: grid;
+  place-items: center;
+}
+.grip-x::after {
+  content: '';
+  width: 36px;
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--text-3);
+  opacity: 0;
+  transition:
+    opacity var(--t-fast) var(--ease-std),
+    background-color var(--t-fast) var(--ease-std);
+}
+.grip-y:hover::after,
+.grip-y.on::after,
+.grip-x:hover::after,
+.grip-x.on::after {
+  opacity: 1;
+  background: var(--accent);
+}
+
+/* 状态 pill（概念 .pill/.pill-dot）：运行状态回执（如「监控中 · N 个来源」）。
+   muted on surface-2 深 6.35 / 浅 6.25 ✓；.live 脉冲点 = ok 图形档（on s2 深
+   7.78 / 浅 4.51 ≥3），.off 熄灭 = text-3 点 + 无动画。脉冲系步骤 G 指定的
+   活体状态指示（非纯装饰），prefers-reduced-motion 显式关（base.css 全局
+   熔断另有兜底）；与 SPEC §1.2-5「无限循环装饰动画不做」的对位留档待验收 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--fs-12);
+  white-space: nowrap;
+}
+.pill-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.pill-dot.live {
+  animation: pulse 2.2s infinite;
+}
+.pill-dot.off {
+  background: var(--text-3);
+  animation: none;
+}
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 50%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pill-dot.live {
+    animation: none;
+  }
+}
+
+/* 「慢」小警示标（概念 .mini-tag）：warn 35% 混描边（图形 ≥3）+ warn-text
+   文字（浅色 warn 禁作文字，SPEC §2.4-②；on surface 深 10.94 / 浅 6.98 ✓） */
+.mini-tag {
+  margin-left: var(--space-md);
+  padding: 1px var(--space-sm);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: 4px;
+  color: var(--warn-text);
+  font-size: var(--fs-12); /* 概念 10px → fs-12（字阶收敛） */
+  white-space: nowrap;
+}
+
+/* NEW 徽标（概念 .new，挂名 .new-tag）：mono 小字 + accent 40% 描边 + 文字走
+   --accent-text（浅色 accent 禁落 s3/hover 底作文字；accent-text on surface
+   浅 6.67 / wash 5.28 ✓，hover 行 surface-hi 亦 ≥4.5）；概念 700 → 600
+   （700 仅授权 KPI 大数字），拉丁 micro-label 字距走 --ls-label */
+.new-tag {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12); /* 概念 9.5px → fs-12（字阶收敛） */
+  font-weight: 600;
+  letter-spacing: var(--ls-label);
+  color: var(--accent-text);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 4px;
+  padding: var(--space-xs) var(--space-sm);
+  white-space: nowrap;
 }

@@ -1,8 +1,9 @@
 /**
- * 设置页 Zone A 子导航（settings.md §1.2/§3.2/§5.2）：152px 锚点栏。
+ * 设置页 Zone A 子导航（settings.md §1.2/§3.2/§5.2）：锚点栏。
  * - 任务定位，不是路由（不拆数据面、不复制 draft——保住 draft 单源）；
  * - 点击平滑滚动到组头（scroll-margin-top 防遮挡）；
- * - 组级 dirty 圆点由 12 段配置 → 组映射驱动（12 段定义在 Settings.tsx）；
+ * - 组级 dirty 圆点由 13 段配置 → 组映射驱动（段定义在 Settings.tsx）；
+ * - 组项带 01-07 mono 编号（步骤 M，概念 .anchor `<b>01</b>匹配规则` 形制）；
  * - ↑/↓ 在组项间移动焦点（roving；激活项 aria-current="true"）。
  * 纯渲染组件，dirty/active 状态全部由 Settings.tsx 下发。
  */
@@ -11,7 +12,10 @@ import { useRef, type KeyboardEvent } from 'react'
 export interface SettingsNavItem {
   /** 组锚点 id（即组元素的 DOM id，如 set-grp-monitor） */
   id: string
+  /** 组名（编号另列——概念 .anchor 的 `<b>01</b>` 形制，mono 编号与文字分档） */
   label: string
+  /** mono 编号（01-07，步骤 M 设置重组：概念 anchor 编号形制） */
+  num?: string
   /** 本组任一配置段 dirty */
   dirty: boolean
 }
@@ -48,7 +52,8 @@ export function SettingsNav(props: {
           onClick={() => props.onJump(g.id)}
           onKeyDown={(e) => onKeyDown(e, i)}
         >
-          {g.label}
+          {g.num != null && <b className="snav-num">{g.num}</b>}
+          <span className="snav-label">{g.label}</span>
           {g.dirty && <span className="snav-dot" title="本组有未保存修改" />}
         </button>
       ))}

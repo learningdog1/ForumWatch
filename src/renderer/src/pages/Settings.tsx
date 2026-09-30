@@ -1,10 +1,14 @@
 /**
- * 设置页（阶段 5a 骨架重写，settings.md）：三区骨架——
- * - Zone A 子导航（SettingsNav，152px 锚点栏：scrollspy 联动 + 组级 dirty 圆点）；
- * - Zone B 六组内容滚动区（唯一滚动容器：① 监控内容 ② 智能匹配 ③ 推送通知
- *   ④ 运行与通用 ⑤ 数据与诊断 ⑥ 关于；九张现有卡按组摆放，内容原样——
- *   各卡的 L2 实体行改造是 5b）；
- * - Zone C 吸底保存栏（SettingsSavebar：保存/放弃修改/状态文案三态互斥）。
+ * 设置页（阶段 5a 骨架重写，settings.md；步骤 M 按 watchtower 概念稿重排七组）：
+ * 三区骨架——
+ * - Zone A 子导航（SettingsNav，锚点栏：scrollspy 联动 + 组级 dirty 圆点 +
+ *   01-07 mono 编号，对齐概念 .anchor `<b>01</b>匹配规则` 形制）；
+ * - Zone B 七组内容滚动区（唯一滚动容器：01 匹配规则 02 监控来源 03 AI 语义
+ *   04 通知推送 05 通用 06 数据与诊断 07 关于；组头走概念 .sec 编号小节题，
+ *   十七张卡按组摆放，卡内部形制不重构——RulesCard 行形制对齐 .rule 卡是
+ *   获准例外）；
+ * - Zone C 吸底保存栏（SettingsSavebar：保存/放弃修改/状态文案三态互斥，
+ *   概念 savebar 右对齐按钮组 + 毛玻璃吸底；保存成功另发 showToast）。
  *
  * 机制层全部保留（现状测试覆盖的重点）：draft/saved 双态、saveConfig 全量透传、
  * sanitize 回填提示（「已保存（部分值已按规则修正…）」）、测试三兄弟 dirty 闸
@@ -32,7 +36,8 @@
  * priceRules / similarity 分别来自「价格规则」「相似降噪」卡；
  * channels / notify / routing 来自「推送通道 / 推送策略 / 路由规则」卡
  * （notify.remoteControl 遥控段由「Telegram 遥控」卡编辑）；
- * 「行为」卡废止——推送总开关并入 NotifyCard 首行，开机自启并入 RunPaceCard。
+ * 「行为」卡废止——推送总开关并入 NotifyCard 首行，开机自启并入 RunPaceCard
+ * （步骤 M 起关窗行为 closeBehavior 也由 RunPaceCard 编辑，随本页保存）。
  * 页尾两张**非表单**卡（不进 draft / dirty）：「数据」备份导出/导入 + 「关于」。
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -53,11 +58,11 @@ import { CategoryReportCard } from '../components/CategoryReportCard'
 import { ChannelsCard } from '../components/ChannelsCard'
 import { isChannelReadyUi } from '../components/ChannelsCard'
 import { DataCard } from '../components/DataCard'
-import { GroupHeader } from '../components/GroupHeader'
 import { KeywordsCard } from '../components/KeywordsCard'
 import { MatchModeCard } from '../components/MatchModeCard'
 import { MatchTestCard } from '../components/MatchTestCard'
 import { NotifyCard } from '../components/NotifyCard'
+import { PageHeader } from '../components/PageHeader'
 import { ProxyCard } from '../components/ProxyCard'
 import { RemoteControlCard } from '../components/RemoteControlCard'
 import { RulesCard } from '../components/RulesCard'
@@ -68,17 +73,26 @@ import { SettingsNav } from '../components/SettingsNav'
 import { SettingsSavebar } from '../components/SettingsSavebar'
 import { SimilarityCard } from '../components/SimilarityCard'
 import { SourceCard } from '../components/SourceCard'
+import { showToast } from '../lib/toast'
 import { formatClock } from '../lib/time'
 
 // ---- 深链锚点（settings.md §5.2；id 与去向页 DispositionSettingsAnchor 对齐）----
 
 /**
- * 设置页锚点全集：六组（grp-*）+ 各卡片。去向页「去调整」出口的六个取值
+ * 设置页锚点全集：七组（grp-*）+ 各卡片。去向页「去调整」出口的六个取值
  * （keywords / sources / match-mode / similarity / push-channels / push-policy）
  * 原样包含在内，可直接下发。
+ *
+ * 步骤 M（设置重组，概念稿 01-05 屏段 → 七组）：既有值一个未删未改（深链
+ * 兼容：去向页六值、监控台 grp-monitor、历史 keywords 全依赖原值），仅
+ * **新增** 'grp-sources'（02 监控来源独立成组需要第 7 个组锚点）；grp-* 与
+ * 组的对应关系重映射见 GROUPS——grp-monitor=01 匹配规则、grp-sources=02
+ * 监控来源、grp-match=03 AI 语义、grp-notify=04 通知推送、grp-run=05 通用、
+ * grp-data=06 数据与诊断、grp-about=07 关于。
  */
 export type SettingsAnchor =
   | 'grp-monitor'
+  | 'grp-sources'
   | 'grp-match'
   | 'grp-notify'
   | 'grp-run'
@@ -125,6 +139,23 @@ function Slot(props: { anchor: SettingsAnchor; flashId: string | null; children:
   )
 }
 
+/**
+ * 编号组头（步骤 M，概念稿 .sec h3 形制：衬线小节题 + mono 编号 + 底线；
+ * desc 为第二行释义）。替代原 GroupHeader（组件本体不动、仅本页换消费方）：
+ * 编号是概念 anchor/sec 的对位，属本页重组的一部分。
+ */
+function SecHeader(props: { num: string; name: string; desc?: string }) {
+  return (
+    <div>
+      <h2 className="sec-head">
+        <span className="sec-num">{props.num}</span>
+        {props.name}
+      </h2>
+      {props.desc != null && <p className="sec-sub">{props.desc}</p>}
+    </div>
+  )
+}
+
 // ---- draft 双态（机制层，保留现状） ------------------------------------------
 
 interface Draft {
@@ -149,6 +180,8 @@ interface Draft {
   routing: RoutingRule[]
   notifyEnabled: boolean
   launchAtLogin: boolean
+  /** 关窗行为（步骤 D 起主进程接线；「运行节奏」卡的 radios 编辑） */
+  closeBehavior: AppConfig['closeBehavior']
   aiBaseUrl: string
   aiApiKey: string
   aiModel: string
@@ -203,6 +236,7 @@ function toDraft(c: AppConfig): Draft {
     })),
     notifyEnabled: c.notifyEnabled,
     launchAtLogin: c.launchAtLogin,
+    closeBehavior: c.closeBehavior,
     aiBaseUrl: c.ai.provider.baseUrl,
     aiApiKey: c.ai.provider.apiKey,
     aiModel: c.ai.provider.model,
@@ -228,7 +262,7 @@ function toDraft(c: AppConfig): Draft {
   }
 }
 
-// ---- 12 段配置（settings.md §5.1 定稿，逐段对齐）-----------------------------
+// ---- 13 段配置（settings.md §5.1 的 12 段 + R17 分类总结报告段）---------------
 
 /** 配置段 key（与保存栏 N、组级圆点、深链组映射一一对应） */
 type SegmentKey =
@@ -246,18 +280,30 @@ type SegmentKey =
   | 'runPace'
   | 'proxy'
 
-/** 六组 key（即 grp-* 锚点值） */
-type GroupKey = 'grp-monitor' | 'grp-match' | 'grp-notify' | 'grp-run' | 'grp-data' | 'grp-about'
+/** 七组 key（即 grp-* 锚点值；'grp-sources' 为步骤 M 新增，其余六个原值不动） */
+type GroupKey =
+  | 'grp-monitor'
+  | 'grp-sources'
+  | 'grp-match'
+  | 'grp-notify'
+  | 'grp-run'
+  | 'grp-data'
+  | 'grp-about'
 
 /**
  * 13 段定义（R17 起 12+1：分类总结报告独立成段）：pick 返回 JSON 可序列化的
  * 段值（draft 与 toDraft(saved) 各取一次比 stringify）。推送策略段特意排除
  * remoteControl（遥控独立成段）。
+ *
+ * 段 → 组映射（步骤 M 重排，对齐概念稿设置屏 01-05 + 保留的 06/07）：
+ * keywords/priceRules → 01 匹配规则；sources → 02 监控来源；aiModel/matchMode/
+ * categoryReport/similarity → 03 AI 语义；channels/notifyStrategy/routing/
+ * remote → 04 通知推送；runPace（含 closeBehavior）/proxy → 05 通用。
  */
 const SEGMENTS: ReadonlyArray<{ key: SegmentKey; group: GroupKey; pick: (d: Draft) => unknown }> = [
-  { key: 'sources', group: 'grp-monitor', pick: (d) => d.sources },
   { key: 'keywords', group: 'grp-monitor', pick: (d) => [d.includeKeywords, d.excludeKeywords] },
   { key: 'priceRules', group: 'grp-monitor', pick: (d) => d.priceRules },
+  { key: 'sources', group: 'grp-sources', pick: (d) => d.sources },
   { key: 'aiModel', group: 'grp-match', pick: (d) => [d.aiBaseUrl, d.aiApiKey, d.aiModel, d.commentaryEnabled, d.commentaryUseThinking] },
   { key: 'matchMode', group: 'grp-match', pick: (d) => [d.matchMode, d.interests, d.aiSemanticThreshold] },
   { key: 'categoryReport', group: 'grp-match', pick: (d) => d.categoryReport },
@@ -275,20 +321,25 @@ const SEGMENTS: ReadonlyArray<{ key: SegmentKey; group: GroupKey; pick: (d: Draf
   },
   { key: 'routing', group: 'grp-notify', pick: (d) => d.routing },
   { key: 'remote', group: 'grp-notify', pick: (d) => d.notify.remoteControl },
-  { key: 'runPace', group: 'grp-run', pick: (d) => [d.pollIntervalText, d.dailyEnabled, d.dailyTime, d.launchAtLogin] },
+  {
+    key: 'runPace',
+    group: 'grp-run',
+    pick: (d) => [d.pollIntervalText, d.dailyEnabled, d.dailyTime, d.launchAtLogin, d.closeBehavior]
+  },
   { key: 'proxy', group: 'grp-run', pick: (d) => [d.proxyUrl, d.proxyScope] }
 ]
 
-/** 六组摆位（settings.md §2；⑤⑥ 无表单段——非配置卡不进 dirty）。
- *   title 拆两级（TASTE-UPGRADE §B-5）：name = 组头第一行组名（去 ①-⑥ 带圈
- *   序号，序号只保留在子导航 label）；desc = 第二行释义，⑥「关于」无释义。 */
-const GROUPS: ReadonlyArray<{ id: GroupKey; label: string; name: string; desc?: string }> = [
-  { id: 'grp-monitor', label: '① 监控内容', name: '监控内容', desc: '定义「监控什么、什么算命中」' },
-  { id: 'grp-match', label: '② 智能匹配', name: '智能匹配', desc: 'AI 语义判定与降噪参数' },
-  { id: 'grp-notify', label: '③ 推送通知', name: '推送通知', desc: '推给谁、何时推、走哪条路' },
-  { id: 'grp-run', label: '④ 运行与通用', name: '运行与通用', desc: '应用自身的运行节奏与系统行为' },
-  { id: 'grp-data', label: '⑤ 数据与诊断', name: '数据与诊断', desc: '只读诊断与数据迁移（非配置）' },
-  { id: 'grp-about', label: '⑥ 关于', name: '关于' }
+/** 七组摆位（步骤 M，概念稿设置屏分组；06/07 无表单段——非配置卡不进 dirty）。
+ *   num = 子导航与组头的 mono 编号（01-07）；name = 组头小节题与子导航 label；
+ *   desc = 第二行释义，07「关于」无释义。 */
+const GROUPS: ReadonlyArray<{ id: GroupKey; num: string; name: string; desc?: string }> = [
+  { id: 'grp-monitor', num: '01', name: '匹配规则', desc: '定义「监控什么、什么算命中」' },
+  { id: 'grp-sources', num: '02', name: '监控来源', desc: '抓哪些论坛：启停、分类过滤与单独匹配覆盖' },
+  { id: 'grp-match', num: '03', name: 'AI 语义', desc: 'AI 语义判定与降噪参数' },
+  { id: 'grp-notify', num: '04', name: '通知推送', desc: '推给谁、何时推、走哪条路' },
+  { id: 'grp-run', num: '05', name: '通用', desc: '应用自身的运行节奏与系统行为' },
+  { id: 'grp-data', num: '06', name: '数据与诊断', desc: '只读诊断与数据迁移（非配置）' },
+  { id: 'grp-about', num: '07', name: '关于' }
 ]
 
 // ---- L1 待删除态（settings.md §3.5/§5.1，显式数据源） ---------------------------
@@ -504,6 +555,7 @@ export function Settings(props: {
         routing: d.routing,
         notifyEnabled: d.notifyEnabled,
         launchAtLogin: d.launchAtLogin,
+        closeBehavior: d.closeBehavior,
         priceRules: d.priceRules,
         similarity: {
           enabled: d.similarityEnabled,
@@ -543,6 +595,9 @@ export function Settings(props: {
             ? { kind: 'ok', text: `已保存（部分值已按规则修正，如最低 15 秒）· ${at}` }
             : { kind: 'ok', text: `已保存 · ${at}` }
         )
+        // 步骤 M：保存成功另发一条全局 toast（概念稿 toast 形制；保存栏状态
+        // 文案照旧保留——ok 态随下次 dirty 被清除，toast 是即时回声）
+        showToast(adjusted ? '设置已保存（部分值已按规则修正）' : '设置已保存')
       } else {
         setSaveMsg({ kind: 'err', text: `保存失败：${r.error}。改动仍在表单里，可重试保存。` })
       }
@@ -706,7 +761,8 @@ export function Settings(props: {
 
   const navGroups = GROUPS.map((g) => ({
     id: settingsAnchorDomId(g.id),
-    label: g.label,
+    num: g.num,
+    label: g.name,
     dirty: dirtySegments.length > 0 && SEGMENTS.some((s) => s.group === g.id && dirtySegments.includes(s.key))
   }))
 
@@ -749,26 +805,17 @@ export function Settings(props: {
 
   return (
     <div className="page page-settings">
-      {/* 视觉上无页题是决策而非缺失（TASTE-UPGRADE §B-2）：分区身份由 Zone A
-          子导航承载；sr-only 的 h1 只服务读屏与文档大纲，不占版面 */}
-      <h1 className="sr-only">设置</h1>
+      {/* 页头（概念稿 settings 屏：eyebrow + 衬线题 + 副题「把哨兵调成你的样子」）。
+          旧决策「视觉上无页题」（TASTE-UPGRADE §B-2）随瞭望塔全量重设计废除——视觉
+          比对 05 屏 FAIL 项；h1 由 PageHeader 提供，主分支不再另设 sr-only 题 */}
       <SettingsNav groups={navGroups} active={activeGroup} onJump={jumpToGroup} />
 
       <div className="settings-scroll" ref={scrollRef} onScroll={handleScroll}>
         <div className="settings-col">
-          {/* ① 监控内容 */}
+          <PageHeader eyebrow="Settings" title="设置" subtitle="把哨兵调成你的样子" />
+          {/* 01 匹配规则（grp-monitor）：关键词 + 价格规则——概念 sec-rules 屏段 */}
           <section className="settings-group" id={settingsAnchorDomId('grp-monitor')}>
-            <GroupHeader name={GROUPS[0].name} desc={GROUPS[0].desc} />
-            <Slot anchor="sources" flashId={flashId}>
-              <SourceCard
-                sources={draft.sources}
-                onChange={(sources) => patch({ sources })}
-                pendingDelete={pendingDel.sources}
-                onMarkDelete={(id) => markDelete('sources', id)}
-                onUndoDelete={(id) => undoDelete('sources', id)}
-                globalSemanticThreshold={draft.aiSemanticThreshold}
-              />
-            </Slot>
+            <SecHeader num={GROUPS[0].num} name={GROUPS[0].name} desc={GROUPS[0].desc} />
             <Slot anchor="keywords" flashId={flashId}>
               <KeywordsCard
                 includeKeywords={draft.includeKeywords}
@@ -788,9 +835,24 @@ export function Settings(props: {
             </Slot>
           </section>
 
-          {/* ② 智能匹配（AI 模型在前——组序即配置依赖序，§9） */}
+          {/* 02 监控来源（grp-sources，步骤 M 新增组锚点） */}
+          <section className="settings-group" id={settingsAnchorDomId('grp-sources')}>
+            <SecHeader num={GROUPS[1].num} name={GROUPS[1].name} desc={GROUPS[1].desc} />
+            <Slot anchor="sources" flashId={flashId}>
+              <SourceCard
+                sources={draft.sources}
+                onChange={(sources) => patch({ sources })}
+                pendingDelete={pendingDel.sources}
+                onMarkDelete={(id) => markDelete('sources', id)}
+                onUndoDelete={(id) => undoDelete('sources', id)}
+                globalSemanticThreshold={draft.aiSemanticThreshold}
+              />
+            </Slot>
+          </section>
+
+          {/* 03 AI 语义（grp-match）：AI 模型在前——组序即配置依赖序 */}
           <section className="settings-group" id={settingsAnchorDomId('grp-match')}>
-            <GroupHeader name={GROUPS[1].name} desc={GROUPS[1].desc} />
+            <SecHeader num={GROUPS[2].num} name={GROUPS[2].name} desc={GROUPS[2].desc} />
             <Slot anchor="ai-model" flashId={flashId}>
               <AiModelCard
                 baseUrl={draft.aiBaseUrl}
@@ -824,6 +886,14 @@ export function Settings(props: {
                 onThresholdChange={(v) => patch({ aiSemanticThreshold: v })}
               />
             </Slot>
+            <Slot anchor="similarity" flashId={flashId}>
+              <SimilarityCard
+                enabled={draft.similarityEnabled}
+                threshold={draft.similarityThreshold}
+                onToggle={() => patch({ similarityEnabled: !draft.similarityEnabled })}
+                onThresholdChange={(v) => patch({ similarityThreshold: v })}
+              />
+            </Slot>
             <Slot anchor="category-report" flashId={flashId}>
               {/* R17 分类总结报告：来源多选走生效列表（待删除来源不再可选，
                   悬挂引用由保存时 sanitize 清理——RoutingCard 同口径） */}
@@ -833,19 +903,11 @@ export function Settings(props: {
                 onChange={(categoryReport) => patch({ categoryReport })}
               />
             </Slot>
-            <Slot anchor="similarity" flashId={flashId}>
-              <SimilarityCard
-                enabled={draft.similarityEnabled}
-                threshold={draft.similarityThreshold}
-                onToggle={() => patch({ similarityEnabled: !draft.similarityEnabled })}
-                onThresholdChange={(v) => patch({ similarityThreshold: v })}
-              />
-            </Slot>
           </section>
 
-          {/* ③ 推送通知 */}
+          {/* 04 通知推送（grp-notify） */}
           <section className="settings-group" id={settingsAnchorDomId('grp-notify')}>
-            <GroupHeader name={GROUPS[2].name} desc={GROUPS[2].desc} />
+            <SecHeader num={GROUPS[3].num} name={GROUPS[3].name} desc={GROUPS[3].desc} />
             <Slot anchor="push-channels" flashId={flashId}>
               <ChannelsCard
                 channels={draft.channels}
@@ -890,9 +952,9 @@ export function Settings(props: {
             </Slot>
           </section>
 
-          {/* ④ 运行与通用 */}
+          {/* 05 通用（grp-run）：运行节奏（含关窗行为/外观）+ 代理 */}
           <section className="settings-group" id={settingsAnchorDomId('grp-run')}>
-            <GroupHeader name={GROUPS[3].name} desc={GROUPS[3].desc} />
+            <SecHeader num={GROUPS[4].num} name={GROUPS[4].name} desc={GROUPS[4].desc} />
             <Slot anchor="run-pace" flashId={flashId}>
               <RunPaceCard
                 pollIntervalText={draft.pollIntervalText}
@@ -901,10 +963,12 @@ export function Settings(props: {
                 dailyEnabled={draft.dailyEnabled}
                 dailyTime={draft.dailyTime}
                 launchAtLogin={draft.launchAtLogin}
+                closeBehavior={draft.closeBehavior}
                 onIntervalChange={(v) => patch({ pollIntervalText: v })}
                 onDailyToggle={() => patch({ dailyEnabled: !draft.dailyEnabled })}
                 onDailyTimeChange={(v) => patch({ dailyTime: v })}
                 onLaunchToggle={() => patch({ launchAtLogin: !draft.launchAtLogin })}
+                onCloseBehaviorChange={(v) => patch({ closeBehavior: v })}
               />
             </Slot>
             <Slot anchor="proxy" flashId={flashId}>
@@ -918,9 +982,9 @@ export function Settings(props: {
             </Slot>
           </section>
 
-          {/* ⑤ 数据与诊断 */}
+          {/* 06 数据与诊断（grp-data） */}
           <section className="settings-group" id={settingsAnchorDomId('grp-data')}>
-            <GroupHeader name={GROUPS[4].name} desc={GROUPS[4].desc} />
+            <SecHeader num={GROUPS[5].num} name={GROUPS[5].name} desc={GROUPS[5].desc} />
             <Slot anchor="data" flashId={flashId}>
               <DataCard />
             </Slot>
@@ -929,9 +993,9 @@ export function Settings(props: {
             </Slot>
           </section>
 
-          {/* ⑥ 关于 */}
+          {/* 07 关于（grp-about） */}
           <section className="settings-group" id={settingsAnchorDomId('grp-about')}>
-            <GroupHeader name={GROUPS[5].name} desc={GROUPS[5].desc} />
+            <SecHeader num={GROUPS[6].num} name={GROUPS[6].name} desc={GROUPS[6].desc} />
             <Slot anchor="about" flashId={flashId}>
               <AboutCard />
             </Slot>

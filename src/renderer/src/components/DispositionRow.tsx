@@ -1,18 +1,24 @@
 /**
- * 判定行（R10 阶段 2，dispositions.md §2.3 / §5）：去向页唯一消费者。
+ * 判定行（Watchtower 步骤 L，concept.html dispositions 屏 .tbl 表行形制）：
+ * 去向页唯一消费者。
  *
- * - 收起态：时间 · 来源徽标（sourceLabel 显示名）· 标题 · detail 截断小字 ·
- *   outcome 徽标（OUTCOME_LABELS + badgeTone 分级原样迁移自旧 Dispositions 页，
- *   成功绿 / 失败红 / 挂起琥珀 / 其余灰）。
- * - detail 不再 hover-only：完整值由展开态承载（键盘可达的披露，检索 B-2）。
- * - 展开态三块：完整原因（detail + 按 outcome 的解释话术，先结论后机制后动作）·
- *   同帖处置轨迹（正序，点击跳对应行）· 按 outcome 的「去调整」设置锚点出口
- *   + 复制标题（反馈 = 图标原位互换 + 文字恒「复制标题」+ ok/err 色档，
- *   1.5s 复原，与 LogView 复制按钮同款 §C-9）。
+ * - 收起态（<tr class="disp-row">）：时间（mono）· 来源（mono 小字）· 帖子 · 解释
+ *   （.hit-t 标题行 + .why 解释小字——detail 优先，缺失时用该 outcome 的语义
+ *   描述兜底，不编造解释）· 原因（.rb = 组色点 + 7 组组名）· › 展开指示。
+ *   行点击 / Enter / Space 展开（roving 契约 data-disp-index / tabIndex /
+ *   .row-selected 原样，HitRow table 变体同款）。
+ * - 展开态（<tr class="disp-row-x"> 跨列行）三块全保留：完整原因（detail +
+ *   按 outcome 的解释话术，先结论后机制后动作）· 同帖处置轨迹（正序，点击跳
+ *   对应行）· 按 outcome 的「去调整」设置锚点出口 + 复制标题（反馈 = 图标
+ *   原位互换 + 文字恒「复制标题」+ ok/err 色档，1.5s 复原）。
+ * - 7 组分组（DISPOSITION_GROUPS + dispositionGroupOf）在本文件定义并导出：
+ *   14 类真实 outcome（DISPOSITION_OUTCOMES 全集，Record 全键保证编译期
+ *   完整性）按语义归并；去向页分布条 / legend / 筛选 chips / 原因列同源
+ *   消费——同一映射，防两处口径漂移。
  * - 不提供「打开原帖」：Disposition 结构无 url 字段，不臆造拼接规则
  *   （dispositions.md §2.3 明确拒绝）。
- * - 明确不并入 HitList：去向行（outcome/detail/轨迹/跳转）与命中行
- *   （matchedBy/投票/推送态）结构不同，独立成组件杜绝第二份拷贝（§5）。
+ * - 明确不并入 HitList：去向行（outcome/轨迹/跳转）与命中行（matchedBy/投票/
+ *   推送态）结构不同，独立成组件杜绝第二份拷贝（§5）。
  */
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { Disposition, DispositionOutcome } from '@shared/ipc'
@@ -50,9 +56,59 @@ export const OUTCOME_LABELS: Record<DispositionOutcome, string> = {
   'semantic-below-threshold': '置信度低'
 }
 
+/* ── 7 组去向分组（步骤 L：概念稿 7 段堆叠分布条 / legend / 筛选 chips）────
+   14 类真实 outcome（shared/ipc DISPOSITION_OUTCOMES）按语义归并成 7 组；
+   组 id 即分布条段 / legend dot / 筛选 chip / 表原因列的 tone 类名后缀
+   （events.css .g-<id> 组色，令牌派生）。旧 5 分组（all/push/blocked/miss/
+   hold）的「已拦截」大杂烩拆开：排除词（一票否决）/ 来源过滤（进链路前）/
+   重复·限频（降噪）语义不同，分开才能回答「为什么没推送」。 */
+export type DispositionGroupId = 'miss' | 'excluded' | 'filtered' | 'score' | 'dup' | 'hold' | 'push'
+
+export interface DispositionGroup {
+  id: DispositionGroupId
+  /** 组名（legend / chip / 原因列文案） */
+  label: string
+  /** 组内 outcome 全集（只作展示/统计；判定走下方 Record 全键映射） */
+  outcomes: readonly DispositionOutcome[]
+}
+
+export const DISPOSITION_GROUPS: readonly DispositionGroup[] = [
+  { id: 'miss', label: '未命中', outcomes: ['miss', 'semantic-miss'] },
+  { id: 'excluded', label: '排除词否决', outcomes: ['excluded'] },
+  { id: 'filtered', label: '来源过滤', outcomes: ['filtered', 'old-below-threshold', 'pinned'] },
+  { id: 'score', label: '评分不足', outcomes: ['semantic-below-threshold'] },
+  { id: 'dup', label: '重复·限频', outcomes: ['similar-swallowed'] },
+  { id: 'hold', label: '挂起中', outcomes: ['deferred', 'deferred-skip', 'semantic-pending'] },
+  { id: 'push', label: '推送结果', outcomes: ['pushed', 'push-failed', 'muted'] }
+]
+
+/** outcome → 组 id（Record 全键：DISPOSITION_OUTCOMES 扩枚举时编译期即报缺） */
+const OUTCOME_GROUP: Record<DispositionOutcome, DispositionGroupId> = {
+  miss: 'miss',
+  'semantic-miss': 'miss',
+  excluded: 'excluded',
+  filtered: 'filtered',
+  'old-below-threshold': 'filtered',
+  pinned: 'filtered',
+  'semantic-below-threshold': 'score',
+  'similar-swallowed': 'dup',
+  deferred: 'hold',
+  'deferred-skip': 'hold',
+  'semantic-pending': 'hold',
+  pushed: 'push',
+  'push-failed': 'push',
+  muted: 'push'
+}
+
+/** outcome → 所属组对象（分布条 / legend / 原因列共用；Record 全键保证命中） */
+export function dispositionGroupOf(outcome: DispositionOutcome): DispositionGroup {
+  const id = OUTCOME_GROUP[outcome]
+  return DISPOSITION_GROUPS.find((g) => g.id === id) ?? DISPOSITION_GROUPS[0]
+}
+
 /**
  * outcome → 徽标配色档（R7-W1 资产原样迁移：成功绿 / 失败红 / 挂起琥珀 / 其余灰；
- * 与 .outcome.ok/.err/.warn/.muted 类对应）。
+ * 展开态轨迹 chip 与 .outcome 徽标色档对应——表行原因列的组色走组 tone 类）。
  */
 export function badgeTone(outcome: DispositionOutcome): 'ok' | 'err' | 'warn' | 'muted' {
   if (outcome === 'pushed') return 'ok'
@@ -160,7 +216,9 @@ export interface DispositionRowProps {
 
 export function DispositionRow(props: DispositionRowProps) {
   const { record } = props
-  const [copied, setCopied] = useState(false)
+  /** null=空闲（复制图标），true=已复制 ✓，false=复制失败 ✗——三元态修自旧版
+      useState(false)：布尔初值使空闲分支不可达，空闲态误渲染失败图标 */
+  const [copied, setCopied] = useState<boolean | null>(null)
   const copyTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
@@ -179,108 +237,135 @@ export function DispositionRow(props: DispositionRowProps) {
     }
     if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current)
     setCopied(ok)
-    copyTimerRef.current = window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS)
+    copyTimerRef.current = window.setTimeout(() => setCopied(null), COPY_FEEDBACK_MS)
   }
 
   const help = OUTCOME_HELP[record.outcome]
   const act = help.act ?? null
   const detail = record.detail != null && record.detail !== '' ? record.detail : null
+  /** 收起态解释小字（.why）：detail（reason/why 等价字段）优先，缺失时用该
+      outcome 的语义描述兜底——只写既有字段与定稿话术，不编造解释 */
+  const whyLine = detail ?? help.why
+  const group = dispositionGroupOf(record.outcome)
+  const groupOutcomesText = group.outcomes.map((o) => OUTCOME_LABELS[o]).join('、')
 
   return (
-    <div className={`disp-row${props.flash === true ? ' flash' : ''}`}>
-      <button
-        type="button"
-        /* 键盘选中行视觉 = 共享规范类 .row-selected（R12.3 裁决 2，primitives
-           定义）；roving tabindex / data-disp-index 行为逻辑不变 */
-        className={`disp-row-main${props.selected ? ' row-selected' : ''}`}
+    <Fragment>
+      <tr
+        className={`disp-row${props.selected ? ' row-selected' : ''}${props.flash === true ? ' flash' : ''}`}
         tabIndex={props.selected ? 0 : -1}
         data-disp-index={props.index}
         aria-expanded={props.expanded}
+        aria-label={`展开原因与同帖轨迹：${record.title}`}
         onClick={props.onToggle}
+        onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing) return
+          // 焦点在行上时 Enter/Space = 展开（页面级 Enter 代点会按 closest 跳过，
+          // 不双触发——HitRow table 变体同款契约）
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            props.onToggle()
+          }
+        }}
       >
-        <time className="d-time" title={record.ts}>
+        <td className="d-time num" title={record.ts}>
           {formatClock(record.ts)}
-        </time>
-        <span className="src-badge" title={`来源：${sourceLabel(record.sourceId)}`}>
-          {sourceLabel(record.sourceId)}
-        </span>
-        <span className="d-title" title={record.title}>
-          {record.title}
-        </span>
-        {detail != null && (
-          <span className="d-detail" title={detail}>
-            {detail}
+        </td>
+        <td>
+          <span className="src num" title={`来源：${sourceLabel(record.sourceId)}`}>
+            {sourceLabel(record.sourceId)}
           </span>
-        )}
-        <span className={`outcome ${badgeTone(record.outcome)}`}>
-          {OUTCOME_LABELS[record.outcome]}
-        </span>
-      </button>
+        </td>
+        <td className="d-post">
+          <div className="hit-t" title={record.title}>
+            {record.title}
+          </div>
+          <div className="why" title={whyLine}>
+            {whyLine}
+          </div>
+        </td>
+        <td>
+          <span
+            className="rb"
+            title={`去向组：${group.label}（${groupOutcomesText}）· 本条：${OUTCOME_LABELS[record.outcome]}`}
+          >
+            <i className={`rdot g-${group.id}`} aria-hidden="true" />
+            {group.label}
+          </span>
+        </td>
+        <td className="d-caret num" aria-hidden="true">
+          ›
+        </td>
+      </tr>
       {props.expanded && (
-        <div className="disp-expand">
-          <div className="ex-row">
-            <span className="ex-k">原因</span>
-            <span className="ex-v">
-              {detail != null && <span className="ex-detail">{detail}</span>}
-              <span className="ex-why">{help.why}</span>
-            </span>
-          </div>
-          {props.track.length > 1 && (
-            <div className="ex-row">
-              <span className="ex-k">轨迹</span>
-              <span className="ex-v ex-track">
-                {props.track.map((t, i) => (
-                  <Fragment key={dispositionKey(t)}>
-                    {i > 0 && (
-                      <span className="track-sep" aria-hidden>
-                        →
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      className={`track-item ${badgeTone(t.outcome)}`}
-                      title={`${t.title} · ${OUTCOME_LABELS[t.outcome]}`}
-                      onClick={() => props.onTrackJump(t)}
-                    >
-                      <span className="num">{formatTrackStamp(t.ts)}</span>
-                      {OUTCOME_LABELS[t.outcome]}
-                    </button>
-                  </Fragment>
-                ))}
-                <span className="track-note">（本页已加载记录中该帖的全部去向）</span>
-              </span>
-            </div>
-          )}
-          <div className="ex-actions">
-            {act != null && props.onGoAnchor != null && (
-              <button
-                type="button"
-                className="disp-link"
-                title="跳转到设置页对应分组（有未保存修改时会先询问）"
-                onClick={() => props.onGoAnchor?.(act.anchor)}
-              >
-                {act.label}
-              </button>
-            )}
-            <button
-              type="button"
-              className={`btn btn-sm${copied === false ? ' err' : copied ? ' ok' : ''}`}
-              title={copied === false ? '复制失败' : copied ? '已复制标题' : undefined}
-              onClick={() => void copyTitle()}
-            >
-              {/* 图标原位互换（复制→成功✓/失败✗）+ 文字恒「复制标题」——宽度零跳动（§C-9） */}
-              {copied === false ? (
-                <IconX size={12} />
-              ) : copied ? (
-                <IconCheck size={12} />
-              ) : (
-                <IconCopy size={12} />
+        <tr className="disp-row-x">
+          <td colSpan={5}>
+            <div className="disp-expand">
+              <div className="ex-row">
+                <span className="ex-k">原因</span>
+                <span className="ex-v">
+                  {detail != null && <span className="ex-detail">{detail}</span>}
+                  <span className="ex-why">{help.why}</span>
+                </span>
+              </div>
+              {props.track.length > 1 && (
+                <div className="ex-row">
+                  <span className="ex-k">轨迹</span>
+                  <span className="ex-v ex-track">
+                    {props.track.map((t, i) => (
+                      <Fragment key={dispositionKey(t)}>
+                        {i > 0 && (
+                          <span className="track-sep" aria-hidden>
+                            →
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className={`track-item ${badgeTone(t.outcome)}`}
+                          title={`${t.title} · ${OUTCOME_LABELS[t.outcome]}`}
+                          onClick={() => props.onTrackJump(t)}
+                        >
+                          <span className="num">{formatTrackStamp(t.ts)}</span>
+                          {OUTCOME_LABELS[t.outcome]}
+                        </button>
+                      </Fragment>
+                    ))}
+                    <span className="track-note">（本页已加载记录中该帖的全部去向）</span>
+                  </span>
+                </div>
               )}
-              复制标题
-            </button>
-          </div>
-        </div>
+              <div className="ex-actions">
+                {act != null && props.onGoAnchor != null && (
+                  <button
+                    type="button"
+                    className="disp-link"
+                    title="跳转到设置页对应分组（有未保存修改时会先询问）"
+                    onClick={() => props.onGoAnchor?.(act.anchor)}
+                  >
+                    {act.label}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={`btn btn-sm${copied === false ? ' err' : copied ? ' ok' : ''}`}
+                  title={copied === false ? '复制失败' : copied ? '已复制标题' : undefined}
+                  onClick={() => void copyTitle()}
+                >
+                  {/* 图标原位互换（复制→成功✓/失败✗）+ 文字恒「复制标题」——宽度零跳动（§C-9） */}
+                  {copied === false ? (
+                    <IconX size={12} />
+                  ) : copied ? (
+                    <IconCheck size={12} />
+                  ) : (
+                    <IconCopy size={12} />
+                  )}
+                  复制标题
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
       )}
-    </div>
+    </Fragment>
   )
 }

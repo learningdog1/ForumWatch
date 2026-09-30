@@ -88,6 +88,22 @@
  *   周报固定周一生成上一完整周、月报固定 1 日生成上一自然月，不设 weekday
  *   配置）。**加法字段，不 bump schemaVersion**（R13 先例）：盘上兼容由
  *   load 的 merge DEFAULT + sanitize 兜底，migrations.ts 零改动。
+ *
+ * 界面重构步骤 B 变更（2026-09-30，Watchtower 观测字段加法）：
+ * - HitRecord 增加可选 semanticScore（语义命中置信度 0-1，SemanticVerdict.score
+ *   透传；仅 matchedBy='semantic' 为数值，其余命中方式恒 null）。旧 hits/*.jsonl
+ *   行容忍缺失（对齐 matchedRule 的"旧数据缺失等价无"约定）。
+ * - SourceStatus 增加可选 lastPollDurationMs（最近一次轮询耗时毫秒，口径见字段
+ *   注释：成功抓取写入、失败清 null、冷却跳过保留上一值）。
+ * - 两者均为**加法字段**，不 bump schemaVersion（R5 先例）；无新 IPC 通道——
+ *   随既有 getHits/getStatus 载荷自动下发（desktop 与 Docker web 模式免费获得）。
+ *
+ * 界面重构步骤 D 变更（2026-09-30，关窗行为配置）：
+ * - AppConfig 增加 closeBehavior（'tray' | 'quit'，默认 'tray'——保住 ADR 8.4
+ *   老用户「关窗进托盘」行为不变；设置页关窗行为 radios 的后端）。**加法字段，
+ *   不 bump schemaVersion**（R5 先例）：旧配置缺失由 store sanitize 回 'tray'，
+ *   不配置 = 行为逐字节等价既有语义。消费方仅 desktop/window.ts 的 close 事件
+ *   （装配方注入 getCloseBehavior 现读 store，配置热更新无需重建窗口）。
  */
 
 /** 论坛来源类型（v3 起：nodeseek SSR / 通用 RSS / V2EX） */
@@ -430,6 +446,13 @@ export interface HitRecord {
   /** AI 的一句话判定理由（matchedBy='semantic' 时给出，可能为 null） */
   semanticReason: string | null
   /**
+   * AI 语义命中置信度（SemanticVerdict.score，0-1 浮点；观测/展示字段）。**可选**：
+   * 旧 hits/*.jsonl 行没有此字段，消费方必须容忍 undefined（等价"无置信度"，
+   * 与 matchedRule 同款约定）；新写入的记录一律给 number|null——仅
+   * matchedBy='semantic' 时为数值，其余命中方式恒 null。
+   */
+  semanticScore?: number | null
+  /**
    * 命中的价格规则 id/label（matchedBy='rule' 时给出）。**可选**：旧 hits/*.jsonl
    * 行没有此字段，消费方必须容忍 undefined（等价"非规则命中"）；新写入的记录一律给
    * string|null——非规则命中时为 null，规则命中时为规则的 id（无 label）或 label。
@@ -598,6 +621,15 @@ export interface AppConfig {
   /** 开机自启（Electron app.setLoginItemSettings） */
   launchAtLogin: boolean
   /**
+   * 关窗行为（界面重构步骤 D，desktop/window.ts 的 close 事件消费）：
+   * - 'tray'（**默认**）= 关窗进托盘（preventDefault + hide，ADR 8.4 既有
+   *   语义——老用户升级行为不变）；
+   * - 'quit' = 关窗即退出（放行 close 并走 before-quit 统一退出路径：
+   *   置 quitting → 异步 shutdown → destroyTray → 二次 quit，真实退出）。
+   * 加法字段不 bump schemaVersion；sanitize 非法/缺失回 'tray'。
+   */
+  closeBehavior: 'tray' | 'quit'
+  /**
    * 论坛来源列表（v3 判别联合，默认仍只有 nodeseek 一项；关键词仍全局共享，
    * per-source 覆盖= filters 于 v3 引入契约，引擎消费在下一轮）
    */
@@ -639,6 +671,8 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   routing: [],
   notifyEnabled: true,
   launchAtLogin: false,
+  // 步骤 D：默认 'tray'——不配置 = ADR 8.4「关窗进托盘」行为逐字节等价
+  closeBehavior: 'tray',
   sources: [{ id: 'nodeseek', type: 'nodeseek', enabled: true }],
   priceRules: [],
   similarity: { enabled: true, threshold: 0.72 },
@@ -683,6 +717,14 @@ export interface SourceStatus {
    * 面数）。**可选**：旧状态快照没有此字段，消费方容忍缺失（等价 0）。
    */
   page2Fetches?: number
+  /**
+   * 该来源最近一次轮询耗时毫秒。**可选**：旧状态快照没有此字段，消费方容忍
+   * 缺失（等价 null）。口径：只计 adapter 抓取本身（不含 AI 评估/推送等管线
+   * 耗时），**成功完成的抓取**才写入；抓取失败的轮次清 null（无有效耗时，
+   * 防上一轮的陈旧值冒充最新观测——失败态看 lastError，不看耗时）；冷却
+   * 跳过/配置层失败的轮次不触碰（保留上一值）。内存态，重启后为 null。
+   */
+  lastPollDurationMs?: number | null
 }
 
 /** AI 运行态（语义评估管线的观测面） */
