@@ -17,7 +17,7 @@
 <table>
 <tr>
 <td align="center" width="50%"><img src="docs/assets/dashboard.png" width="100%" alt="监控台界面" /><br/><sub>监控台：指标卡 · 来源健康度 · 实时命中流（图为浅色「晨报」主题，默认深色「瞭望塔」，可切换 / 跟随系统）</sub></td>
-<td align="center" width="50%"><img src="docs/assets/push-example.png" width="88%" alt="推送消息示例" /><br/><sub>命中时的推送长这样（Telegram 通道示意）</sub></td>
+<td align="center" width="50%"><img src="docs/assets/push-example.png" width="100%" alt="推送消息示例" /><br/><sub>命中时的推送长这样（Telegram 通道示意）</sub></td>
 </tr>
 </table>
 
