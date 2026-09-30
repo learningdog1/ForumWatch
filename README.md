@@ -16,7 +16,7 @@
 
 <table>
 <tr>
-<td align="center"><img src="docs/assets/dashboard.png" width="480" alt="监控台界面" /><br/><sub>监控台：运行状态、每个来源的健康度、最近命中与处置去向</sub></td>
+<td align="center"><img src="docs/assets/dashboard.png" width="480" alt="监控台界面" /><br/><sub>监控台：指标卡（今日命中 / 已推送 / AI 判定无关 / 轮询错误）、来源健康度、实时命中流——图为浅色「晨报」主题，默认深色「瞭望塔」，设置里可切换/跟随系统</sub></td>
 <td align="center"><img src="docs/assets/push-example.png" width="420" alt="推送消息示例" /><br/><sub>命中时的推送长这样（Telegram 通道示意）</sub></td>
 </tr>
 </table>
@@ -78,13 +78,13 @@ docker run -d --name forumwatch \
 <table>
 <tr>
 <td align="center"><img src="docs/assets/settings.png" width="480" alt="设置页" /><br/><sub>设置页：来源、关键词、通道、规则、AI 都在侧栏锚点导航里</sub></td>
-<td align="center"><img src="docs/assets/history.png" width="480" alt="历史命中与统计" /><br/><sub>历史命中：跨日检索 + 统计画像（推送失败率、来源分布、关键词命中榜）</sub></td>
+<td align="center"><img src="docs/assets/history.png" width="480" alt="历史命中与统计" /><br/><sub>历史命中：跨日检索 + 统计侧栏（7 日趋势 / TOP 关键词 / 价格分布 / 高峰时段）；点任意命中打开详情抽屉（判定链逐条可解释 + AI 锐评 + 反馈）</sub></td>
 </tr>
 </table>
 
 <img src="docs/assets/dispositions.png" width="100%" alt="处置流水界面" />
 
-<sub>流水页：433 条处置记录里，"大陆的 VPS 有无推荐？"命中了 `VPS` 并已推送；其余被"未命中 / 旧帖 / 排除词"等去向逐条解释。</sub>
+<sub>去向页：每条帖子的处置都有交代——未命中 / 排除词否决 / 评分不足 / 重复限频等 7 组原因的分布条与逐条解释，点分布段即可过滤。</sub>
 
 ## ❓ 常见问题
 
