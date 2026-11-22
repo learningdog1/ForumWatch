@@ -47,8 +47,19 @@
  * 热重载合并时保留）。`--once` 单轮语义不起 watch。已知取舍（既有语义不动）：
  * seen 容量构造期定死，增删来源下次重启才扩容。
  */
+import cluster, { type Worker } from 'node:cluster'
 import { existsSync, mkdirSync } from 'node:fs'
+import { availableParallelism } from 'node:os'
 import { join, resolve } from 'node:path'
+import { ActivityAiExtractor } from '../src/main/activity/ai-extractor'
+import { ActivityCollector } from '../src/main/activity/collector'
+import { TopicDetailFetcher } from '../src/main/activity/detail-fetcher'
+import {
+  ACTIVITIES_DIR_NAME,
+  ActivityStore,
+  ReplicaActivityView,
+  type ActivitySnapshotPayload
+} from '../src/main/activity/store'
 import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
 import { PlainSecretBox } from '../src/main/config/secrets'
 import { watchConfigDir, type ConfigDirWatcher } from '../src/main/config/watch'
@@ -79,21 +90,32 @@ import { CompositeNotifier } from '../src/main/notify/composite'
 import { BotCommandController } from '../src/main/notify/bot-commands'
 import { isChannelReady, telegramCredentialsOf, type Notifier } from '../src/main/notify/types'
 import { createLogger } from '../src/main/logger'
+import { ActivityClientAuthenticator } from '../src/main/server/activity-crypto'
+import { createPublicActivityServer, type PublicActivityServer } from '../src/main/server/activity-api'
 import { createInvokeHandlers, type WebApiContext } from '../src/main/server/api'
+import { IpRateLimiter } from '../src/main/server/rate-limit'
 import { createWebServer, type WebServer } from '../src/main/server/web'
 import { IPC } from '../src/shared/ipc'
 import type { AppConfig, EngineStatus, HitRecord, ChannelConfig, SourceConfig } from '../src/shared/types'
 
-const USAGE = `usage: npm run engine:headless -- [--config <dir>] [--once] [--duration <sec>] [--interval <sec>] [--web [port]]
-  --config <dir>     数据目录（config/seen/state/logs），默认 ./data/headless
+const USAGE = `usage: npm run engine:headless -- [--config <dir>] [--once] [--duration <sec>] [--interval <sec>] [--web [port]] [--api-port <port>] [--workers <n|auto>]
+  --config <dir>     数据目录（config/seen/state/activities/logs），默认 ./data/headless
   --once             跑一轮后退出（打印本轮统计；抓取失败才退出码 1）
   --duration <sec>   运行指定秒数后优雅退出（默认直到 Ctrl-C）
   --interval <sec>   临时覆盖轮询间隔（钳到 >=15s），不写回配置；热重载后仍最高优先
-  --web [port]       起 Web 管理界面（缺省端口 8787；FW_WEB_PORT 同效）
+  --web [port]       起 Web 管理界面与内置 API（缺省端口 8787；FW_WEB_PORT 同效）
+  --api-port <port>  额外起物理隔离的高并发公开只读活动 API 端口（FW_API_PORT 同效）
+  --workers <n|auto> 公开活动 API 端口的只读多进程 Worker 数（默认 1；auto=CPU 核数；FW_API_WORKERS 同效）
 env: NSM_BOT_TOKEN / NSM_CHAT_ID  注入 telegram 凭据（不落盘）
-     FW_WEB_PORT   Web 端口（--web 不带值时也用它）
-     FW_WEB_TOKEN  Web 访问令牌（设置后 /api/* 需 Bearer/查询参数携带）
-     FW_WEB_ROOT   渲染层静态目录（缺省 ./out/renderer；Docker 内 /app/web）`
+     FW_WEB_PORT / FW_WEB_HOST    Web 管理端口与绑定地址（默认 0.0.0.0:8787）
+     FW_WEB_TOKEN                 Web 管理访问令牌（保护 /api/invoke、备份与 /api/v1/admin/*）
+     FW_WEB_ROOT                  渲染层静态目录（缺省 ./out/renderer；Docker 内 /app/web）
+     FW_API_PORT / FW_API_HOST    独立公开只读活动 API 端口与绑定地址
+     FW_API_WORKERS               公开活动 API Worker 进程数（正整数或 auto）
+     FW_ACTIVITY_SECRET           客户端活动 API 密钥（支持 Bearer 或 OverseasApiCrypto 同款 HMAC-SHA256）
+     FW_ACTIVITY_ENCRYPT          设为 1/true 时强制要求 HMAC 签名并以 AES-256-GCM 加密信封返回
+     FW_API_RATE_LIMIT_RPM        单 IP 每分钟限流次数（默认 240；0 表示不限流）
+     FW_TRUST_PROXY               设为 1/true 时采信反代 CF-Connecting-IP / X-Real-IP / X-Forwarded-For`
 
 interface CliArgs {
   configDir: string
@@ -102,17 +124,44 @@ interface CliArgs {
   intervalSec: number | null
   /** Web 管理界面端口;null = 不起(--once 恒 null) */
   webPort: number | null
+  /** 独立公开只读活动 API 端口;null = 不额外起独立端口(仍随 --web 暴露) */
+  apiPort: number | null
+  /** 独立公开端口的只读 Worker 数(>=1) */
+  workers: number
+}
+
+function parseWorkersValue(raw: string): number {
+  const clean = raw.trim().toLowerCase()
+  if (clean === '' || clean === '1') return 1
+  if (clean === 'auto' || clean === 'max') {
+    return Math.max(1, Math.min(availableParallelism(), 16))
+  }
+  const n = Number(clean)
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`invalid workers count: ${raw}\n${USAGE}`)
+    process.exit(2)
+  }
+  return Math.min(n, 32)
+}
+
+function isEnvTruthy(name: string): boolean {
+  const v = (process.env[name] ?? '').trim().toLowerCase()
+  return v === '1' || v === 'true' || v === 'yes' || v === 'aes-256-gcm'
 }
 
 function parseArgs(argv: string[]): CliArgs {
+  const envWebPort = Number((process.env['FW_WEB_PORT'] ?? '').trim())
+  const envApiPort = Number((process.env['FW_API_PORT'] ?? '').trim())
+  const envWorkersRaw = (process.env['FW_API_WORKERS'] ?? '').trim()
   const args: CliArgs = {
     configDir: './data/headless',
     once: false,
     durationSec: null,
     intervalSec: null,
-    webPort: null
+    webPort: null,
+    apiPort: Number.isInteger(envApiPort) && envApiPort > 0 ? envApiPort : null,
+    workers: envWorkersRaw !== '' ? parseWorkersValue(envWorkersRaw) : 1
   }
-  const envWebPort = Number((process.env['FW_WEB_PORT'] ?? '').trim())
   const needValue = (flag: string, i: number): string => {
     const v = argv[i + 1]
     if (v === undefined || v.startsWith('--')) {
@@ -145,12 +194,20 @@ function parseArgs(argv: string[]): CliArgs {
       } else {
         args.webPort = Number.isFinite(envWebPort) && envWebPort > 0 ? envWebPort : 8787
       }
+    } else if (a === '--api-port') {
+      args.apiPort = needNumber(a, needValue(a, i++))
+    } else if (a === '--workers') {
+      args.workers = parseWorkersValue(needValue(a, i++))
     } else {
       console.error(`unknown argument: ${a}\n${USAGE}`)
       process.exit(2)
     }
   }
-  if (args.once) args.webPort = null // 单轮冒烟无 Web
+  if (args.once) {
+    args.webPort = null // 单轮冒烟无 Web / API 常驻服务
+    args.apiPort = null
+    args.workers = 1
+  }
   return args
 }
 
@@ -181,8 +238,95 @@ function readyChannelSignature(cfg: AppConfig): string {
     .join('|')
 }
 
+interface WorkerSnapshotMessage {
+  type: 'fw:activity-snapshot'
+  snapshot: ActivitySnapshotPayload
+}
+
+function buildActivityHttpDeps(): {
+  authenticator: ActivityClientAuthenticator
+  rateLimiter: IpRateLimiter
+  corsOrigin: string
+} {
+  const secret = (process.env['FW_ACTIVITY_SECRET'] ?? '').trim()
+  const requireEncryption = isEnvTruthy('FW_ACTIVITY_ENCRYPT')
+  const rawRpm = (process.env['FW_API_RATE_LIMIT_RPM'] ?? '').trim()
+  const rpm = rawRpm === '' ? 240 : Number(rawRpm)
+  const trustProxy = isEnvTruthy('FW_TRUST_PROXY')
+  const corsOrigin = (process.env['FW_API_CORS_ORIGIN'] ?? '*').trim() || '*'
+
+  return {
+    authenticator: new ActivityClientAuthenticator({
+      secret,
+      requireEncryption
+    }),
+    rateLimiter: new IpRateLimiter({
+      requestsPerMinute: Number.isFinite(rpm) ? rpm : 240,
+      trustProxy
+    }),
+    corsOrigin
+  }
+}
+
+/**
+ * Cluster 只读 API Worker 进程：不跑爬虫、不写磁盘、不连 Telegram，
+ * 仅持有内存 `ReplicaActivityView` 并承载高并发 `/api/v1/activities*` 读取。
+ */
+async function runClusterApiWorker(args: CliArgs): Promise<number | null> {
+  if (args.apiPort === null) return 1
+  const logger = createLogger()
+  logger.onLog((e) => {
+    const line = `${e.ts} [worker:${process.pid}] [${e.level}] ${e.msg}`
+    if (e.level === 'error') console.error(line)
+    else if (e.level === 'warn') console.warn(line)
+    else console.log(line)
+  })
+
+  const replica = new ReplicaActivityView()
+  process.on('message', (msg: unknown) => {
+    if (
+      typeof msg === 'object' &&
+      msg !== null &&
+      (msg as { type?: unknown }).type === 'fw:activity-snapshot'
+    ) {
+      replica.applySnapshot((msg as WorkerSnapshotMessage).snapshot)
+    }
+  })
+
+  const sec = buildActivityHttpDeps()
+  const apiHost = (process.env['FW_API_HOST'] ?? '0.0.0.0').trim() || '0.0.0.0'
+  const pubServer = createPublicActivityServer({
+    port: args.apiPort,
+    host: apiHost,
+    readView: replica,
+    authenticator: sec.authenticator,
+    rateLimiter: sec.rateLimiter,
+    corsOrigin: sec.corsOrigin,
+    logger
+  })
+
+  process.send?.({ type: 'fw:worker-ready' })
+
+  let closing = false
+  const closeWorker = (): void => {
+    if (closing) return
+    closing = true
+    void pubServer.close().finally(() => {
+      logger.close()
+      process.exit(0)
+    })
+  }
+  process.on('SIGINT', closeWorker)
+  process.on('SIGTERM', closeWorker)
+  process.on('disconnect', closeWorker)
+  return null
+}
+
 async function main(): Promise<number | null> {
   const args = parseArgs(process.argv.slice(2))
+  if (cluster.isWorker) {
+    return runClusterApiWorker(args)
+  }
   const dir = resolve(args.configDir)
   const logsDir = join(dir, 'logs')
   mkdirSync(logsDir, { recursive: true })
@@ -511,6 +655,29 @@ async function main(): Promise<number | null> {
   const engineState = new FileEngineState(join(dir, 'state.json'))
   engineState.load()
 
+  // ---- 社区活动归集（自动识别 + 1 楼详情抓取 + AI 精筛 + 内存索引存储） ---------
+  let broadcastActivitySnapshot: ((snapshot: ActivitySnapshotPayload) => void) | null = null
+  const activityStore = new ActivityStore({
+    dataDir: join(dir, ACTIVITIES_DIR_NAME),
+    onChanged: (snap) => {
+      broadcastActivitySnapshot?.(snap)
+    }
+  })
+  const detailFetcher = new TopicDetailFetcher({
+    fetchHtml: (url, init) => clients.site.get(url, init)
+  })
+  const activityAiExtractor = new ActivityAiExtractor({
+    provider: aiProvider,
+    logWarn: (msg) => logger.warn(msg)
+  })
+  const activityCollector = new ActivityCollector({
+    store: activityStore,
+    detailFetcher,
+    aiExtractor: activityAiExtractor,
+    getConfig: () => getEffective(),
+    logger
+  })
+
   // ---- 热重载副作用（R8-C，对齐桌面 applyConfigSideEffects 的差异重建思路） ------
   // 只在配置**真正变化**的键相关时动作，避免无关重载（如只改关键词）无谓中断
   // 在途请求（close 旧 client 会中断其上在途请求，与桌面 setProxy 同款代价）：
@@ -620,6 +787,7 @@ async function main(): Promise<number | null> {
     dispositions,
     // R17：全量话题存档（unseen 循环顶部落档；--once 基线轮不落）
     topicArchive,
+    activityCollector,
     onStatus: (s: EngineStatus) => {
       printStatus(s)
       webBroadcast?.(IPC.evStatus, s)
@@ -634,12 +802,15 @@ async function main(): Promise<number | null> {
   // ---- --once：单轮后打印统计并退出（跳过日报；不起 watch：单轮语义） -----------
   if (args.once) {
     await engine.pollOnce()
+    await activityCollector.drain()
+    await activityStore.flush()
     const st = engine.getStatus()
     const notified = onceHits.filter((h) => h.notifiedAt !== null).length
     const failed = onceHits.filter((h) => h.notifyError !== null).length
     const muted = onceHits.length - notified - failed
     console.log(
       `once summary: fetched=${fetchedCount} fresh=${freshCount} hits=${onceHits.length} ` +
+        `activities=${activityStore.size()} ` +
         `notified=${notified} failed=${failed} muted-or-unconfigured=${muted} ` +
         `ai=mode:${st.ai.effectiveMode}/degraded:${st.ai.degraded}/calls:${st.ai.callsToday}`
     )
@@ -652,6 +823,8 @@ async function main(): Promise<number | null> {
     // 退出码语义：仅抓取本身失败（backoff/challenged）为 1；telegram 未配置/推送失败均 0
     return st.health === 'ok' ? 0 : 1
   }
+
+  let stopped = false
 
   // ---- 常驻模式 ------------------------------------------------------------
   engine.start()
@@ -694,13 +867,16 @@ async function main(): Promise<number | null> {
   }
   alignRemoteControl(getEffective())
 
-  // ---- Web 管理界面（--web，Docker 部署的 UI 面） ------------------------------
+  const activityHttpSec = buildActivityHttpDeps()
+
+  // ---- Web 管理界面（--web，Docker 部署的 UI 面 + 内置活动 API） ----------------
   // 静态目录（渲染层构建产物）可被 FW_WEB_ROOT 覆盖；缺失不致命——API/SSE 照常
   // （curl 仍可管理），仅浏览器打开无页面，log warn 提示先 npm run build。
   let webServer: WebServer | null = null
   if (args.webPort !== null) {
     const webRoot = resolve(process.env['FW_WEB_ROOT'] ?? './out/renderer')
     const webToken = (process.env['FW_WEB_TOKEN'] ?? '').trim()
+    const webHost = (process.env['FW_WEB_HOST'] ?? '0.0.0.0').trim() || '0.0.0.0'
     const webCtx: WebApiContext = {
       dataDir: dir,
       logger,
@@ -717,6 +893,7 @@ async function main(): Promise<number | null> {
     }
     webServer = createWebServer({
       port: args.webPort,
+      host: webHost,
       webRoot,
       ...(webToken !== '' ? { token: webToken } : {}),
       handlers: createInvokeHandlers(webCtx),
@@ -733,6 +910,15 @@ async function main(): Promise<number | null> {
           /* load 自带损坏容错 */
         }
       },
+      activity: {
+        readView: activityStore,
+        authenticator: activityHttpSec.authenticator,
+        rateLimiter: activityHttpSec.rateLimiter,
+        corsOrigin: activityHttpSec.corsOrigin,
+        adminStore: activityStore,
+        adminCollector: activityCollector,
+        triggerScanNow: () => engine.runNow()
+      },
       logger
     })
     webBroadcast = webServer.broadcast
@@ -742,6 +928,75 @@ async function main(): Promise<number | null> {
     if (webToken === '') {
       logger.warn('web ui has NO token (FW_WEB_TOKEN unset) — do not expose it to the public internet')
     }
+  }
+
+  // ---- 独立高并发公开只读活动 API 端口（--api-port + 可选多进程 Cluster） --------
+  let publicApiServer: PublicActivityServer | null = null
+  if (args.apiPort !== null) {
+    const apiHost = (process.env['FW_API_HOST'] ?? '0.0.0.0').trim() || '0.0.0.0'
+    if (args.workers <= 1) {
+      publicApiServer = createPublicActivityServer({
+        port: args.apiPort,
+        host: apiHost,
+        readView: activityStore,
+        authenticator: activityHttpSec.authenticator,
+        rateLimiter: activityHttpSec.rateLimiter,
+        corsOrigin: activityHttpSec.corsOrigin,
+        logger
+      })
+    } else {
+      const sendSnapshotToWorker = (
+        worker: Worker,
+        snap: ActivitySnapshotPayload
+      ): void => {
+        if (!worker.isConnected()) return
+        try {
+          const msg: WorkerSnapshotMessage = { type: 'fw:activity-snapshot', snapshot: snap }
+          worker.send(msg)
+        } catch {
+          /* worker 正在退出 */
+        }
+      }
+
+      broadcastActivitySnapshot = (snap) => {
+        for (const w of Object.values(cluster.workers ?? {})) {
+          if (w !== undefined) sendSnapshotToWorker(w, snap)
+        }
+      }
+
+      const spawnWorker = (): void => {
+        if (stopped) return
+        const w = cluster.fork()
+        w.on('message', (msg: unknown) => {
+          if (
+            typeof msg === 'object' &&
+            msg !== null &&
+            (msg as { type?: unknown }).type === 'fw:worker-ready'
+          ) {
+            sendSnapshotToWorker(w, activityStore.exportSnapshot())
+          }
+        })
+      }
+
+      cluster.on('exit', (worker, code, signal) => {
+        if (stopped) return
+        logger.warn(
+          `activity api worker pid=${worker.process.pid ?? '?'} exited (code=${code ?? '-'} signal=${signal ?? '-'}), respawning in 1s`
+        )
+        setTimeout(spawnWorker, 1000).unref()
+      })
+
+      for (let i = 0; i < args.workers; i++) {
+        spawnWorker()
+      }
+      logger.info(
+        `spawned ${args.workers} read-only activity api cluster workers on ${apiHost}:${args.apiPort}`
+      )
+    }
+  } else if (args.workers > 1) {
+    logger.warn(
+      `--workers=${args.workers} ignored because --api-port / FW_API_PORT is not set; serving activity API single-process on web port`
+    )
   }
 
   // 配置热重载 watch（R8-C）：监听 <dir>（macOS rename 换 inode，盯目录才不丢），
@@ -754,7 +1009,6 @@ async function main(): Promise<number | null> {
   // 到点依次 await 两个 service.tick；分类报告全关时其 nextCheckAt=Infinity，
   // min 退化为日报单服务节奏。--once 单轮冒烟不走到这里（早退）。
   let reportTimer: ReturnType<typeof setTimeout> | null = null
-  let stopped = false
   const scheduleReportTimer = (): void => {
     if (stopped) return
     const sleep = Math.min(
@@ -803,6 +1057,7 @@ async function main(): Promise<number | null> {
     watcher.close() // 先停热重载：退出路径不再触发重载动作
     if (reportTimer !== null) clearTimeout(reportTimer)
     botCommands.stop() // 显式停遥控长轮询（坑8：退出不留悬挂的 getUpdates 消费者）
+    activityCollector.stop()
     engine.pause()
     void (async () => {
       try {
@@ -817,7 +1072,21 @@ async function main(): Promise<number | null> {
         } catch (err) {
           console.error('topics archive flush failed during shutdown:', err)
         }
+        try {
+          await activityStore.flush()
+        } catch (err) {
+          console.error('activity store flush failed during shutdown:', err)
+        }
+        broadcastActivitySnapshot = null
         webBroadcast = null
+        for (const w of Object.values(cluster.workers ?? {})) {
+          try {
+            w?.disconnect()
+          } catch {
+            /* 已断连 */
+          }
+        }
+        void publicApiServer?.close()
         void webServer?.close()
         clients.site.close()
         clients.tg.close()

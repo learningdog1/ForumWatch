@@ -149,6 +149,8 @@ describe('写侧去重（同 key 进程内只落一行；重启语义）', () =>
 })
 
 describe('readDay / readRange 读取', () => {
+  const sep20 = new Date(2026, 8, 20, 12, 0, 0, 0).getTime()
+
   it('readDay：文件不存在 → []；坏行/形状不符跳过，好行保留', async () => {
     const dataDir = join(dir, TOPICS_DIR_NAME)
     await mkdir(dataDir, { recursive: true })
@@ -171,7 +173,7 @@ describe('readDay / readRange 读取', () => {
       '' // 空行
     ]
     await writeFile(join(dataDir, '2026-09-18.jsonl'), lines.join('\n') + '\n', 'utf-8')
-    const store = new TopicArchiveStore({ dataDir })
+    const store = new TopicArchiveStore({ dataDir, now: clockAt(sep20) })
     const recs = await store.readDay('2026-09-18')
     expect(recs).toHaveLength(1)
     expect(recs[0]!.topicId).toBe('1')
@@ -190,7 +192,7 @@ describe('readDay / readRange 读取', () => {
     await writeFile(join(dataDir, '2026-09-17.jsonl'), day17.join('\n') + '\n', 'utf-8')
     await writeFile(join(dataDir, '2026-09-18.jsonl'), day18.join('\n') + '\n', 'utf-8')
 
-    const store = new TopicArchiveStore({ dataDir })
+    const store = new TopicArchiveStore({ dataDir, now: clockAt(sep20) })
     const range = await store.readRange('2026-09-16', '2026-09-19')
     // 首见优先：s:1 取 09-17 那行（firstSeenAt 更早），s:2 在其后
     expect(range.map((r) => r.key)).toEqual(['s:1', 's:2'])
@@ -208,20 +210,22 @@ describe('readDay / readRange 读取', () => {
         'utf-8'
       )
     }
-    const store = new TopicArchiveStore({ dataDir })
+    const store = new TopicArchiveStore({ dataDir, now: clockAt(sep20) })
     const range = await store.readRange('2026-09-17', '2026-09-17')
     expect(range.map((r) => r.key)).toEqual(['s:17'])
   })
 })
 
 describe('listDays / coveredDays', () => {
+  const sep20 = new Date(2026, 8, 20, 12, 0, 0, 0).getTime()
+
   it('listDays 新→旧，只认 YYYY-MM-DD.jsonl 形状', async () => {
     const dataDir = join(dir, TOPICS_DIR_NAME)
     await mkdir(dataDir, { recursive: true })
     for (const name of ['2026-09-18.jsonl', '2026-09-16.jsonl', 'not-a-date.txt', '2026-09-17.md']) {
       await writeFile(join(dataDir, name), '{}\n', 'utf-8')
     }
-    const store = new TopicArchiveStore({ dataDir })
+    const store = new TopicArchiveStore({ dataDir, now: clockAt(sep20) })
     expect(store.listDays()).toEqual(['2026-09-18', '2026-09-16'])
   })
 
@@ -239,7 +243,7 @@ describe('listDays / coveredDays', () => {
       JSON.stringify(baseRec('s:18')) + '\n',
       'utf-8'
     )
-    const store = new TopicArchiveStore({ dataDir })
+    const store = new TopicArchiveStore({ dataDir, now: clockAt(sep20) })
     expect(await store.coveredDays('2026-09-16', '2026-09-19')).toEqual([
       '2026-09-16',
       '2026-09-18'
@@ -325,7 +329,10 @@ describe('coveredDays 的 sourceIds 过滤口径（覆盖率 D 对齐配置来�
     await writeFile(join(dataDir, '2026-09-16.jsonl'), line('nodeseek', 'a'), 'utf-8')
     await writeFile(join(dataDir, '2026-09-17.jsonl'), line('v2ex', 'b'), 'utf-8')
     await writeFile(join(dataDir, '2026-09-18.jsonl'), line('nodeseek', 'c') + line('v2ex', 'd'), 'utf-8')
-    const store = new TopicArchiveStore({ dataDir })
+    const store = new TopicArchiveStore({
+      dataDir,
+      now: clockAt(new Date(2026, 8, 20, 12, 0, 0, 0).getTime())
+    })
     // 只统计 nodeseek：09-17（只有 v2ex）不算 covered
     expect(await store.coveredDays('2026-09-16', '2026-09-18', ['nodeseek'])).toEqual([
       '2026-09-16',

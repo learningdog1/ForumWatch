@@ -49,8 +49,8 @@ COPY --from=build /app/out/renderer ./web
 # 数据卷(配置/去重集/命中/日志全在此;升级换镜像不丢)
 VOLUME /data
 ENV FW_WEB_ROOT=/app/web
-# 端口可用 FW_WEB_PORT 覆盖(容器内监听端口,映射时保持一致)
-EXPOSE 8787
+# 端口可用 FW_WEB_PORT 覆盖(管理界面与同端口 API);若设置 FW_API_PORT(如 8788)则额外起物理隔离的高并发公开只读活动 API
+EXPOSE 8787 8788
 
 # 健康检查:API 可达即健康(引擎轮询状态在 UI 里看,不作为容器存活条件)
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \

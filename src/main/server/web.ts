@@ -24,10 +24,26 @@ import { createHash, randomInt } from 'node:crypto'
 import { chmodSync, createReadStream, existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { packBackup, restorePlan, unpackBackup } from '../backup'
+import type { ActivityCollector } from '../activity/collector'
+import type { ActivityReadView, ActivityStore } from '../activity/store'
 import type { Logger } from '../logger'
+import type { ActivityClientAuthenticator } from './activity-crypto'
+import { applyHighConcurrencyServerTuning, createActivityApiHandler } from './activity-api'
 import type { InvokeHandler, WebApiContext } from './api'
 import { collectBackupSegments, CONFIG_FILE, FEEDBACK_FILE, SEEN_FILE, STATE_FILE } from './api'
+import type { IpRateLimiter } from './rate-limit'
 import pkg from '../../../package.json'
+
+export interface WebServerActivityOptions {
+  readView: ActivityReadView
+  authenticator?: ActivityClientAuthenticator
+  rateLimiter?: IpRateLimiter
+  corsOrigin?: string
+  adminStore?: ActivityStore
+  adminCollector?: ActivityCollector
+  triggerScanNow?: () => void
+  nowMs?: () => number
+}
 
 export interface WebServerOptions {
   /** 监听端口(CMD 注入;容器内默认 8787) */
@@ -44,6 +60,8 @@ export interface WebServerOptions {
   backupCtx: WebApiContext
   /** 备份导入成功后的收尾(headless:挂 pendingRestart + 暂停引擎 + 重读配置) */
   onBackupImported: () => void
+  /** 可选活动 API 挂载项（同时暴露 /healthz、/api/v1/activities* 与受 FW_WEB_TOKEN 保护的 /api/v1/admin/activities*） */
+  activity?: WebServerActivityOptions
   logger: Logger
 }
 
@@ -303,6 +321,28 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     }
   }
 
+  const activityHandler =
+    opts.activity !== undefined
+      ? createActivityApiHandler({
+          readView: opts.activity.readView,
+          authenticator: opts.activity.authenticator,
+          rateLimiter: opts.activity.rateLimiter,
+          corsOrigin: opts.activity.corsOrigin,
+          nowMs: opts.activity.nowMs,
+          logger: opts.logger,
+          ...(opts.activity.adminStore !== undefined
+            ? {
+                admin: {
+                  store: opts.activity.adminStore,
+                  collector: opts.activity.adminCollector,
+                  triggerScanNow: opts.activity.triggerScanNow,
+                  isAdminAuthorized: authorized
+                }
+              }
+            : {})
+        })
+      : null
+
   // ---- 请求路由 ---------------------------------------------------------------
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
@@ -310,6 +350,10 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     try {
       if (path === '/api/health') {
         sendJson(res, 200, { ok: true, version: pkg.version, uptimeSec: Math.round(process.uptime()) })
+        return
+      }
+      // 活动 API 独立路由：客户端读取走 FW_ACTIVITY_SECRET/公开策略，管理写走 FW_WEB_TOKEN
+      if (activityHandler !== null && activityHandler.tryHandle(req, res)) {
         return
       }
       // /api/* 一律先过认证(静态 UI 公开)
@@ -387,6 +431,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
     )
   })
 
+  applyHighConcurrencyServerTuning(server, { requestTimeoutMs: 60_000 })
   server.listen(opts.port, opts.host ?? '0.0.0.0')
 
   return {

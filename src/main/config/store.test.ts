@@ -1919,4 +1919,35 @@ describe('ConfigStore × SecretBox（R9-W2 凭据加密落盘）', () => {
     const loaded = new ConfigStore(configPath, { secretBox: spacedBox }).load()
     expect(tg0(loaded.channels).botToken).toBe('111:abc')
   })
+
+  it('activity 配置段：缺省补默认开、悬挂 sourceIds 剔除、自定义词清洗并持久化往返', () => {
+    const legacyMissing = sanitizeConfig({
+      ...cfg(),
+      activity: undefined
+    })
+    expect(legacyMissing.activity).toEqual(DEFAULT_APP_CONFIG.activity)
+
+    const store = new ConfigStore(configPath)
+    store.save(
+      cfg({
+        activity: {
+          enabled: false,
+          fetchDetail: false,
+          useAiExtraction: true,
+          sourceIds: ['nodeseek', 'dangling-source', 'nodeseek'],
+          includeKeywords: [' 抽奖 ', '抽奖', '盖楼'],
+          excludeKeywords: [' 曝光 ']
+        }
+      })
+    )
+    const loaded = new ConfigStore(configPath).load()
+    expect(loaded.activity).toEqual({
+      enabled: false,
+      fetchDetail: false,
+      useAiExtraction: true,
+      sourceIds: ['nodeseek'],
+      includeKeywords: ['抽奖', '盖楼'],
+      excludeKeywords: ['曝光']
+    })
+  })
 })

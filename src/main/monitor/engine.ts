@@ -472,6 +472,24 @@ export interface EngineDeps {
   topicArchive?: {
     record(topic: Topic, now?: Date): void
   }
+  /**
+   * 社区活动后台采集器（可选——不注入 = 零行为，既有测试与引擎控制流逐字节不变）。
+   * observeRound 为同步非阻塞调用：内部仅做内存状态同步与候选入队，绝不拖慢轮询。
+   */
+  activityCollector?: {
+    observeRound(
+      sourceId: string,
+      topics: Topic[],
+      ctx: {
+        isBaseline: boolean
+        idFilter: boolean
+        oldThreshold: number | null
+        prevUnseenKeys: ReadonlySet<string>
+        unseenTopics?: Topic[]
+        now?: Date
+      }
+    ): void
+  }
   /** 状态变化回调（desired/health/nextPollAt 等每次变化后发出实时快照） */
   onStatus?: (s: EngineStatus) => void
   /** 命中回调（推送尝试 settle 后发出；含推送失败与静音两种非成功态） */
@@ -874,6 +892,13 @@ export class MonitorEngine {
       )
       rt.prevUnseenKeys = new Set() // 基线整页入集：无在途帖，豁免集清空
       rt.prevEffectiveNewCount = 0 // 整页吞并：无帖进管线，page2 触发条件复位
+      this.deps.activityCollector?.observeRound(adapter.id, topics, {
+        isBaseline: true,
+        idFilter,
+        oldThreshold: threshold,
+        prevUnseenKeys: rt.prevUnseenKeys,
+        now: new Date(this.now())
+      })
       return
     }
 
@@ -900,10 +925,25 @@ export class MonitorEngine {
       )
       rt.prevUnseenKeys = new Set() // 整页已入集：无在途帖
       rt.prevEffectiveNewCount = 0 // 整页吞并：无帖进管线
+      this.deps.activityCollector?.observeRound(adapter.id, topics, {
+        isBaseline: true,
+        idFilter,
+        oldThreshold: pageMaxId,
+        prevUnseenKeys: rt.prevUnseenKeys,
+        now: new Date(this.now())
+      })
       return
     }
 
     const unseen = topics.filter((t) => !this.deps.seen.has(seenKeyFor(adapter.id, t.id)))
+    this.deps.activityCollector?.observeRound(adapter.id, topics, {
+      isBaseline: false,
+      idFilter,
+      oldThreshold: threshold,
+      prevUnseenKeys: rt.prevUnseenKeys,
+      unseenTopics: unseen,
+      now: new Date(this.now())
+    })
     /** W3：本轮 unseen 键集（轮末整集替换为下一轮的豁免集 prevUnseenKeys） */
     const roundUnseenKeys = new Set(unseen.map((t) => seenKeyFor(adapter.id, t.id)))
     /** W3：本轮被旧帖过滤吞并（入 seen 不推送）的帖子数（观测用） */

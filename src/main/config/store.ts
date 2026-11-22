@@ -23,7 +23,9 @@ import { randomInt } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
+  DEFAULT_ACTIVITY_CONFIG,
   DEFAULT_APP_CONFIG,
+  type ActivityConfig,
   type AppConfig,
   type AiConfig,
   type CategoryReportConfig,
@@ -182,7 +184,8 @@ export function sanitizeConfig(cfg: AppConfig): AppConfig {
     sources,
     priceRules,
     similarity: sanitizeSimilarity(src.similarity),
-    ai: sanitizeAi(src.ai, sources)
+    ai: sanitizeAi(src.ai, sources),
+    activity: sanitizeActivity(src.activity, sources)
   }
 }
 
@@ -1063,4 +1066,43 @@ function sanitizeTimeHHMM(value: string | undefined, fallback = DEFAULT_REPORT_T
     return fallback
   }
   return value
+}
+
+/**
+ * 社区活动归集配置清洗：
+ * - 段整体缺失/非对象 → DEFAULT_ACTIVITY_CONFIG 深拷贝（默认开启自动归集，零推送打扰）；
+ * - enabled / fetchDetail / useAiExtraction 默认开（`!== false`），显式 false 才关；
+ * - sourceIds：仅保留存在于当前 sources 的 id（悬挂剔除，空数组 = 全部已启用来源）；
+ * - includeKeywords / excludeKeywords：复用 sanitizeKeywordList 口径（trim/去空/大小写不敏感去重）。
+ */
+function sanitizeActivity(raw: unknown, sources: SourceConfig[]): ActivityConfig {
+  if (typeof raw !== 'object' || raw === null) {
+    return structuredClone(DEFAULT_ACTIVITY_CONFIG)
+  }
+  const act = raw as {
+    enabled?: unknown
+    fetchDetail?: unknown
+    useAiExtraction?: unknown
+    sourceIds?: unknown
+    includeKeywords?: unknown
+    excludeKeywords?: unknown
+  }
+  const validSourceIds = new Set(sources.map((s) => s.id))
+  const rawSourceIds = Array.isArray(act.sourceIds) ? act.sourceIds : []
+  const sourceIds: string[] = []
+  for (const item of rawSourceIds) {
+    if (typeof item !== 'string') continue
+    const id = item.trim()
+    if (id.length === 0 || sourceIds.includes(id)) continue
+    if (!validSourceIds.has(id)) continue
+    sourceIds.push(id)
+  }
+  return {
+    enabled: act.enabled !== false,
+    fetchDetail: act.fetchDetail !== false,
+    useAiExtraction: act.useAiExtraction !== false,
+    sourceIds,
+    includeKeywords: sanitizeKeywordList(act.includeKeywords as string[] | undefined),
+    excludeKeywords: sanitizeKeywordList(act.excludeKeywords as string[] | undefined)
+  }
 }

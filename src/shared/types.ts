@@ -652,6 +652,107 @@ export interface AppConfig {
   }
   /** AI 能力配置（Provider 未配置时语义档自动降级为字面档） */
   ai: AiConfig
+  /**
+   * 社区活动归集配置（服务端 API / 客户端 Anode 活动流的数据源配置）。
+   * 可选加法字段，不 bump schemaVersion：旧配置文件或测试夹具缺失时由
+   * sanitizeConfig 补全 DEFAULT_ACTIVITY_CONFIG；默认开启自动识别且不产生
+   * 任何 Telegram 推送（纯入库供只读 API 消费）。
+   */
+  activity?: ActivityConfig
+}
+
+/** 活动类型枚举（抽奖 / 福利派送 / 限时促销 / 社区专题活动 / 盖楼互动 / 其他） */
+export type ActivityKind = 'lottery' | 'giveaway' | 'promo' | 'event' | 'floor' | 'other'
+
+/** 活动时间状态（按服务端实时时钟或人工终止标记动态派生） */
+export type ActivityTimeStatus = 'upcoming' | 'ongoing' | 'ended'
+
+/** 带文案的外部链接（1 楼详情提取的抽奖页/活动页/下单链接） */
+export interface ActivityLabeledLink {
+  text: string
+  url: string
+}
+
+/**
+ * 面向客户端（如 Anode `ForumWatchActivityItem`）暴露的活动列表项契约。
+ * 核心七字段（id / title / summary / sourceUrl / organizer /
+ * startsAtEpochMillis / endsAtEpochMillis）与客户端领域模型逐字对齐，
+ * 扩展字段供客户端筛选、状态标签、开奖跳转与原生帖子内跳使用。
+ */
+export interface ActivityItem {
+  id: string
+  title: string
+  summary: string
+  sourceUrl: string
+  organizer: string
+  organizerUrl: string | null
+  startsAtEpochMillis: number | null
+  endsAtEpochMillis: number | null
+  status: ActivityTimeStatus
+  kind: ActivityKind
+  pinned: boolean
+  sourceId: string
+  topicId: string | null
+  category: string
+  categorySlug: string
+  luckyUrl: string | null
+  drawFloor: number | null
+  prize: string | null
+  participation: string | null
+  tags: string[]
+  createdAtEpochMillis: number
+  updatedAtEpochMillis: number
+}
+
+/** 单条活动详情（在列表项基础上附带清洗后的 1 楼正文与外部链接列表） */
+export interface ActivityDetail extends ActivityItem {
+  bodyMarkdown: string
+  externalLinks: ActivityLabeledLink[]
+}
+
+/** 活动列表分页响应载荷 */
+export interface ActivityFeedPage {
+  ok: true
+  updatedAtEpochMillis: number
+  serverTimeEpochMillis: number
+  page: number
+  pageSize: number
+  page_size: number
+  total: number
+  hasMore: boolean
+  has_more: boolean
+  counts: {
+    all: number
+    ongoing: number
+    upcoming: number
+    ended: number
+  }
+  items: ActivityItem[]
+}
+
+/** 社区活动自动识别与归集配置 */
+export interface ActivityConfig {
+  /** 是否开启自动从监控来源归集社区活动（默认 true） */
+  enabled: boolean
+  /** 标题初筛命中后是否按需补抓 1 楼详情页（默认 true） */
+  fetchDetail: boolean
+  /** AI Provider 已配置时是否使用 AI 精筛与结构化提取（默认 true） */
+  useAiExtraction: boolean
+  /** 限定参与活动归集的来源 id（空数组 = 全部已启用来源） */
+  sourceIds: string[]
+  /** 附加初筛包含词（与内置抽奖/福利/盖楼/节日/促销词库合并） */
+  includeKeywords: string[]
+  /** 活动排除词（命中任一一票否决） */
+  excludeKeywords: string[]
+}
+
+export const DEFAULT_ACTIVITY_CONFIG: ActivityConfig = {
+  enabled: true,
+  fetchDetail: true,
+  useAiExtraction: true,
+  sourceIds: [],
+  includeKeywords: [],
+  excludeKeywords: []
 }
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
@@ -695,6 +796,14 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
       weekly: { enabled: false, timeHHMM: '08:00' },
       monthly: { enabled: false, timeHHMM: '08:30' }
     }
+  },
+  activity: {
+    enabled: true,
+    fetchDetail: true,
+    useAiExtraction: true,
+    sourceIds: [],
+    includeKeywords: [],
+    excludeKeywords: []
   }
 }
 

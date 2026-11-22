@@ -61,7 +61,7 @@ docker run -d --name forumwatch \
   cashewchickengazgazgood/forumwatch
 ```
 
-浏览器打开 `http://<主机>:8787`，首次会提示输入访问令牌（即 `FW_WEB_TOKEN`，纯内网可不设）。数据全部落在 `/data` 卷，升级只需 `docker pull` 换镜像。多平台镜像（amd64 / arm64），发版 tag 推送时自动构建。完整说明（compose 模板、环境变量、备份导入导出、与桌面版数据互导）见 [深度文档](docs/usage.md#docker-部署)。
+浏览器打开 `http://<主机>:8787`，首次会提示输入访问令牌（即 `FW_WEB_TOKEN`，纯内网可不设）。数据全部落在 `/data` 卷，升级只需 `docker pull` 换镜像。多平台镜像（amd64 / arm64），发版 tag 推送时自动构建。完整说明（compose 模板、环境变量、备份导入导出、与桌面版数据互导）见 [深度文档](docs/usage.md#docker-部署)；面向公网与移动端客户端的高并发活动聚合 API（`/api/v1/activities` + 多进程 Cluster Worker）见 [活动 API 与高并发部署指南](docs/activity-api.md)。
 
 ## 🚀 上手
 

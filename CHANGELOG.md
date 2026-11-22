@@ -6,6 +6,24 @@
 
 格式约定：`## [vX.Y.Z] - YYYY-MM-DD`，新增/改进/修复分组，面向使用者而非开发者。
 
+## [v0.12.0] - 2026-11-22
+
+新增面向公网与移动端客户端（如 Anode）的**高并发社区活动聚合引擎与 HTTP API**，支持自动识别论坛抽奖/盖楼/福利派送/节日专题并横向扩展多核只读服务。
+
+### 新增
+
+- **社区活动自动识别与结构化归集**：监控新帖时通过初筛词库过滤出抽奖、盖楼、福利派送、节日庆典与限时闪购候选，串行限速按需补抓 1 楼详情（支持解码 NodeSeek `temp-script` 原始 Markdown 与发帖时间、提取 `nodeseek.com/lucky` 官方开奖链接及截止时间/目标楼层），并可结合已配置的 AI 模型做二次精筛与规则提炼；未配 AI 或遇 Cloudflare 验证时自动无损降级。
+- **零请求活动状态同步**：每轮抓取首页列表时自动检测标题中的「已开奖 / 已结束」标记，第一时间将活动状态同步为 `ended`；同时基于服务端时钟动态翻转 `upcoming → ongoing → ended`。
+- **高并发客户端只读接口（`/api/v1/activities` & `/api/v1/activities/:id` & `/healthz`）**：
+  - 读路径 100% 纯内存索引 + LRU 预序列化 `Buffer` + 预压缩 `Gzip` 缓存，支持 `ETag` (`If-None-Match` → `304`) 与 `Last-Modified` 条件请求，时间状态翻转时 `ETag` 自动平滑更新；
+  - 支持 `--api-port`（`FW_API_PORT`）+ `--workers auto`（`FW_API_WORKERS`）启动多进程 Cluster 只读 Worker 池，主进程单实例爬站推送、多核 Worker 物理隔离管理面抗高并发；
+  - 内置单 IP 令牌桶限流（`FW_API_RATE_LIMIT_RPM`），鉴权支持公开只读、`Bearer` 令牌，或与客户端 `OverseasApiCrypto` 同款的 `HMAC-SHA256` 请求签名 + `AES-256-GCM` 加密响应信封（`FW_ACTIVITY_SECRET` / `FW_ACTIVITY_ENCRYPT`）。
+- **管理端人工维护接口（`/api/v1/admin/activities*`）**：受 `FW_WEB_TOKEN` 保护，支持手动创建活动、输入帖子链接一键抓取提炼入库（`/ingest`）、置顶/上下线/人工结单（自动加 `manualOverride` 保护不被爬虫覆盖）以及删除写入防复活墓碑。完整部署与客户端接入文档见 `docs/activity-api.md`。
+
+### 修复
+
+- 修复 `topics-store` 单测中未注入固定时钟导致的跨月保留期测试失败问题。
+
 ## [v0.11.0] - 2026-09-30
 
 界面全量重设计**「瞭望塔」**：深色控制台成为默认面貌，五个页面布局整体重做，命中详情抽屉与实时命中流上线。

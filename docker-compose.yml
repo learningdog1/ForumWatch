@@ -1,21 +1,38 @@
 # ForumWatch Docker 部署示例 —— `docker compose up -d`
 #
-# 首次启动会写入默认配置到 /data/config.json;更省事的路径是直接打开
-# http://localhost:8787 在网页里配好关键词与 Telegram(与桌面版同一套界面)。
-# 数据(配置/去重集/命中/日志)全部在命名卷 fw-data 里,升级换镜像不丢。
+# 首次启动会写入默认配置到 /data/config.json；打开 http://127.0.0.1:8787 即可进入网页管理台。
+# 数据（配置/去重集/命中/活动库/日志）全部在命名卷 fw-data 里，升级换镜像不丢。
+#
+# 高并发部署建议（对接客户端活动功能）：
+# - 管理端 8787 仅绑定本机 `127.0.0.1:8787:8787`（配合 SSH 隧道或内网访问，绝不裸奔管理面）；
+# - 开启 `FW_API_PORT: "8788"` + `FW_API_WORKERS: "auto"`，将只读活动 API 跑在多核 Cluster Worker 上对外暴露；
+# - 详见 docs/activity-api.md。
 
 services:
   forumwatch:
+    build: .
     image: cashewchickengazgazgood/forumwatch:latest
     container_name: forumwatch
     restart: unless-stopped
     ports:
-      - "8787:8787" # 管理界面(宿主侧可改,容器侧保持 8787 或同步 FW_WEB_PORT)
+      - "127.0.0.1:8787:8787" # 管理界面与管理 API（建议仅本机或反代鉴权暴露）
+      - "8788:8788"           # 物理隔离的高并发公开只读活动 API（供客户端 App 连接）
     environment:
-      TZ: Asia/Shanghai # 日报/命中按本地日分桶,务必设置时区
-      # 公网可达时必须设置访问令牌(浏览器首次访问会提示输入):
-      # FW_WEB_TOKEN: change-me-to-a-strong-secret
-      # 也可用环境变量快速注入 Telegram 凭据(不落盘,优先级高于配置文件):
+      TZ: Asia/Shanghai # 日报/命中/活动时间解析按本地时区运行，务必设置时区
+      # 管理后台访问令牌（保护网页管理台与 /api/v1/admin/activities*）：
+      FW_WEB_TOKEN: change-me-to-a-strong-admin-token
+      # 高并发公开只读活动 API 配置：
+      FW_API_PORT: "8788"
+      FW_API_WORKERS: "auto"         # 自动按服务器 CPU 核数启动只读 Worker 进程池
+      FW_API_RATE_LIMIT_RPM: "300"   # 单 IP 每分钟请求上限（0 表示关闭内置限流）
+      FW_TRUST_PROXY: "true"         # 若前置 Nginx / Cloudflare 反代，开启以识别真实客户端 IP
+      # 客户端活动 API 鉴权与加密（可选）：
+      # - 不设 FW_ACTIVITY_SECRET：公开只读 JSON + ETag/Gzip（吞吐最高，适合套 CDN/Nginx 缓存）
+      # - 仅设 FW_ACTIVITY_SECRET：支持 Bearer 或 OverseasApiCrypto 同款 HMAC-SHA256 签名，返回明文 JSON + Gzip
+      # - 同时设 FW_ACTIVITY_ENCRYPT="true"：强制 HMAC-SHA256 签名 + AES-256-GCM 加密响应信封
+      # FW_ACTIVITY_SECRET: "replace-with-client-shared-secret"
+      # FW_ACTIVITY_ENCRYPT: "false"
+      # 也可用环境变量快速注入 Telegram 凭据（不落盘，优先级高于配置文件）：
       # NSM_BOT_TOKEN: "123456:ABC..."
       # NSM_CHAT_ID: "10086"
     volumes:
