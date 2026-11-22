@@ -632,7 +632,7 @@ export function createPublicActivityServer(
     )
   })
 
-  server.listen(opts.port, opts.host ?? '0.0.0.0')
+  server.listen(opts.port, opts.host ?? '0.0.0.0', 4096)
 
   return {
     address: () => listening,

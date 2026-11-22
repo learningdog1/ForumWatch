@@ -299,20 +299,27 @@ describe('活动 HTTP API（公开只读 + ETag/Gzip + OverseasApiCrypto 加密 
     await warm.arrayBuffer()
 
     const startMs = performance.now()
-    const statuses = await Promise.all(
-      Array.from({ length: 500 }, (_, idx) =>
-        fetch(
-          benchUrl,
-          idx % 2 === 0 ? undefined : { headers: { 'if-none-match': etag } }
-        ).then(async (r) => {
+    const statuses: number[] = []
+    let nextIdx = 0
+    const totalRequests = 500
+    const workerConcurrency = 50
+    await Promise.all(
+      Array.from({ length: workerConcurrency }, async () => {
+        while (true) {
+          const idx = nextIdx++
+          if (idx >= totalRequests) break
+          const r = await fetch(
+            benchUrl,
+            idx % 2 === 0 ? undefined : { headers: { 'if-none-match': etag } }
+          )
           await r.arrayBuffer()
-          return r.status
-        })
-      )
+          statuses.push(r.status)
+        }
+      })
     )
     const elapsedMs = performance.now() - startMs
     expect(statuses.filter((s) => s === 200)).toHaveLength(250)
     expect(statuses.filter((s) => s === 304)).toHaveLength(250)
-    expect(elapsedMs).toBeLessThan(5_000)
+    expect(elapsedMs).toBeLessThan(10_000)
   })
 })

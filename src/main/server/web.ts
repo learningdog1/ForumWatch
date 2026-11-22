@@ -432,7 +432,7 @@ export function createWebServer(opts: WebServerOptions): WebServer {
   })
 
   applyHighConcurrencyServerTuning(server, { requestTimeoutMs: 60_000 })
-  server.listen(opts.port, opts.host ?? '0.0.0.0')
+  server.listen(opts.port, opts.host ?? '0.0.0.0', 4096)
 
   return {
     broadcast,
