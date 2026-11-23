@@ -24,6 +24,22 @@ function readHeader(headers: Record<string, string> | Headers, name: string): st
 }
 
 /**
+ * 挑战判定（纯谓词，非断言）：HTTP 403 **或** `cf-mitigated` 头值含 `challenge`
+ * （大小写不敏感子串匹配）即视为被 Cloudflare 挑战。
+ *
+ * 供「只想知道是不是挑战、不想要抛错语义」的调用方使用——net 层的 FlareSolverr
+ * 破盾装饰器（src/main/net/cf-solver.ts）据此在响应**返回调用方之前**拦截挑战，
+ * 与本断言保持同一检测口径（单一事实源）。
+ */
+export function isChallengeResponse(
+  status: number,
+  headers: Record<string, string> | Headers
+): boolean {
+  const mitigated = readHeader(headers, 'cf-mitigated')
+  return status === 403 || mitigated.toLowerCase().includes('challenge')
+}
+
+/**
  * 挑战断言（非 403 且无 challenge 头时安静返回）：
  * - HTTP 403
  * - `cf-mitigated` 头值含 `challenge`（大小写不敏感的子串匹配，与既有 html 行为一致）
@@ -32,8 +48,8 @@ export function assertNotChallenged(
   status: number,
   headers: Record<string, string> | Headers
 ): void {
-  const mitigated = readHeader(headers, 'cf-mitigated')
-  if (status === 403 || mitigated.toLowerCase().includes('challenge')) {
+  if (isChallengeResponse(status, headers)) {
+    const mitigated = readHeader(headers, 'cf-mitigated')
     throw new ChallengeError(
       `cloudflare challenge: status=${status} cf-mitigated=${mitigated || '(none)'}`
     )

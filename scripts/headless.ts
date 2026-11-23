@@ -64,6 +64,7 @@ import { ConfigStore, MIN_POLL_INTERVAL_SEC } from '../src/main/config/store'
 import { PlainSecretBox } from '../src/main/config/secrets'
 import { watchConfigDir, type ConfigDirWatcher } from '../src/main/config/watch'
 import { HttpClient, redactProxyUrl } from '../src/main/net/http'
+import { createCfSolvingFetch, FlareSolverrClient } from '../src/main/net/cf-solver'
 import type { FetchLike } from '../src/main/net/http-types'
 import { AiProvider } from '../src/main/ai/provider'
 import { SemanticEvaluator } from '../src/main/ai/evaluator'
@@ -115,7 +116,11 @@ env: NSM_BOT_TOKEN / NSM_CHAT_ID  注入 telegram 凭据（不落盘）
      FW_ACTIVITY_SECRET           客户端活动 API 密钥（支持 Bearer 或 OverseasApiCrypto 同款 HMAC-SHA256）
      FW_ACTIVITY_ENCRYPT          设为 1/true 时强制要求 HMAC 签名并以 AES-256-GCM 加密信封返回
      FW_API_RATE_LIMIT_RPM        单 IP 每分钟限流次数（默认 240；0 表示不限流）
-     FW_TRUST_PROXY               设为 1/true 时采信反代 CF-Connecting-IP / X-Real-IP / X-Forwarded-For`
+     FW_TRUST_PROXY               设为 1/true 时采信反代 CF-Connecting-IP / X-Real-IP / X-Forwarded-For
+     FW_FLARESOLVERR_URL          FlareSolverr /v1 地址（如 http://flaresolverr:8191/v1）；设置后
+                                  站点 GET 被 CF 挑战时自动求解破盾（cf_clearance 缓存复用），空=禁用
+     FW_FLARESOLVERR_SESSION      FlareSolverr sticky 会话名（默认 forumwatch；会话丢失自动重建）
+     FW_FLARESOLVERR_TIMEOUT_MS   单次求解预算毫秒（默认 60000）`
 
 interface CliArgs {
   configDir: string
@@ -431,6 +436,35 @@ async function main(): Promise<number | null> {
     logger.close()
     return 1
   }
+
+  // ---- FlareSolverr 破盾（R20；FW_FLARESOLVERR_URL 设置时启用） -------------------
+  // headless 版没有桌面版的 Electron Chromium 栈降级，被 CF 挑战只能熔断冷却。
+  // 这里装饰 site GET 通道：挑战自动经同机 FlareSolverr 求解（cf_clearance+UA
+  // 缓存复用直连快路径，求解失败静默期原样放行——熔断语义不变）。闭包经
+  // clients 槽位现取实例，与既有 adapter fetch 同款热切换语义。未设置时零行为变化。
+  const flareSolverrUrl = (process.env['FW_FLARESOLVERR_URL'] ?? '').trim()
+  const flareSession = (process.env['FW_FLARESOLVERR_SESSION'] ?? 'forumwatch').trim() || 'forumwatch'
+  const flareTimeoutRaw = Number.parseInt(
+    (process.env['FW_FLARESOLVERR_TIMEOUT_MS'] ?? '').trim(),
+    10
+  )
+  const flareTimeoutMs =
+    Number.isFinite(flareTimeoutRaw) && flareTimeoutRaw > 0 ? flareTimeoutRaw : 60_000
+  const siteGetRaw: FetchLike = (url, init) => clients.site.get(url, init)
+  let flareSolverr: FlareSolverrClient | null = null
+  if (flareSolverrUrl !== '') {
+    flareSolverr = new FlareSolverrClient({
+      baseUrl: flareSolverrUrl,
+      session: flareSession,
+      maxTimeoutMs: flareTimeoutMs
+    })
+    logger.info(
+      `cf-solver enabled: ${flareSolverrUrl} (session "${flareSession}", timeout ${flareTimeoutMs}ms)`
+    )
+  }
+  const siteGet: FetchLike =
+    flareSolverr === null ? siteGetRaw : createCfSolvingFetch(siteGetRaw, { solver: flareSolverr, logger })
+
   // rebuildDerived 的差异基准（构造参数即当前生效值）
   let lastSiteProxy = getEffective().proxyScope === 'all' ? getEffective().proxyUrl : ''
   let lastTgProxy = getEffective().proxyUrl
@@ -456,7 +490,7 @@ async function main(): Promise<number | null> {
     if (s.type === 'nodeseek') {
       if (nodeseekAdapter === null) {
         nodeseekAdapter = new HtmlSourceAdapter({
-          fetchHtml: (url, init) => clients.site.get(url, init)
+          fetchHtml: siteGet
         })
       }
       return nodeseekAdapter
@@ -465,7 +499,7 @@ async function main(): Promise<number | null> {
       let adapter = v2exAdapters.get(s.id)
       if (adapter === undefined) {
         adapter = new V2exSourceAdapter({
-          fetchJson: (url, init) => clients.site.get(url, init),
+          fetchJson: siteGet,
           id: s.id
         })
         v2exAdapters.set(s.id, adapter)
@@ -480,7 +514,7 @@ async function main(): Promise<number | null> {
       id: s.id,
       url: s.url,
       ...(s.label !== undefined ? { label: s.label } : {}),
-      fetchFn: (url, init) => clients.site.get(url, init)
+      fetchFn: siteGet
     })
     rssAdapters.set(s.id, { url: s.url, label: s.label ?? '', adapter })
     return adapter
@@ -664,7 +698,7 @@ async function main(): Promise<number | null> {
     }
   })
   const detailFetcher = new TopicDetailFetcher({
-    fetchHtml: (url, init) => clients.site.get(url, init)
+    fetchHtml: siteGet
   })
   const activityAiExtractor = new ActivityAiExtractor({
     provider: aiProvider,
@@ -817,6 +851,7 @@ async function main(): Promise<number | null> {
     clients.site.close()
     clients.tg.close()
     clients.ai.close()
+    void flareSolverr?.destroySession()
     // 给日志 appendFile 一拍落盘再退出（尾部丢失本可容忍，尽量保住）
     await new Promise((r) => setTimeout(r, 100))
     logger.close()
@@ -1091,6 +1126,7 @@ async function main(): Promise<number | null> {
         clients.site.close()
         clients.tg.close()
         clients.ai.close()
+        void flareSolverr?.destroySession()
         logger.close()
         process.exit(0)
       }

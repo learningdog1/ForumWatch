@@ -26,6 +26,12 @@ services:
       FW_API_WORKERS: "auto"         # 自动按服务器 CPU 核数启动只读 Worker 进程池
       FW_API_RATE_LIMIT_RPM: "300"   # 单 IP 每分钟请求上限（0 表示关闭内置限流）
       FW_TRUST_PROXY: "true"         # 若前置 Nginx / Cloudflare 反代，开启以识别真实客户端 IP
+      # Cloudflare 破盾（可选，headless 部署推荐）：站点 GET 被 CF 挑战（403 / cf-mitigated）
+      # 时自动经同机 FlareSolverr 求解（cf_clearance+UA 缓存复用直连快路径）；空=禁用。
+      # 需保证本容器可达该地址（如把 flaresolverr 容器接入同一 docker 网络并引用容器名）。
+      # FW_FLARESOLVERR_URL: "http://flaresolverr:8191/v1"
+      # FW_FLARESOLVERR_SESSION: "forumwatch"   # sticky 会话名（会话丢失自动重建）
+      # FW_FLARESOLVERR_TIMEOUT_MS: "60000"     # 单次求解预算毫秒
       # 客户端活动 API 鉴权与加密（可选）：
       # - 不设 FW_ACTIVITY_SECRET：公开只读 JSON + ETag/Gzip（吞吐最高，适合套 CDN/Nginx 缓存）
       # - 仅设 FW_ACTIVITY_SECRET：支持 Bearer 或 OverseasApiCrypto 同款 HMAC-SHA256 签名，返回明文 JSON + Gzip

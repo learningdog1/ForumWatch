@@ -345,3 +345,16 @@ R15 把评估默认改成禁思考后，`thinking:{type:"disabled"}` 只对智�
 - **60 帖/段固定切分 → token 预算自适应**：旧 `CATEGORY_REPORT_CHUNK=60` 是小上下文时代遗产——679 帖/天的日报要串 13 次调用（任一段失败整体降级，失败概率随段数放大），月报 15k+ 帖直接撞 `30 段 × 60 帖 = 1800` 上限被「体量过大」降级、永远没有 AI 总结。改为 `chunkByTokenBudget`：`estimateTokens`（CJK×1.2 + 其余×0.3，偏保守=偏高——高估只是多几次调用，低估才有撑爆上下文的风险）对每帖载荷估算，按 `REPORT_INPUT_TOKEN_BUDGET=90k` 贪心打包（段开销 8k 先扣；单帖超预算独立成段不裁剪）。预算取 90k 而不是更大：**必须对 128k 上下文模型也安全**——预算超过用户模型上限的失败模式恰是「整份报告没有 AI 总结」（刚修掉的问题换个马甲回来）。实测：679 帖/天 → 1 次调用；15000 帖/月 → 14 段。段数上限 MAX_MAP_CHUNKS=30 保留为时长护栏（30 × 90k ≈ 2.7M token ≈ 数万帖）。
 - **超时随载荷放大**：大输入的处理时延显著高于小输入，固定 60s 对 90k-token 载荷偏紧。`timeoutForTokens`：60s 底数 + 1s/1k token，封顶 180s（串行 30 段封顶 90 分钟，月报可接受）。
 - **载荷不再省料（带 url + 摘要）**：每帖附 `url` 与 `excerpt`（截 120 字，来源提供时）；prompt 允许 🔥 热点条目附代表帖 markdown 链接、命中日报清单逐条 `[标题](url)`，并严格限定 url 原样取自载荷禁止编造。渲染端（markdown-report）相应增加裸 URL 显式链接化——HTML parse_mode 下客户端对正文裸 URL 的自动识别不可依赖，显式 `<a>` 才稳。降级模板命中行行尾也附裸 url。
+
+---
+
+# 第二十轮决策（2026-11-23，R20：headless 破盾——接入同机 FlareSolverr）
+
+背景：NodeSeek 对 headless 部署（VPS 出口 IP + undici 栈）间歇性弹 Cloudflare 管理挑战。桌面版有 Electron net.fetch Chromium 栈降级（E3 B 计划），headless 版只能 ChallengeError 熔断冷却 5 分钟，冷却期活动详情降级标题入库、列表轮询停摆。裁定：
+
+- **检测口径单一事实源**：`challenge.ts` 抽出纯谓词 `isChallengeResponse`（403 或 cf-mitigated 含 challenge），`assertNotChallenged` 改为其上薄封装；网络层装饰器与 adapter 断言永远同口径。
+- **装饰器位置在 FetchLike 边界（`src/main/net/cf-solver.ts`）**：`createCfSolvingFetch(base, {solver})` 包住 site GET 通道（nodeseek html / v2ex json / rss / 活动详情四条 fetch 闭包），调用方零感知。POST/通知/AI 通道不装饰。
+- **双路径**：被挑战 → FlareSolverr `request.get`（sticky 会话，默认名 `forumwatch`）浏览器直出响应体直接作为本次返回；同时缓存 `cf_clearance`+配套 UA，后续请求优先「直连+注入会话」快路径（UA 原样覆盖——clearance 绑定 UA+IP，FlareSolverr 与本容器同宿主出口天然同 IP）。快路径再被挑战 → 自动重解刷新缓存；缓存按 cookie expires 计算到期（钳制 [60s, 45min]）。
+- **故障不致命**：会话级错误（janitor 回收/浏览器被 TERM/容器重启）销毁重建重试一次；"Challenge not solved"（交互式挑战）确定性失败不重试；仍失败进 120s 静默期——期间被挑战响应**原样返回**，既有 ChallengeError 熔断语义分毫不动。求解全局串行（单浏览器不容并发命令）。
+- **装配开关**：`FW_FLARESOLVERR_URL`（空=禁用，行为与旧版逐字节一致）；`FW_FLARESOLVERR_SESSION` / `FW_FLARESOLVERR_TIMEOUT_MS` 微调。桌面版不接线（已有 Chromium 栈降级）。
+- **部署侧配套（bero69o）**：flaresolverr 容器以别名 `flaresolverr` 接入共享网络 `flaresolverr-shared`（systemd oneshot 守护重连）；会话治理 janitor 白名单 `forumwatch` 前缀。
